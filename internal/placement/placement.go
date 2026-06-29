@@ -43,14 +43,21 @@ type Sibling struct {
 	SeriesIndex float64
 }
 
-// Input is everything Suggest needs about the book being placed.
+// Input is everything Suggest (and the template engine) needs about the book
+// being placed. Auto mode uses Author/Title/SeriesName/Sequence/Filename/Siblings;
+// the extra metadata (TitleShort/ASIN/Narrator/Year) is consumed only by template
+// variables (see SuggestWith).
 type Input struct {
-	Author      string // from OpenAudible metadata
-	Title       string // clean folder title (OpenAudible title_short preferred)
+	Author      string // from metadata
+	Title       string // clean folder title (short title preferred for Auto mode)
+	TitleShort  string // optional; template {TitleShort} (falls back to Title)
 	SeriesName  string // empty for standalones
 	Sequence    float64
 	HasSequence bool
-	Filename    string    // original m4b filename, e.g. "Waybound - Cradle, Book 12.m4b"
+	Filename    string    // original audio filename, e.g. "Waybound - Cradle, Book 12.m4b"
+	ASIN        string    // template {ASIN}
+	Narrator    string    // template {Narrator}
+	Year        string    // template {Year}
 	Siblings    []Sibling // existing books in this author+series (may be empty)
 }
 
