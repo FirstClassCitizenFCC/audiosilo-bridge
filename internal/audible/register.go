@@ -13,9 +13,18 @@ import (
 
 type registerBody struct {
 	RequestedTokenType  []string          `json:"requested_token_type"`
+	Cookies             registerCookies   `json:"cookies"`
 	RegistrationData    map[string]string `json:"registration_data"`
 	AuthData            map[string]string `json:"auth_data"`
 	RequestedExtensions []string          `json:"requested_extensions"`
+}
+
+// registerCookies is required by /auth/register whenever website/store cookie
+// token types are requested; omitting it makes Amazon reject with MissingValue.
+// website_cookies must serialize as [] (not null), so the slice is non-nil.
+type registerCookies struct {
+	WebsiteCookies []string `json:"website_cookies"`
+	Domain         string   `json:"domain"`
 }
 
 type registerResp struct {
@@ -48,12 +57,13 @@ type registerResp struct {
 // credentials (the second phase of login). This hits Amazon and cannot be unit
 // tested against the live service.
 func Register(ctx context.Context, mp Marketplace, code string, pkce PKCE, serial string) (Credentials, error) {
-	return register(ctx, "https://"+mp.APIDomain(), mp, code, pkce, serial)
+	return register(ctx, "https://"+mp.AmazonAPIDomain(), mp, code, pkce, serial)
 }
 
 func register(ctx context.Context, baseURL string, mp Marketplace, code string, pkce PKCE, serial string) (Credentials, error) {
 	body, err := json.Marshal(registerBody{
-		RequestedTokenType: []string{"bearer", "mac_dms", "store_authentication_cookie", "website_cookies"},
+		RequestedTokenType: []string{"bearer", "mac_dms", "website_cookies", "store_authentication_cookie"},
+		Cookies:            registerCookies{WebsiteCookies: []string{}, Domain: mp.CookieDomain()},
 		RegistrationData: map[string]string{
 			"domain":           "Device",
 			"app_version":      "3.56.2",

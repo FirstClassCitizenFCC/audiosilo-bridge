@@ -44,6 +44,19 @@ func TestLoginURLAndParse(t *testing.T) {
 	}
 }
 
+func TestMarketplaceDomains(t *testing.T) {
+	uk, _ := MarketplaceFor("uk")
+	if uk.AmazonAPIDomain() != "api.amazon.co.uk" {
+		t.Errorf("AmazonAPIDomain = %q", uk.AmazonAPIDomain())
+	}
+	if uk.APIDomain() != "api.audible.co.uk" {
+		t.Errorf("APIDomain = %q", uk.APIDomain())
+	}
+	if uk.CookieDomain() != ".amazon.co.uk" {
+		t.Errorf("CookieDomain = %q", uk.CookieDomain())
+	}
+}
+
 func TestClientLibrary(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/1.0/library" {
@@ -124,6 +137,21 @@ func TestRegisterParse(t *testing.T) {
 		if r.URL.Path != "/auth/register" {
 			http.NotFound(w, r)
 			return
+		}
+		// Assert the registration body carries the required cookies object and the
+		// auth code/verifier — omitting cookies is what triggers Amazon MissingValue.
+		var sent registerBody
+		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+			t.Fatalf("decode register body: %v", err)
+		}
+		if sent.Cookies.Domain != ".amazon.com" {
+			t.Errorf("cookies.domain = %q, want .amazon.com", sent.Cookies.Domain)
+		}
+		if sent.Cookies.WebsiteCookies == nil {
+			t.Error("cookies.website_cookies must be [] not null")
+		}
+		if sent.AuthData["authorization_code"] != "CODE" || sent.AuthData["code_verifier"] != "v" {
+			t.Errorf("auth_data not carried through: %+v", sent.AuthData)
 		}
 		resp := map[string]any{"response": map[string]any{"success": map[string]any{
 			"tokens": map[string]any{
