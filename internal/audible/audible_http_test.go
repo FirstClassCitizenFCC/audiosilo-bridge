@@ -153,6 +153,11 @@ func TestRegisterParse(t *testing.T) {
 		if sent.AuthData["authorization_code"] != "CODE" || sent.AuthData["code_verifier"] != "v" {
 			t.Errorf("auth_data not carried through: %+v", sent.AuthData)
 		}
+		// The device name must carry the de-dupe macro, else a retry after a
+		// partial first registration fails with DuplicateDeviceName.
+		if !strings.Contains(sent.RegistrationData["device_name"], "%DUPE_STRATEGY_1ST%") {
+			t.Errorf("device_name missing de-dupe macro: %q", sent.RegistrationData["device_name"])
+		}
 		resp := map[string]any{"response": map[string]any{"success": map[string]any{
 			"tokens": map[string]any{
 				"bearer":  map[string]any{"access_token": "AT", "refresh_token": "RT", "expires_in": "3600"},
