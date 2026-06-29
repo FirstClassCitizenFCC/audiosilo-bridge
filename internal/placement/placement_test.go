@@ -1,0 +1,174 @@
+package placement
+
+import "testing"
+
+func TestSuggest(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       Input
+		wantPath string // expected full path (folder/filename)
+		wantKind Kind
+	}{
+		{
+			name: "cradle next book anchors on siblings",
+			in: Input{
+				Author: "Will Wight", Title: "Waybound", SeriesName: "Cradle",
+				Sequence: 12, HasSequence: true, Filename: "Waybound - Cradle, Book 12.m4b",
+				Siblings: []Sibling{
+					{RelPath: "Will Wight/Cradle/C01 - Unsouled", SeriesIndex: 1},
+					{RelPath: "Will Wight/Cradle/C08 - Wintersteel", SeriesIndex: 8},
+				},
+			},
+			wantPath: "Will Wight/Cradle/C12 - Waybound/Waybound - Cradle, Book 12.m4b",
+			wantKind: SeriesExisting,
+		},
+		{
+			name: "novella keeps fractional position and padding",
+			in: Input{
+				Author: "Brandon Sanderson", Title: "Edgedancer", SeriesName: "Stormlight Archive",
+				Sequence: 2.5, HasSequence: true, Filename: "Edgedancer.m4b",
+				Siblings: []Sibling{
+					{RelPath: "Brandon Sanderson/Stormlight Archive/SA01 - The Way of Kings", SeriesIndex: 1},
+					{RelPath: "Brandon Sanderson/Stormlight Archive/SA05 - Wind and Truth", SeriesIndex: 5},
+				},
+			},
+			wantPath: "Brandon Sanderson/Stormlight Archive/SA02.5 - Edgedancer/Edgedancer.m4b",
+			wantKind: SeriesExisting,
+		},
+		{
+			name: "large series keeps two-digit padding",
+			in: Input{
+				Author: "B.V. Larson", Title: "Throne World", SeriesName: "Undying Mercenaries",
+				Sequence: 21, HasSequence: true, Filename: "Throne World - Undying Mercenaries, Book 21.m4b",
+				Siblings: []Sibling{
+					{RelPath: "B.V. Larson/Undying Mercenaries/UM01 - Steel World", SeriesIndex: 1},
+					{RelPath: "B.V. Larson/Undying Mercenaries/UM20 - Crystal World", SeriesIndex: 20},
+				},
+			},
+			wantPath: "B.V. Larson/Undying Mercenaries/UM21 - Throne World/Throne World - Undying Mercenaries, Book 21.m4b",
+			wantKind: SeriesExisting,
+		},
+		{
+			name: "multi-letter shortcode (FWM)",
+			in: Input{
+				Author: "Shirtaloon", Title: "He Who Fights with Monsters 12", SeriesName: "He Who Fights With Monsters",
+				Sequence: 12, HasSequence: true, Filename: "HWFWM 12.m4b",
+				Siblings: []Sibling{
+					{RelPath: "Shirtaloon/He Who Fights WIth Monsters/FWM01 - He Who Fights With Monsters - Book 1", SeriesIndex: 1},
+					{RelPath: "Shirtaloon/He Who Fights WIth Monsters/FWM10 - He Who Fights With Monsters - Book 10", SeriesIndex: 10},
+				},
+			},
+			// Folder names (incl. the "WIth" typo) come verbatim from the sibling.
+			wantPath: "Shirtaloon/He Who Fights WIth Monsters/FWM12 - He Who Fights with Monsters 12/HWFWM 12.m4b",
+			wantKind: SeriesExisting,
+		},
+		{
+			name: "universe nesting preserves middle segments",
+			in: Input{
+				Author: "Robin Hobb", Title: "Ship of Destiny", SeriesName: "Liveship Traders",
+				Sequence: 3, HasSequence: true, Filename: "Ship of Destiny.m4b",
+				Siblings: []Sibling{
+					{RelPath: "Robin Hobb/Realms of the Elderlings/02 - Liveship Traders/LT01 - Ship of Magic", SeriesIndex: 1},
+					{RelPath: "Robin Hobb/Realms of the Elderlings/02 - Liveship Traders/LT02 - Mad Ship", SeriesIndex: 2},
+				},
+			},
+			wantPath: "Robin Hobb/Realms of the Elderlings/02 - Liveship Traders/LT03 - Ship of Destiny/Ship of Destiny.m4b",
+			wantKind: SeriesExisting,
+		},
+		{
+			name: "new series guesses shortcode from initials",
+			in: Input{
+				Author: "Jane Doe", Title: "First Light", SeriesName: "Stormlight Archive",
+				Sequence: 1, HasSequence: true, Filename: "First Light.m4b",
+			},
+			wantPath: "Jane Doe/Stormlight Archive/SA01 - First Light/First Light.m4b",
+			wantKind: SeriesNew,
+		},
+		{
+			name: "new single-word series uses leading letter",
+			in: Input{
+				Author: "Will Wight", Title: "Unsouled", SeriesName: "Cradle",
+				Sequence: 1, HasSequence: true, Filename: "Unsouled.m4b",
+			},
+			wantPath: "Will Wight/Cradle/C01 - Unsouled/Unsouled.m4b",
+			wantKind: SeriesNew,
+		},
+		{
+			name: "standalone placed under author",
+			in: Input{
+				Author: "Brandon Sanderson", Title: "Warbreaker", SeriesName: "",
+				Filename: "Warbreaker (Unabridged).m4b",
+			},
+			wantPath: "Brandon Sanderson/Warbreaker/Warbreaker (Unabridged).m4b",
+			wantKind: Standalone,
+		},
+		{
+			name: "non-shortcode series style is reproduced",
+			in: Input{
+				Author: "Lois McMaster Bujold", Title: "Memory", SeriesName: "Vorkosigan Saga",
+				Sequence: 10, HasSequence: true, Filename: "Memory.m4b",
+				Siblings: []Sibling{
+					{RelPath: "Lois McMaster Bujold/Vorkosigan Saga/Vorkosigan Saga 01 - Shards of Honor", SeriesIndex: 1},
+					{RelPath: "Lois McMaster Bujold/Vorkosigan Saga/Vorkosigan Saga 09 - Mirror Dance", SeriesIndex: 9},
+				},
+			},
+			wantPath: "Lois McMaster Bujold/Vorkosigan Saga/Vorkosigan Saga 10 - Memory/Memory.m4b",
+			wantKind: SeriesExisting,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Suggest(tt.in)
+			if got.FullPath() != tt.wantPath {
+				t.Errorf("path:\n got: %q\nwant: %q", got.FullPath(), tt.wantPath)
+			}
+			if got.Kind != tt.wantKind {
+				t.Errorf("kind: got %v, want %v", got.Kind, tt.wantKind)
+			}
+		})
+	}
+}
+
+func TestParseCode(t *testing.T) {
+	tests := []struct {
+		code       string
+		wantPrefix string
+		wantWidth  int
+		wantOK     bool
+	}{
+		{"C08", "C", 2, true},
+		{"FWM01", "FWM", 2, true},
+		{"SA02.5", "SA", 2, true},
+		{"UM21", "UM", 2, true},
+		{"Vorkosigan Saga 01", "Vorkosigan Saga ", 2, true},
+		{"Warbreaker", "", 0, false},
+	}
+	for _, tt := range tests {
+		p, w, ok := parseCode(tt.code)
+		if p != tt.wantPrefix || w != tt.wantWidth || ok != tt.wantOK {
+			t.Errorf("parseCode(%q) = (%q,%d,%v), want (%q,%d,%v)",
+				tt.code, p, w, ok, tt.wantPrefix, tt.wantWidth, tt.wantOK)
+		}
+	}
+}
+
+func TestFormatSequence(t *testing.T) {
+	tests := []struct {
+		seq   float64
+		width int
+		want  string
+	}{
+		{12, 2, "12"},
+		{1, 2, "01"},
+		{2.5, 2, "02.5"},
+		{21, 2, "21"},
+		{105, 2, "105"},
+		{3, 3, "003"},
+	}
+	for _, tt := range tests {
+		if got := formatSequence(tt.seq, tt.width); got != tt.want {
+			t.Errorf("formatSequence(%v,%d) = %q, want %q", tt.seq, tt.width, got, tt.want)
+		}
+	}
+}
