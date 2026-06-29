@@ -50,7 +50,7 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 			SeriesName:  rec.Series,
 			Sequence:    rec.Sequence,
 			HasSequence: rec.HasSequence,
-			Filename:    filepath.Base(rec.SrcPath),
+			Filename:    recordFileName(rec),
 			ASIN:        rec.ASIN,
 			Narrator:    rec.Narrator,
 			Year:        rec.Year,
@@ -75,6 +75,15 @@ func folderTitle(rec source.Record) string {
 		return t
 	}
 	return rec.Title
+}
+
+// recordFileName is the destination file name: the record's explicit FileName (set
+// by download-on-demand sources like Audible), else the source file's basename.
+func recordFileName(rec source.Record) string {
+	if rec.FileName != "" {
+		return rec.FileName
+	}
+	return filepath.Base(rec.SrcPath)
 }
 
 // existsOnServer reports whether the book is already present — matched by ASIN when

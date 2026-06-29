@@ -8,6 +8,7 @@ import "context"
 // Record is normalized metadata for one importable audiobook file.
 type Record struct {
 	SrcPath     string // absolute path on this machine ("" until Acquire for fetch sources)
+	FileName    string // destination file name (for fetch sources where SrcPath is empty)
 	Title       string
 	TitleShort  string
 	Author      string
