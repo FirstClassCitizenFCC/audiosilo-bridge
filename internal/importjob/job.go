@@ -25,6 +25,10 @@ type PlannedItem struct {
 type PlanOptions struct {
 	Mode     placement.Mode
 	Template string // used when Mode == placement.ModeTemplate
+	// SkipExistsCheck computes destinations without the per-book server search.
+	// Used by the Audible pre-flight, which checks existence in bulk instead (see
+	// MatchInBooks) so it doesn't issue one search per book.
+	SkipExistsCheck bool
 }
 
 // Plan computes a destination and an existence check for each record against a
@@ -59,15 +63,38 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 		if err != nil {
 			return nil, err
 		}
+		exists := false
+		if !opts.SkipExistsCheck {
+			exists = existsOnServer(ctx, c, rec)
+		}
 		items = append(items, PlannedItem{
 			Record:         rec,
 			RelPath:        path.Join(sug.RelPath, sug.Filename),
 			Kind:           sug.Kind.String(),
 			Note:           sug.Note,
-			ExistsOnServer: existsOnServer(ctx, c, rec),
+			ExistsOnServer: exists,
 		})
 	}
 	return items, nil
+}
+
+// MatchInBooks finds the server book corresponding to rec within an already-fetched
+// list — by ASIN when both have one, otherwise by normalized author + title. The
+// Audible pre-flight and stats sync fetch a library's books once and match locally,
+// rather than issuing a search per book.
+func MatchInBooks(books []serverapi.Book, rec source.Record) (serverapi.Book, bool) {
+	for _, b := range books {
+		if rec.ASIN != "" && b.ASIN != "" && strings.EqualFold(rec.ASIN, b.ASIN) {
+			return b, true
+		}
+	}
+	for _, b := range books {
+		if sameNorm(b.Author, rec.Author) &&
+			(sameNorm(b.Title, rec.Title) || sameNorm(b.Title, rec.TitleShort)) {
+			return b, true
+		}
+	}
+	return serverapi.Book{}, false
 }
 
 func folderTitle(rec source.Record) string {
