@@ -42,6 +42,12 @@ type PlanOptions struct {
 // mirrors the established folder/shortcode convention.
 func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
 	items := make([]PlannedItem, 0, len(recs))
+	// Build the bulk-match candidate list once (not per record) for the local
+	// existence check.
+	var matcher *BookMatcher
+	if opts.Books != nil {
+		matcher = NewBookMatcher(opts.Books)
+	}
 	for _, rec := range recs {
 		var siblings []placement.Sibling
 		if strings.TrimSpace(rec.Series) != "" {
@@ -80,8 +86,8 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 		}
 		exists := false
 		if !opts.SkipExistsCheck {
-			if opts.Books != nil {
-				_, exists = MatchInBooks(opts.Books, rec)
+			if matcher != nil {
+				_, exists = matcher.Match(rec)
 			} else {
 				exists = existsOnServer(ctx, c, rec)
 			}
@@ -97,25 +103,43 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 	return items, nil
 }
 
-// MatchInBooks finds the server book corresponding to rec within an already-fetched
-// list, via the shared pkg/match matcher (ASIN → author + series + series-stripped
-// title-token overlap, with the sequence parsed from the title when the server's
-// index is 0). The matcher is shared with the server so both sides identify the same
-// book identically. The pre-flight, import skip-check, and stats sync all go through
-// here.
-func MatchInBooks(books []serverapi.Book, rec source.Record) (serverapi.Book, bool) {
+// BookMatcher matches records against a fixed server-book list via the shared
+// pkg/match matcher. It converts the candidate slice once so matching many records
+// against the same library is O(library) instead of O(records × library) — the
+// pre-flight and stats-sync loops match the whole Audible library against it.
+type BookMatcher struct {
+	books []serverapi.Book
+	cands []match.Book
+}
+
+// NewBookMatcher builds a matcher over an already-fetched library book list.
+func NewBookMatcher(books []serverapi.Book) *BookMatcher {
 	cands := make([]match.Book, len(books))
 	for i, b := range books {
 		cands[i] = match.Book{Title: b.Title, Author: b.Author, Series: b.Series, SeriesIndex: b.SeriesIndex, ASIN: b.ASIN}
 	}
-	i, ok := match.Best(cands, match.Query{
+	return &BookMatcher{books: books, cands: cands}
+}
+
+// Match finds the server book corresponding to rec (ASIN → author + series +
+// series-stripped title-token overlap, sequence parsed from the title when the
+// server's index is 0). The matcher is shared with the server so both sides
+// identify the same book identically.
+func (m *BookMatcher) Match(rec source.Record) (serverapi.Book, bool) {
+	i, ok := match.Best(m.cands, match.Query{
 		Title: rec.Title, TitleShort: rec.TitleShort, Author: rec.Author,
 		Series: rec.Series, Sequence: rec.Sequence, HasSequence: rec.HasSequence, ASIN: rec.ASIN,
 	})
 	if !ok {
 		return serverapi.Book{}, false
 	}
-	return books[i], true
+	return m.books[i], true
+}
+
+// MatchInBooks is a one-shot match over books (the per-book existence path). For
+// repeated matching against the same library, build a BookMatcher once and reuse it.
+func MatchInBooks(books []serverapi.Book, rec source.Record) (serverapi.Book, bool) {
+	return NewBookMatcher(books).Match(rec)
 }
 
 func recordFileName(rec source.Record) string {
