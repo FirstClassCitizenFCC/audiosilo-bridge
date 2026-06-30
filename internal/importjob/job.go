@@ -9,6 +9,7 @@ import (
 	"github.com/kodestar/audiosilo-manager/internal/placement"
 	"github.com/kodestar/audiosilo-manager/internal/serverapi"
 	"github.com/kodestar/audiosilo-manager/internal/source"
+	"github.com/kodestar/audiosilo-server/pkg/match"
 )
 
 // PlannedItem is one import candidate with its computed destination and whether it
@@ -57,10 +58,14 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 				siblings = append(siblings, placement.Sibling{RelPath: b.RelPath, SeriesIndex: b.SeriesIndex})
 			}
 		}
+		// Name by the clean book title — strip the series prefix and "(Book N)" /
+		// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
+		// Truth", not "… - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
+		clean := match.CleanTitle(rec.Title, rec.Series)
 		sug, err := placement.SuggestWith(opts.Mode, opts.Template, placement.Input{
 			Author:      rec.Author,
-			Title:       folderTitle(rec),
-			TitleShort:  rec.TitleShort,
+			Title:       clean,
+			TitleShort:  clean,
 			SeriesName:  rec.Series,
 			Sequence:    rec.Sequence,
 			HasSequence: rec.HasSequence,
@@ -93,33 +98,26 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 }
 
 // MatchInBooks finds the server book corresponding to rec within an already-fetched
-// list — by ASIN when both have one, otherwise by normalized author + title. The
-// Audible pre-flight and stats sync fetch a library's books once and match locally,
-// rather than issuing a search per book.
+// list, via the shared pkg/match matcher (ASIN → author + series + series-stripped
+// title-token overlap, with the sequence parsed from the title when the server's
+// index is 0). The matcher is shared with the server so both sides identify the same
+// book identically. The pre-flight, import skip-check, and stats sync all go through
+// here.
 func MatchInBooks(books []serverapi.Book, rec source.Record) (serverapi.Book, bool) {
-	for _, b := range books {
-		if rec.ASIN != "" && b.ASIN != "" && strings.EqualFold(rec.ASIN, b.ASIN) {
-			return b, true
-		}
+	cands := make([]match.Book, len(books))
+	for i, b := range books {
+		cands[i] = match.Book{Title: b.Title, Author: b.Author, Series: b.Series, SeriesIndex: b.SeriesIndex, ASIN: b.ASIN}
 	}
-	for _, b := range books {
-		if sameNorm(b.Author, rec.Author) &&
-			(sameNorm(b.Title, rec.Title) || sameNorm(b.Title, rec.TitleShort)) {
-			return b, true
-		}
+	i, ok := match.Best(cands, match.Query{
+		Title: rec.Title, TitleShort: rec.TitleShort, Author: rec.Author,
+		Series: rec.Series, Sequence: rec.Sequence, HasSequence: rec.HasSequence, ASIN: rec.ASIN,
+	})
+	if !ok {
+		return serverapi.Book{}, false
 	}
-	return serverapi.Book{}, false
+	return books[i], true
 }
 
-func folderTitle(rec source.Record) string {
-	if t := strings.TrimSpace(rec.TitleShort); t != "" {
-		return t
-	}
-	return rec.Title
-}
-
-// recordFileName is the destination file name: the record's explicit FileName (set
-// by download-on-demand sources like Audible), else the source file's basename.
 func recordFileName(rec source.Record) string {
 	if rec.FileName != "" {
 		return rec.FileName
@@ -128,9 +126,10 @@ func recordFileName(rec source.Record) string {
 }
 
 // existsOnServer reports whether the book is already present — matched by ASIN when
-// available, otherwise by author + title (tolerant normalization).
+// available, otherwise by author + title (tolerant normalization). Used only on the
+// per-book query path (no pre-fetched book list); the bulk path uses MatchInBooks.
 func existsOnServer(ctx context.Context, c *serverapi.Client, rec source.Record) bool {
-	q := folderTitle(rec)
+	q := strings.TrimSpace(rec.TitleShort)
 	if q == "" {
 		q = rec.Title
 	}
@@ -138,16 +137,6 @@ func existsOnServer(ctx context.Context, c *serverapi.Client, rec source.Record)
 	if err != nil {
 		return false
 	}
-	for _, cand := range candidates {
-		if rec.ASIN != "" && cand.ASIN != "" && strings.EqualFold(rec.ASIN, cand.ASIN) {
-			return true
-		}
-		if sameNorm(cand.Author, rec.Author) &&
-			(sameNorm(cand.Title, rec.Title) || sameNorm(cand.Title, rec.TitleShort)) {
-			return true
-		}
-	}
-	return false
+	_, ok := MatchInBooks(candidates, rec)
+	return ok
 }
-
-func sameNorm(a, b string) bool { return normalize(a) == normalize(b) && normalize(a) != "" }

@@ -68,6 +68,9 @@ func normalizeSeries(s string) string {
 	return normalize(t)
 }
 
+// sameNorm reports whether two strings are equal after tolerant normalization.
+func sameNorm(a, b string) bool { return normalize(a) == normalize(b) && normalize(a) != "" }
+
 // normalize lowercases and strips non-alphanumeric runes for tolerant matching.
 func normalize(s string) string {
 	var b strings.Builder
