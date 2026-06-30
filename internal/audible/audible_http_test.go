@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -127,6 +128,51 @@ func TestClientLicense(t *testing.T) {
 	}
 	if k != "aaaa1111bbbb2222cccc3333dddd4444" || iv2 != "4444dddd3333cccc2222bbbb1111aaaa" {
 		t.Fatalf("voucher key/iv = %q / %q", k, iv2)
+	}
+}
+
+func TestDownloadIsSigned(t *testing.T) {
+	// The content-delivery GET must be RSA-signed and carry the Audible user agent,
+	// or Audible's CDS returns HTTP 403 (the bug an unsigned plain GET hit). Also
+	// verify a redirect is followed and re-signed for the new path.
+	var gotSig, gotUA, redirectSig bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/content.aaxc":
+			if r.Header.Get("x-adp-token") == "ADP" && r.Header.Get("x-adp-signature") != "" {
+				gotSig = true
+			}
+			if r.Header.Get("User-Agent") == userAgent {
+				gotUA = true
+			}
+			http.Redirect(w, r, "/cdn/file.aaxc", http.StatusFound)
+		case "/cdn/file.aaxc":
+			// The redirected request must be re-signed for the new path.
+			if r.Header.Get("x-adp-signature") != "" {
+				redirectSig = true
+			}
+			_, _ = w.Write([]byte("AUDIO-BYTES"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	dest := t.TempDir() + "/out.m4b"
+	if err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/content.aaxc", dest); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if !gotSig {
+		t.Error("download request was not RSA-signed (would 403 against Audible CDS)")
+	}
+	if !gotUA {
+		t.Error("download request did not carry the Audible user agent")
+	}
+	if !redirectSig {
+		t.Error("redirected request was not re-signed")
+	}
+	if b, _ := os.ReadFile(dest); string(b) != "AUDIO-BYTES" {
+		t.Fatalf("downloaded content = %q", b)
 	}
 }
 

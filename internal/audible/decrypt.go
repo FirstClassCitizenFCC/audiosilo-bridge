@@ -12,22 +12,29 @@ import (
 // decryption options precede -i (they are input/demuxer options). Requires ffmpeg
 // ≥ 4.4 for the audible_key/audible_iv options.
 func aaxcArgs(in, key, iv, out string) []string {
-	return []string{
+	return append([]string{
 		"-audible_key", key, "-audible_iv", iv,
 		"-i", in,
-		"-map", "0", "-map_metadata", "0",
-		"-c", "copy", "-movflags", "+faststart",
-		"-y", out,
-	}
+	}, remuxArgs(out)...)
 }
 
 // aaxArgs builds ffmpeg arguments to decrypt a legacy AAX file with the
 // account-wide activation bytes (8 hex).
 func aaxArgs(in, activationBytes, out string) []string {
-	return []string{
+	return append([]string{
 		"-activation_bytes", activationBytes,
 		"-i", in,
-		"-map", "0", "-map_metadata", "0",
+	}, remuxArgs(out)...)
+}
+
+// remuxArgs are the shared output args for a lossless copy to m4b. It maps the
+// audio and (optionally) the cover image, but NOT data/text streams: an AAXC can
+// carry a timed-text/data stream that the ipod (m4b) muxer can't write, which
+// failed the whole conversion ("Tag text incompatible with output codec id …;
+// Could not write header"). Chapters and global metadata are still copied.
+func remuxArgs(out string) []string {
+	return []string{
+		"-map", "0:a", "-map", "0:v?", "-map_metadata", "0",
 		"-c", "copy", "-movflags", "+faststart",
 		"-y", out,
 	}

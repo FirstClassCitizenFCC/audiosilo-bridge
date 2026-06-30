@@ -40,6 +40,14 @@ func (s *Source) Acquire(ctx context.Context, rec source.Record) (string, func()
 	if err != nil {
 		return "", nil, err
 	}
+	// MkdirTemp needs its parent to exist; the app's audible-tmp dir isn't created
+	// elsewhere, so ensure it here (the failure was "stat …/audible-tmp: no such
+	// file or directory").
+	if s.tmpDir != "" {
+		if err := os.MkdirAll(s.tmpDir, 0o700); err != nil {
+			return "", nil, err
+		}
+	}
 	tmp, err := os.MkdirTemp(s.tmpDir, "audible-")
 	if err != nil {
 		return "", nil, err

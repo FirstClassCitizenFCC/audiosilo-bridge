@@ -8,16 +8,37 @@ import (
 	"os"
 )
 
-// Download fetches a (presigned) content URL to dest. The URL carries its own auth,
-// so the request is not signed.
+// userAgent mimics the Audible iOS app, matching the reference clients
+// (audible-cli sets the same on its session). Some Audible/CDN endpoints reject
+// the default Go user agent.
+const userAgent = "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0"
+
+// Download fetches a content URL to dest. The content-delivery URL is served by
+// Audible's CDS and validates the same device RSA signature as the API — audible-cli
+// downloads it with the authenticated session, not a plain GET, so an unsigned
+// request returns HTTP 403. We sign the request (and re-sign on each redirect, since
+// a redirect to a presigned CDN ignores the headers but a redirect to another CDS
+// path needs a fresh signature for that path).
 func (c *Client) Download(ctx context.Context, downloadURL, dest string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return err
 	}
+	if err := c.signGet(req); err != nil {
+		return err
+	}
 	// A dedicated client with no overall timeout — a large audiobook can exceed the
-	// API client's per-request timeout; cancellation is governed by ctx.
-	resp, err := (&http.Client{}).Do(req)
+	// API client's per-request timeout; cancellation is governed by ctx. Redirects
+	// (CDS → CDN) are followed, re-signed for the new URL.
+	client := &http.Client{
+		CheckRedirect: func(r *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			return c.signGet(r)
+		},
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -35,4 +56,10 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// signGet sets the Audible user agent and an RSA signature for a GET request's URL.
+func (c *Client) signGet(req *http.Request) error {
+	req.Header.Set("User-Agent", userAgent)
+	return signRequest(req, nil, c.key, c.creds.ADPToken, c.now())
 }
