@@ -34,6 +34,25 @@ func FindSiblings(ctx context.Context, c *serverapi.Client, libraryID int64, aut
 	return out, nil
 }
 
+// SiblingsFromBooks is the local equivalent of FindSiblings: it filters an
+// already-fetched library book list to the same author + (tolerantly-normalized)
+// series, instead of issuing a query. The Audible pre-flight (and bulk import) hold
+// the whole library in memory, so matching locally avoids one request per book —
+// which otherwise trips the server's rate limiter (HTTP 429) on a large library.
+func SiblingsFromBooks(books []serverapi.Book, author, series string) []serverapi.Book {
+	if strings.TrimSpace(series) == "" {
+		return nil
+	}
+	target := normalizeSeries(series)
+	var out []serverapi.Book
+	for _, b := range books {
+		if sameNorm(b.Author, author) && normalizeSeries(b.Series) == target {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
 // normalizeSeries normalizes a series name for tolerant matching, additionally
 // dropping a leading article so "The Primal Hunter" and "Primal Hunter" compare
 // equal. The article is stripped as a whole word before punctuation/spaces are

@@ -29,6 +29,11 @@ type PlanOptions struct {
 	// Used by the Audible pre-flight, which checks existence in bulk instead (see
 	// MatchInBooks) so it doesn't issue one search per book.
 	SkipExistsCheck bool
+	// Books is the library's books, pre-fetched in one call. When set, Plan matches
+	// siblings AND existence locally against this list instead of issuing a query
+	// per record — essential for a large library, where per-book queries trip the
+	// server's rate limiter (HTTP 429). When nil, Plan queries the server per book.
+	Books []serverapi.Book
 }
 
 // Plan computes a destination and an existence check for each record against a
@@ -39,9 +44,14 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 	for _, rec := range recs {
 		var siblings []placement.Sibling
 		if strings.TrimSpace(rec.Series) != "" {
-			found, err := FindSiblings(ctx, c, libraryID, rec.Author, rec.Series)
-			if err != nil {
-				return nil, err
+			var found []serverapi.Book
+			if opts.Books != nil {
+				found = SiblingsFromBooks(opts.Books, rec.Author, rec.Series)
+			} else {
+				var err error
+				if found, err = FindSiblings(ctx, c, libraryID, rec.Author, rec.Series); err != nil {
+					return nil, err
+				}
 			}
 			for _, b := range found {
 				siblings = append(siblings, placement.Sibling{RelPath: b.RelPath, SeriesIndex: b.SeriesIndex})
@@ -65,7 +75,11 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 		}
 		exists := false
 		if !opts.SkipExistsCheck {
-			exists = existsOnServer(ctx, c, rec)
+			if opts.Books != nil {
+				_, exists = MatchInBooks(opts.Books, rec)
+			} else {
+				exists = existsOnServer(ctx, c, rec)
+			}
 		}
 		items = append(items, PlannedItem{
 			Record:         rec,
