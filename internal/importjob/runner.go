@@ -17,7 +17,7 @@ type Progress struct {
 	File   string // destination rel path
 	Copied int64  // bytes copied so far (for Status "transferring")
 	Bytes  int64  // total bytes for the current file
-	Status string // "downloading" | "transferring" | "placed" | "skipped" | "error"
+	Status string // "downloading" | "decrypting" | "transferring" | "placed" | "skipped" | "error"
 	Err    string // set when Status == "error"
 }
 
@@ -67,10 +67,13 @@ func Run(ctx context.Context, items []PlannedItem, opts RunOptions) ([]ItemResul
 		src := it.Record.SrcPath
 		var cleanup func()
 		if src == "" && opts.Acquirer != nil {
-			// Acquire (download + DRM-strip) is the longest stage and reports no
-			// sub-progress; emit a status so the UI shows it's working, not stalled.
+			// Acquire (download + DRM-strip) is the longest stage; emit an initial
+			// status immediately (before bytes flow) and let Acquire report the
+			// download %/decrypt sub-stages so the UI shows progress, not a stall.
 			emit("downloading", "", 0, 0)
-			local, cl, err := opts.Acquirer.Acquire(ctx, it.Record)
+			local, cl, err := opts.Acquirer.Acquire(ctx, it.Record, func(stage string, copied, total int64) {
+				emit(stage, "", copied, total)
+			})
 			if err != nil {
 				results = append(results, ItemResult{RelPath: it.RelPath, Err: err.Error()})
 				emit("error", err.Error(), 0, 0)

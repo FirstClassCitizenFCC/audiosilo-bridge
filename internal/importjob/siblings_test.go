@@ -24,6 +24,41 @@ func TestNormalizeSeries(t *testing.T) {
 	}
 }
 
+func TestAuthorFolders(t *testing.T) {
+	m := AuthorFolders([]serverapi.Book{
+		{RelPath: "L.A. McBride/Series/B01 - One", Author: "L.A. McBride"},
+		{RelPath: "L.A. McBride/Series/B02 - Two", Author: "L.A. McBride"},
+		{RelPath: "Will Wight/Cradle/C01 - Unsouled", Author: "Will Wight"},
+		{RelPath: "loose-single-file.m4b", Author: "Nobody"}, // no author folder
+	})
+	// A differently-spaced author resolves to the existing folder spelling.
+	if got := m[normalize("L. A. McBride")]; got != "L.A. McBride" {
+		t.Errorf("author folder (spacing) = %q, want %q", got, "L.A. McBride")
+	}
+	if got := m[normalize("Will Wight")]; got != "Will Wight" {
+		t.Errorf("author folder = %q, want %q", got, "Will Wight")
+	}
+	// An unknown author and a root-level loose file (no folder) have no entry.
+	if got := m[normalize("Jane New")]; got != "" {
+		t.Errorf("unknown author = %q, want empty", got)
+	}
+	if got := m[normalize("Nobody")]; got != "" {
+		t.Errorf("loose-file author = %q, want empty", got)
+	}
+}
+
+func TestAuthorFoldersPicksMostCommon(t *testing.T) {
+	// Two spellings already on the server; the dominant one wins (deterministically).
+	m := AuthorFolders([]serverapi.Book{
+		{RelPath: "L. A. McBride/A/x", Author: "L. A. McBride"},
+		{RelPath: "L.A. McBride/B/y", Author: "L.A. McBride"},
+		{RelPath: "L.A. McBride/C/z", Author: "L.A. McBride"},
+	})
+	if got := m[normalize("L.A. McBride")]; got != "L.A. McBride" {
+		t.Errorf("most-common folder = %q, want %q", got, "L.A. McBride")
+	}
+}
+
 func TestFindSiblings(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

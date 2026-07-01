@@ -35,7 +35,7 @@ func (s *Source) Discover(ctx context.Context) ([]source.Record, error) {
 // a cleanup that removes the temp dir. The encrypted source and the key are never
 // kept (the .aaxc is deleted right after decryption; the m4b is removed by cleanup
 // once the transfer has copied it).
-func (s *Source) Acquire(ctx context.Context, rec source.Record) (string, func(), error) {
+func (s *Source) Acquire(ctx context.Context, rec source.Record, onProgress source.ProgressFunc) (string, func(), error) {
 	dlURL, key, iv, err := s.client.License(ctx, rec.ASIN)
 	if err != nil {
 		return "", nil, err
@@ -55,9 +55,19 @@ func (s *Source) Acquire(ctx context.Context, rec source.Record) (string, func()
 	cleanup := func() { _ = os.RemoveAll(tmp) }
 
 	aaxc := filepath.Join(tmp, rec.ASIN+".aaxc")
-	if err := s.client.Download(ctx, dlURL, aaxc); err != nil {
+	dlProgress := func(copied, total int64) {
+		if onProgress != nil {
+			onProgress("downloading", copied, total)
+		}
+	}
+	if err := s.client.Download(ctx, dlURL, aaxc, dlProgress); err != nil {
 		cleanup()
 		return "", nil, err
+	}
+	// Decryption (ffmpeg DRM-strip) reports no byte progress; flag the stage so the
+	// UI shows "Removing DRM…" instead of a frozen download bar.
+	if onProgress != nil {
+		onProgress("decrypting", 0, 0)
 	}
 	m4b := filepath.Join(tmp, rec.ASIN+".m4b")
 	if err := runFFmpeg(ctx, s.ffmpeg, aaxcArgs(aaxc, key, iv, m4b)); err != nil {

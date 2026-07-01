@@ -59,6 +59,12 @@ type Input struct {
 	Narrator    string    // template {Narrator}
 	Year        string    // template {Year}
 	Siblings    []Sibling // existing books in this author+series (may be empty)
+	// AuthorFolder is an existing author-folder segment on the server for this
+	// (normalized) author, e.g. "L.A. McBride". When set, Auto mode places the book
+	// under it verbatim instead of sanitizing Author afresh — so "L. A. McBride"
+	// doesn't create a second folder alongside "L.A. McBride". Empty when the author
+	// is new to the library (or in template mode, where the template owns the path).
+	AuthorFolder string
 }
 
 // Suggestion is the proposed destination.
@@ -89,11 +95,21 @@ func Suggest(in Input) Suggestion {
 
 func standalone(in Input) Suggestion {
 	return Suggestion{
-		RelPath:  sanitize(in.Author) + "/" + sanitize(in.Title),
+		RelPath:  authorSegment(in) + "/" + sanitize(in.Title),
 		Filename: in.Filename,
 		Kind:     Standalone,
 		Note:     "no series — placed directly under the author",
 	}
+}
+
+// authorSegment returns the author folder to place under: an existing author folder
+// on the server (verbatim, to land in it rather than beside it) when known,
+// otherwise the sanitized record author.
+func authorSegment(in Input) string {
+	if in.AuthorFolder != "" {
+		return in.AuthorFolder
+	}
+	return sanitize(in.Author)
 }
 
 func seriesWithSiblings(in Input) Suggestion {
@@ -124,7 +140,7 @@ func seriesWithSiblings(in Input) Suggestion {
 func seriesNew(in Input) Suggestion {
 	prefix := guessShortcode(in.SeriesName)
 	leaf := buildLeaf(prefix, 2, in)
-	rel := sanitize(in.Author) + "/" + sanitize(in.SeriesName) + "/" + leaf
+	rel := authorSegment(in) + "/" + sanitize(in.SeriesName) + "/" + leaf
 	return Suggestion{
 		RelPath:  rel,
 		Filename: in.Filename,

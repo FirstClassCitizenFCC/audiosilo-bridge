@@ -27,9 +27,15 @@ type Source interface {
 	Discover(ctx context.Context) ([]Record, error)
 }
 
+// ProgressFunc reports sub-progress of an Acquire. stage is "downloading" (copied /
+// total bytes; total is -1 when unknown) or "decrypting" (removing DRM; copied/total
+// are 0, it has no byte progress). It may be called many times; nil is allowed.
+type ProgressFunc func(stage string, copied, total int64)
+
 // Acquirer fetches a record's bytes to a local path before transfer, returning a
 // cleanup to remove the temp file afterward. File-based sources don't implement it
-// (their Record.SrcPath already points at a local file).
+// (their Record.SrcPath already points at a local file). onProgress (may be nil)
+// reports the download/decrypt sub-stages.
 type Acquirer interface {
-	Acquire(ctx context.Context, r Record) (localPath string, cleanup func(), err error)
+	Acquire(ctx context.Context, r Record, onProgress ProgressFunc) (localPath string, cleanup func(), err error)
 }

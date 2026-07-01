@@ -115,6 +115,26 @@ func TestSuggest(t *testing.T) {
 			wantPath: "Lois McMaster Bujold/Vorkosigan Saga/Vorkosigan Saga 10 - Memory/Memory.m4b",
 			wantKind: SeriesExisting,
 		},
+		{
+			// AuthorFolder reuses the server's existing spelling so a differently-
+			// spaced author ("L. A. McBride") lands in the existing "L.A. McBride".
+			name: "standalone reuses existing author folder spelling",
+			in: Input{
+				Author: "L. A. McBride", Title: "Some Standalone", SeriesName: "",
+				Filename: "Some Standalone.m4b", AuthorFolder: "L.A. McBride",
+			},
+			wantPath: "L.A. McBride/Some Standalone/Some Standalone.m4b",
+			wantKind: Standalone,
+		},
+		{
+			name: "new series reuses existing author folder spelling",
+			in: Input{
+				Author: "L. A. McBride", Title: "Book One", SeriesName: "Magic & Mayhem",
+				Sequence: 1, HasSequence: true, Filename: "Book One.m4b", AuthorFolder: "L.A. McBride",
+			},
+			wantPath: "L.A. McBride/Magic & Mayhem/MM01 - Book One/Book One.m4b",
+			wantKind: SeriesNew,
+		},
 	}
 
 	for _, tt := range tests {

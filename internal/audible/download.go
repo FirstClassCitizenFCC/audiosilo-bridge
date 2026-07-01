@@ -19,7 +19,9 @@ const userAgent = "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0"
 // request returns HTTP 403. We sign the request (and re-sign on each redirect, since
 // a redirect to a presigned CDN ignores the headers but a redirect to another CDS
 // path needs a fresh signature for that path).
-func (c *Client) Download(ctx context.Context, downloadURL, dest string) error {
+// onProgress (may be nil) reports bytes copied and the total (Content-Length, or -1
+// when the server sends none), throttled so a large audiobook doesn't flood callers.
+func (c *Client) Download(ctx context.Context, downloadURL, dest string, onProgress func(copied, total int64)) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return err
@@ -50,7 +52,11 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	var src io.Reader = resp.Body
+	if onProgress != nil {
+		src = &progressReader{r: resp.Body, total: resp.ContentLength, cb: onProgress}
+	}
+	if _, err := io.Copy(f, src); err != nil {
 		_ = f.Close()
 		_ = os.Remove(dest)
 		return err
@@ -62,4 +68,28 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string) error {
 func (c *Client) signGet(req *http.Request) error {
 	req.Header.Set("User-Agent", userAgent)
 	return signRequest(req, nil, c.key, c.creds.ADPToken, c.now())
+}
+
+// progressEmitEvery throttles download progress callbacks so a multi-hundred-MB
+// audiobook reports every ~1 MiB (plus a final update at EOF), not per 32 KiB read.
+const progressEmitEvery = 1 << 20
+
+// progressReader counts bytes read from r and reports them to cb (throttled). total
+// is the Content-Length, or -1 when the server sends none.
+type progressReader struct {
+	r        io.Reader
+	total    int64
+	read     int64
+	lastEmit int64
+	cb       func(copied, total int64)
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	p.read += int64(n)
+	if p.read-p.lastEmit >= progressEmitEvery || err != nil {
+		p.lastEmit = p.read
+		p.cb(p.read, p.total)
+	}
+	return n, err
 }

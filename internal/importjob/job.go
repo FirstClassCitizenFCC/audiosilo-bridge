@@ -45,8 +45,13 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 	// Build the bulk-match candidate list once (not per record) for the local
 	// existence check.
 	var matcher *BookMatcher
+	// authorFolders maps normalized author → existing folder spelling, built once so
+	// a differently-spaced author reuses its existing folder (a nil map — the
+	// per-book path — just yields "" on lookup). See AuthorFolders.
+	var authorFolders map[string]string
 	if opts.Books != nil {
 		matcher = NewBookMatcher(opts.Books)
+		authorFolders = AuthorFolders(opts.Books)
 	}
 	for _, rec := range recs {
 		var siblings []placement.Sibling
@@ -69,17 +74,18 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 		// Truth", not "… - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
 		clean := match.CleanTitle(rec.Title, rec.Series)
 		sug, err := placement.SuggestWith(opts.Mode, opts.Template, placement.Input{
-			Author:      rec.Author,
-			Title:       clean,
-			TitleShort:  clean,
-			SeriesName:  rec.Series,
-			Sequence:    rec.Sequence,
-			HasSequence: rec.HasSequence,
-			Filename:    recordFileName(rec),
-			ASIN:        rec.ASIN,
-			Narrator:    rec.Narrator,
-			Year:        rec.Year,
-			Siblings:    siblings,
+			Author:       rec.Author,
+			Title:        clean,
+			TitleShort:   clean,
+			SeriesName:   rec.Series,
+			Sequence:     rec.Sequence,
+			HasSequence:  rec.HasSequence,
+			Filename:     recordFileName(rec),
+			ASIN:         rec.ASIN,
+			Narrator:     rec.Narrator,
+			Year:         rec.Year,
+			Siblings:     siblings,
+			AuthorFolder: authorFolders[normalize(rec.Author)],
 		})
 		if err != nil {
 			return nil, err

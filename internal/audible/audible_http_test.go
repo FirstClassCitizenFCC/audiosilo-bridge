@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -159,7 +160,7 @@ func TestDownloadIsSigned(t *testing.T) {
 	defer ts.Close()
 
 	dest := t.TempDir() + "/out.m4b"
-	if err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/content.aaxc", dest); err != nil {
+	if err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/content.aaxc", dest, nil); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	if !gotSig {
@@ -173,6 +174,38 @@ func TestDownloadIsSigned(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(dest); string(b) != "AUDIO-BYTES" {
 		t.Fatalf("downloaded content = %q", b)
+	}
+}
+
+func TestDownloadReportsProgress(t *testing.T) {
+	body := strings.Repeat("A", 2500)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = w.Write([]byte(body))
+	}))
+	defer ts.Close()
+
+	dest := t.TempDir() + "/out.m4b"
+	var lastCopied, lastTotal int64
+	calls := 0
+	err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/file", dest,
+		func(copied, total int64) {
+			lastCopied, lastTotal = copied, total
+			calls++
+		})
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("progress callback was never called")
+	}
+	// The reader always fires a final update at EOF, so it lands on the exact size
+	// and the Content-Length total.
+	if lastCopied != int64(len(body)) {
+		t.Errorf("final copied = %d, want %d", lastCopied, len(body))
+	}
+	if lastTotal != int64(len(body)) {
+		t.Errorf("final total = %d, want %d", lastTotal, len(body))
 	}
 }
 
