@@ -85,7 +85,7 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 			Narrator:     rec.Narrator,
 			Year:         rec.Year,
 			Siblings:     siblings,
-			AuthorFolder: authorFolders[normalize(rec.Author)],
+			AuthorFolder: authorFolders[match.Normalize(rec.Author)],
 		})
 		if err != nil {
 			return nil, err

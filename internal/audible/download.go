@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+
+	"github.com/kodestar/audiosilo-manager/internal/progress"
 )
 
 // userAgent mimics the Audible iOS app, matching the reference clients
@@ -54,7 +56,7 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, onProgr
 	}
 	var src io.Reader = resp.Body
 	if onProgress != nil {
-		src = &progressReader{r: resp.Body, total: resp.ContentLength, cb: onProgress}
+		src = &progress.Reader{R: resp.Body, Total: resp.ContentLength, CB: onProgress}
 	}
 	if _, err := io.Copy(f, src); err != nil {
 		_ = f.Close()
@@ -68,28 +70,4 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, onProgr
 func (c *Client) signGet(req *http.Request) error {
 	req.Header.Set("User-Agent", userAgent)
 	return signRequest(req, nil, c.key, c.creds.ADPToken, c.now())
-}
-
-// progressEmitEvery throttles download progress callbacks so a multi-hundred-MB
-// audiobook reports every ~1 MiB (plus a final update at EOF), not per 32 KiB read.
-const progressEmitEvery = 1 << 20
-
-// progressReader counts bytes read from r and reports them to cb (throttled). total
-// is the Content-Length, or -1 when the server sends none.
-type progressReader struct {
-	r        io.Reader
-	total    int64
-	read     int64
-	lastEmit int64
-	cb       func(copied, total int64)
-}
-
-func (p *progressReader) Read(b []byte) (int, error) {
-	n, err := p.r.Read(b)
-	p.read += int64(n)
-	if p.read-p.lastEmit >= progressEmitEvery || err != nil {
-		p.lastEmit = p.read
-		p.cb(p.read, p.total)
-	}
-	return n, err
 }

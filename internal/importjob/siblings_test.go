@@ -7,22 +7,8 @@ import (
 	"testing"
 
 	"github.com/kodestar/audiosilo-manager/internal/serverapi"
+	"github.com/kodestar/audiosilo-server/pkg/match"
 )
-
-func TestNormalizeSeries(t *testing.T) {
-	cases := map[string]string{
-		"The Primal Hunter": "primalhunter",
-		"primal hunter":     "primalhunter",
-		"A Court of Thorns": "courtofthorns",
-		"Theory of Magic":   "theoryofmagic", // "the" only stripped as a whole word
-		"  Cradle  ":        "cradle",
-	}
-	for in, want := range cases {
-		if got := normalizeSeries(in); got != want {
-			t.Errorf("normalizeSeries(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
 
 func TestAuthorFolders(t *testing.T) {
 	m := AuthorFolders([]serverapi.Book{
@@ -32,17 +18,17 @@ func TestAuthorFolders(t *testing.T) {
 		{RelPath: "loose-single-file.m4b", Author: "Nobody"}, // no author folder
 	})
 	// A differently-spaced author resolves to the existing folder spelling.
-	if got := m[normalize("L. A. McBride")]; got != "L.A. McBride" {
+	if got := m[match.Normalize("L. A. McBride")]; got != "L.A. McBride" {
 		t.Errorf("author folder (spacing) = %q, want %q", got, "L.A. McBride")
 	}
-	if got := m[normalize("Will Wight")]; got != "Will Wight" {
+	if got := m[match.Normalize("Will Wight")]; got != "Will Wight" {
 		t.Errorf("author folder = %q, want %q", got, "Will Wight")
 	}
 	// An unknown author and a root-level loose file (no folder) have no entry.
-	if got := m[normalize("Jane New")]; got != "" {
+	if got := m[match.Normalize("Jane New")]; got != "" {
 		t.Errorf("unknown author = %q, want empty", got)
 	}
-	if got := m[normalize("Nobody")]; got != "" {
+	if got := m[match.Normalize("Nobody")]; got != "" {
 		t.Errorf("loose-file author = %q, want empty", got)
 	}
 }
@@ -54,7 +40,7 @@ func TestAuthorFoldersPicksMostCommon(t *testing.T) {
 		{RelPath: "L.A. McBride/B/y", Author: "L.A. McBride"},
 		{RelPath: "L.A. McBride/C/z", Author: "L.A. McBride"},
 	})
-	if got := m[normalize("L.A. McBride")]; got != "L.A. McBride" {
+	if got := m[match.Normalize("L.A. McBride")]; got != "L.A. McBride" {
 		t.Errorf("most-common folder = %q, want %q", got, "L.A. McBride")
 	}
 }

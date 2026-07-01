@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/kodestar/audiosilo-manager/internal/audio"
+	"github.com/kodestar/audiosilo-manager/internal/progress"
 )
 
 // SafeJoin resolves rel under root and guarantees the result cannot escape root
@@ -116,6 +117,10 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 			return PlaceResult{}, err
 		}
 	}
+	// Unlike the SFTP backend, Local doesn't align ownership/mode to the existing
+	// library: it runs as the local user writing to a local/mounted path, so new
+	// content is already owned by that user (the umask handles the mode). The SFTP
+	// case needs matching because it can land content as the SSH login user (root).
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return PlaceResult{}, err
 	}
@@ -131,7 +136,7 @@ func (*Local) Close() error { return nil }
 // copyVerified streams src to a temp file in the destination directory, renames it
 // onto dst, and confirms the final size matches the source. ctx cancellation is
 // honored between read chunks; progress (if set) is reported as bytes are written.
-func copyVerified(ctx context.Context, src, dst string, wantSize int64, progress func(int64, int64)) error {
+func copyVerified(ctx context.Context, src, dst string, wantSize int64, onProgress func(int64, int64)) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -146,8 +151,8 @@ func copyVerified(ctx context.Context, src, dst string, wantSize int64, progress
 	cleanup := func() { _ = os.Remove(tmpName) }
 
 	var w io.Writer = tmp
-	if progress != nil {
-		w = &progressWriter{w: tmp, total: wantSize, cb: progress}
+	if onProgress != nil {
+		w = &progress.Writer{W: tmp, Total: wantSize, CB: onProgress}
 	}
 	if _, err := io.Copy(w, &ctxReader{ctx: ctx, r: in}); err != nil {
 		_ = tmp.Close()
@@ -172,22 +177,6 @@ func copyVerified(ctx context.Context, src, dst string, wantSize int64, progress
 		return err
 	}
 	return nil
-}
-
-type progressWriter struct {
-	w      io.Writer
-	total  int64
-	copied int64
-	cb     func(copied, total int64)
-}
-
-func (p *progressWriter) Write(b []byte) (int, error) {
-	n, err := p.w.Write(b)
-	p.copied += int64(n)
-	if p.cb != nil {
-		p.cb(p.copied, p.total)
-	}
-	return n, err
 }
 
 type ctxReader struct {

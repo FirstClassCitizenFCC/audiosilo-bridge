@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/kodestar/audiosilo-manager/internal/serverapi"
+	"github.com/kodestar/audiosilo-server/pkg/match"
 )
 
 // FindSiblings returns the books in a library that belong to the same author and
@@ -24,10 +25,10 @@ func FindSiblings(ctx context.Context, c *serverapi.Client, libraryID int64, aut
 	if err != nil {
 		return nil, err
 	}
-	target := normalizeSeries(series)
+	target := match.NormalizeSeries(series)
 	var out []serverapi.Book
 	for _, b := range books {
-		if normalizeSeries(b.Series) == target {
+		if match.NormalizeSeries(b.Series) == target {
 			out = append(out, b)
 		}
 	}
@@ -43,10 +44,10 @@ func SiblingsFromBooks(books []serverapi.Book, author, series string) []serverap
 	if strings.TrimSpace(series) == "" {
 		return nil
 	}
-	target := normalizeSeries(series)
+	target := match.NormalizeSeries(series)
 	var out []serverapi.Book
 	for _, b := range books {
-		if sameNorm(b.Author, author) && normalizeSeries(b.Series) == target {
+		if sameNorm(b.Author, author) && match.NormalizeSeries(b.Series) == target {
 			out = append(out, b)
 		}
 	}
@@ -61,7 +62,7 @@ func SiblingsFromBooks(books []serverapi.Book, author, series string) []serverap
 // deterministically). Books at the library root (no author folder) and blank authors
 // are skipped. Built once per plan (one pass) so the per-record lookup is O(1);
 // unlike siblings it keys on author alone (any series), so standalones and
-// first-in-series books reuse the folder too. Look up with authorFolders[normalize(author)].
+// first-in-series books reuse the folder too. Look up with authorFolders[match.Normalize(author)].
 func AuthorFolders(books []serverapi.Book) map[string]string {
 	type tally struct {
 		counts map[string]int
@@ -71,7 +72,7 @@ func AuthorFolders(books []serverapi.Book) map[string]string {
 	byAuthor := map[string]*tally{}
 	for _, b := range books {
 		seg := authorFolderSeg(b.RelPath)
-		key := normalize(b.Author)
+		key := match.Normalize(b.Author)
 		if seg == "" || key == "" {
 			continue
 		}
@@ -102,31 +103,10 @@ func authorFolderSeg(rel string) string {
 	return parts[0]
 }
 
-// normalizeSeries normalizes a series name for tolerant matching, additionally
-// dropping a leading article so "The Primal Hunter" and "Primal Hunter" compare
-// equal. The article is stripped as a whole word before punctuation/spaces are
-// removed, so names like "Theory..." are left intact.
-func normalizeSeries(s string) string {
-	t := strings.ToLower(strings.TrimSpace(s))
-	for _, art := range []string{"the ", "a ", "an "} {
-		if strings.HasPrefix(t, art) {
-			t = t[len(art):]
-			break
-		}
-	}
-	return normalize(t)
-}
-
-// sameNorm reports whether two strings are equal after tolerant normalization.
-func sameNorm(a, b string) bool { return normalize(a) == normalize(b) && normalize(a) != "" }
-
-// normalize lowercases and strips non-alphanumeric runes for tolerant matching.
-func normalize(s string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(s) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
+// sameNorm reports whether two strings are equal after tolerant normalization. It
+// uses the shared match.Normalize so the manager identifies authors identically to
+// the server (a differently-spaced author still compares equal).
+func sameNorm(a, b string) bool {
+	na := match.Normalize(a)
+	return na != "" && na == match.Normalize(b)
 }
