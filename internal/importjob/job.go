@@ -32,7 +32,7 @@ type PlanOptions struct {
 	SkipExistsCheck bool
 	// Books is the library's books, pre-fetched in one call. When set, Plan matches
 	// siblings AND existence locally against this list instead of issuing a query
-	// per record — essential for a large library, where per-book queries trip the
+	// per record - essential for a large library, where per-book queries trip the
 	// server's rate limiter (HTTP 429). When nil, Plan queries the server per book.
 	Books []serverapi.Book
 }
@@ -46,8 +46,8 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 	// existence check.
 	var matcher *BookMatcher
 	// authorFolders maps normalized author → existing folder spelling, built once so
-	// a differently-spaced author reuses its existing folder (a nil map — the
-	// per-book path — just yields "" on lookup). See AuthorFolders.
+	// a differently-spaced author reuses its existing folder (a nil map - the
+	// per-book path - just yields "" on lookup). See AuthorFolders.
 	var authorFolders map[string]string
 	if opts.Books != nil {
 		matcher = NewBookMatcher(opts.Books)
@@ -69,7 +69,7 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 				siblings = append(siblings, placement.Sibling{RelPath: b.RelPath, SeriesIndex: b.SeriesIndex})
 			}
 		}
-		// Name by the clean book title — strip the series prefix and "(Book N)" /
+		// Name by the clean book title - strip the series prefix and "(Book N)" /
 		// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
 		// Truth", not "… - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
 		clean := match.CleanTitle(rec.Title, rec.Series)
@@ -111,7 +111,7 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 
 // BookMatcher matches records against a fixed server-book list via the shared
 // pkg/match matcher. It converts the candidate slice once so matching many records
-// against the same library is O(library) instead of O(records × library) — the
+// against the same library is O(library) instead of O(records × library) - the
 // pre-flight and stats-sync loops match the whole Audible library against it.
 type BookMatcher struct {
 	books []serverapi.Book
@@ -155,7 +155,7 @@ func recordFileName(rec source.Record) string {
 	return filepath.Base(rec.SrcPath)
 }
 
-// existsOnServer reports whether the book is already present — matched by ASIN when
+// existsOnServer reports whether the book is already present - matched by ASIN when
 // available, otherwise by author + title (tolerant normalization). Used only on the
 // per-book query path (no pre-fetched book list); the bulk path uses MatchInBooks.
 func existsOnServer(ctx context.Context, c *serverapi.Client, rec source.Record) bool {

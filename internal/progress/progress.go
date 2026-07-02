@@ -47,7 +47,7 @@ func (w *Writer) Write(b []byte) (int, error) {
 	w.copied += int64(n)
 	// Emit per throttle window, plus one guaranteed final callback the moment Total
 	// is reached (the last chunk may be small). The lastEmit < Total guard fires that
-	// final callback only once — the Writer's completion signal is Total, whereas the
+	// final callback only once - the Writer's completion signal is Total, whereas the
 	// Reader's is EOF (an error), which is why their conditions differ.
 	if w.copied-w.lastEmit >= EmitEvery || (w.copied >= w.Total && w.lastEmit < w.Total) {
 		w.lastEmit = w.copied

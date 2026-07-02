@@ -72,7 +72,7 @@ func register(ctx context.Context, baseURL string, mp Marketplace, code string, 
 			// Amazon rejects a second device with an identical name (DuplicateDeviceName).
 			// The %DUPE_STRATEGY_1ST% macro tells the registration service to de-dupe
 			// server-side (the %FIRST_NAME% macros expand to the account holder's name),
-			// so retries don't collide — this is the mkb79/audible-proven form.
+			// so retries don't collide - this is the mkb79/audible-proven form.
 			"device_name":      "%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%AudioSilo Manager",
 			"os_version":       "17.0",
 			"software_version": "35602678",

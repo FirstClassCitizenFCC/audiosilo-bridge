@@ -38,7 +38,7 @@ func ParseCredentials(s string) (Credentials, error) {
 }
 
 // PrivateKey parses the device RSA key (PKCS#1 on iOS device types, PKCS#8 on
-// Android — try both).
+// Android - try both).
 func (c Credentials) PrivateKey() (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode([]byte(c.DevicePrivateKey))
 	if block == nil {

@@ -33,7 +33,7 @@ func TestWriterReportsFinalEvenWhenLastChunkIsSmall(t *testing.T) {
 	total := int64(EmitEvery + 10)
 	var last int64
 	w := &Writer{W: &bytes.Buffer{}, Total: total, CB: func(copied, _ int64) { last = copied }}
-	// Write the whole thing in one big chunk then a tiny tail — the tail must still
+	// Write the whole thing in one big chunk then a tiny tail - the tail must still
 	// trigger a final 100% callback even though it doesn't cross the throttle window.
 	if _, err := w.Write(bytes.Repeat([]byte("y"), int(EmitEvery))); err != nil {
 		t.Fatal(err)

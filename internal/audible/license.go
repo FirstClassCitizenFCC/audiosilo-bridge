@@ -53,7 +53,7 @@ type contentRefResp struct {
 	} `json:"content_license"`
 }
 
-// ContentACR fetches the Audible Content Reference (ACR) for a book — required to
+// ContentACR fetches the Audible Content Reference (ACR) for a book - required to
 // write a last-heard position back to Audible (PUT /1.0/lastpositions/{asin}). It
 // uses the same license request as a download (the only documented source of the
 // ACR) but only reads content_reference.acr.

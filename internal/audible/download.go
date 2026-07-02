@@ -16,7 +16,7 @@ import (
 const userAgent = "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0"
 
 // Download fetches a content URL to dest. The content-delivery URL is served by
-// Audible's CDS and validates the same device RSA signature as the API — audible-cli
+// Audible's CDS and validates the same device RSA signature as the API - audible-cli
 // downloads it with the authenticated session, not a plain GET, so an unsigned
 // request returns HTTP 403. We sign the request (and re-sign on each redirect, since
 // a redirect to a presigned CDN ignores the headers but a redirect to another CDS
@@ -31,7 +31,7 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, onProgr
 	if err := c.signGet(req); err != nil {
 		return err
 	}
-	// A dedicated client with no overall timeout — a large audiobook can exceed the
+	// A dedicated client with no overall timeout - a large audiobook can exceed the
 	// API client's per-request timeout; cancellation is governed by ctx. Redirects
 	// (CDS → CDN) are followed, re-signed for the new URL.
 	client := &http.Client{

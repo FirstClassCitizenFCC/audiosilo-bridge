@@ -38,7 +38,7 @@ type Local struct{}
 func NewLocal() *Local { return &Local{} }
 
 // EnsureRoot verifies the root exists and is a directory, failing fast before any
-// copy — this catches an unmounted network share instead of silently creating a
+// copy - this catches an unmounted network share instead of silently creating a
 // local stub tree.
 func (*Local) EnsureRoot(_ context.Context, root string) error {
 	info, err := os.Stat(root)
@@ -52,8 +52,8 @@ func (*Local) EnsureRoot(_ context.Context, root string) error {
 }
 
 // Index walks root and records every audio file by name (paths relative to root).
-// A missing root yields an empty index. The walk lists directories only — sizes
-// are read lazily for same-name candidates — so it stays cheap on a large tree.
+// A missing root yields an empty index. The walk lists directories only - sizes
+// are read lazily for same-name candidates - so it stays cheap on a large tree.
 // ".part" temp files and dotfiles are ignored.
 func (*Local) Index(_ context.Context, root string) (*Index, error) {
 	idx := newIndex(func(rel string) (int64, error) {

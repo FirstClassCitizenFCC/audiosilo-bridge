@@ -9,7 +9,7 @@ import (
 )
 
 // CatalogProduct is one Audible catalog entry (a book in a series), read from the
-// "same series" similarity endpoint. It is metadata only — enough to tell whether
+// "same series" similarity endpoint. It is metadata only - enough to tell whether
 // the user is missing an entry and to display it.
 type CatalogProduct struct {
 	ASIN        string

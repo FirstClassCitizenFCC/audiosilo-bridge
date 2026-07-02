@@ -17,7 +17,7 @@ type Kind int
 
 const (
 	// SeriesExisting: the series already has books on the server, so the
-	// shortcode/padding/folder names are taken from a sibling — high confidence.
+	// shortcode/padding/folder names are taken from a sibling - high confidence.
 	SeriesExisting Kind = iota
 	// SeriesNew: the book is in a series with no siblings on the server; the
 	// shortcode is guessed from the series name and should be reviewed.
@@ -61,7 +61,7 @@ type Input struct {
 	Siblings    []Sibling // existing books in this author+series (may be empty)
 	// AuthorFolder is an existing author-folder segment on the server for this
 	// (normalized) author, e.g. "L.A. McBride". When set, Auto mode places the book
-	// under it verbatim instead of sanitizing Author afresh — so "L. A. McBride"
+	// under it verbatim instead of sanitizing Author afresh - so "L. A. McBride"
 	// doesn't create a second folder alongside "L.A. McBride". Empty when the author
 	// is new to the library (or in template mode, where the template owns the path).
 	AuthorFolder string
@@ -98,7 +98,7 @@ func standalone(in Input) Suggestion {
 		RelPath:  authorSegment(in) + "/" + sanitize(in.Title),
 		Filename: in.Filename,
 		Kind:     Standalone,
-		Note:     "no series — placed directly under the author",
+		Note:     "no series - placed directly under the author",
 	}
 }
 
@@ -123,7 +123,7 @@ func seriesWithSiblings(in Input) Suggestion {
 		// author/series folders and guess the code.
 		prefix = guessShortcode(in.SeriesName)
 		width = 2
-		note = "series folders found, but shortcode could not be read from them — please check the code"
+		note = "series folders found, but shortcode could not be read from them - please check the code"
 	}
 
 	leaf := buildLeaf(prefix, width, in)
@@ -145,7 +145,7 @@ func seriesNew(in Input) Suggestion {
 		RelPath:  rel,
 		Filename: in.Filename,
 		Kind:     SeriesNew,
-		Note:     fmt.Sprintf("new series — guessed shortcode %q; please verify", prefix),
+		Note:     fmt.Sprintf("new series - guessed shortcode %q; please verify", prefix),
 	}
 }
 

@@ -17,7 +17,7 @@ import (
 // RSA device key PEM + ADP/access/refresh tokens + cookies) are well over that.
 //
 // It uses envelope encryption: a fresh random 32-byte data key is kept in the
-// keychain (tiny — always fits) and the value is AES-256-GCM sealed into a 0600
+// keychain (tiny - always fits) and the value is AES-256-GCM sealed into a 0600
 // file. The bulk lives on disk but is unreadable without the keychain key, so the
 // secret material itself never leaves the keychain in plaintext.
 type BlobStore struct {
@@ -64,7 +64,7 @@ func (b *BlobStore) Set(name, value string) error {
 }
 
 // Get returns the decrypted value, or ("", nil) when no blob is stored (missing
-// data key or missing file — both mean "not set yet").
+// data key or missing file - both mean "not set yet").
 func (b *BlobStore) Get(name string) (string, error) {
 	keyHex, err := b.secrets.Get(b.keyName(name))
 	if err != nil {

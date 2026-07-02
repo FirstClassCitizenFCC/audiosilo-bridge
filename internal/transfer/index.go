@@ -4,7 +4,7 @@ import "strings"
 
 // Index records the audio files already under a destination root, keyed by
 // lowercased basename. Matching on name (then confirming size) recognizes a book
-// that was already placed even after its containing folder was renamed — an
+// that was already placed even after its containing folder was renamed - an
 // exact-path check would miss that. Sizes are read lazily via statSize (a backend
 // call: os.Stat for Local, sftp.Stat for SFTP), so a non-match costs no extra I/O,
 // which keeps the index cheap on a network mount or over SSH.

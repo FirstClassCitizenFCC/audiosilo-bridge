@@ -106,7 +106,7 @@ func TestSiblingsFromBooks(t *testing.T) {
 	}
 }
 
-// Plan must make NO server calls when given the library books up front — passing a
+// Plan must make NO server calls when given the library books up front - passing a
 // nil client proves it (any per-book query would nil-panic). This is the fix for
 // the 429 the Audible pre-flight hit on a large library.
 func TestPlanUsesLocalBooksNoQueries(t *testing.T) {
