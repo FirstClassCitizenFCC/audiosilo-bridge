@@ -218,7 +218,7 @@ func TestRegisterParse(t *testing.T) {
 			return
 		}
 		// Assert the registration body carries the required cookies object and the
-		// auth code/verifier — omitting cookies is what triggers Amazon MissingValue.
+		// auth code/verifier - omitting cookies is what triggers Amazon MissingValue.
 		var sent registerBody
 		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
 			t.Fatalf("decode register body: %v", err)

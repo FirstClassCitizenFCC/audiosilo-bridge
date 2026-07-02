@@ -46,11 +46,11 @@ func MarketplaceCodes() []string {
 // AmazonDomain is the login domain (www.amazon.<tld>).
 func (m Marketplace) AmazonDomain() string { return "www.amazon." + m.TLD }
 
-// APIDomain is the Audible API domain (api.audible.<tld>) — used for the library,
+// APIDomain is the Audible API domain (api.audible.<tld>) - used for the library,
 // license, and content endpoints.
 func (m Marketplace) APIDomain() string { return "api.audible." + m.TLD }
 
-// AmazonAPIDomain is the Amazon identity API domain (api.amazon.<tld>) — device
+// AmazonAPIDomain is the Amazon identity API domain (api.amazon.<tld>) - device
 // registration goes here, NOT to the Audible API domain.
 func (m Marketplace) AmazonAPIDomain() string { return "api.amazon." + m.TLD }
 

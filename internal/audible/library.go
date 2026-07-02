@@ -36,7 +36,7 @@ type seriesRef struct {
 }
 
 // Library lists the account's owned audiobooks as import records (metadata only;
-// SrcPath is empty — the file is fetched on demand by Acquire).
+// SrcPath is empty - the file is fetched on demand by Acquire).
 func (c *Client) Library(ctx context.Context) ([]source.Record, error) {
 	var recs []source.Record
 	for page := 1; ; page++ {

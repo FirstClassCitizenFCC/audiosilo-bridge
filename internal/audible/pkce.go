@@ -1,7 +1,7 @@
 // Package audible is a native Go client for backing up an Audible library the user
 // owns: it logs in (OAuth + PKCE, via a browser), registers a virtual device,
 // lists the library, requests per-book decryption vouchers, downloads the AAXC,
-// and strips DRM with ffmpeg into a plain .m4b — the same capability as the
+// and strips DRM with ffmpeg into a plain .m4b - the same capability as the
 // open-source Libation / OpenAudible / audible-cli. It plugs into the import
 // pipeline as a source.Acquirer (download-on-demand), so placement, transfer, and
 // the skip-if-already-on-server check are shared with folder/drag-drop imports.

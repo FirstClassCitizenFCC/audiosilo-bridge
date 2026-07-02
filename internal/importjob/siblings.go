@@ -1,6 +1,6 @@
 // Package importjob orchestrates getting books onto a server: discovering import
 // candidates, computing their placement, transferring them, and triggering a
-// rescan. This file holds series-sibling detection — finding the existing books a
+// rescan. This file holds series-sibling detection - finding the existing books a
 // new book's placement should anchor on. Transfer/runner orchestration lands in M2.
 package importjob
 
@@ -13,7 +13,7 @@ import (
 )
 
 // FindSiblings returns the books in a library that belong to the same author and
-// (tolerantly-normalized) series as the target — the existing entries a placement
+// (tolerantly-normalized) series as the target - the existing entries a placement
 // anchors on. It fetches the whole author and matches the series client-side,
 // because the server's series filter is an exact match and would miss folders like
 // "The Primal Hunter" vs "Primal Hunter". Returns nil for a standalone (no series).
@@ -38,7 +38,7 @@ func FindSiblings(ctx context.Context, c *serverapi.Client, libraryID int64, aut
 // SiblingsFromBooks is the local equivalent of FindSiblings: it filters an
 // already-fetched library book list to the same author + (tolerantly-normalized)
 // series, instead of issuing a query. The Audible pre-flight (and bulk import) hold
-// the whole library in memory, so matching locally avoids one request per book —
+// the whole library in memory, so matching locally avoids one request per book -
 // which otherwise trips the server's rate limiter (HTTP 429) on a large library.
 func SiblingsFromBooks(books []serverapi.Book, author, series string) []serverapi.Book {
 	if strings.TrimSpace(series) == "" {
@@ -56,7 +56,7 @@ func SiblingsFromBooks(books []serverapi.Book, author, series string) []serverap
 
 // AuthorFolders maps each author (normalized via normalize) to the author-folder
 // spelling already used on the server for their books, so a new book reuses the
-// existing folder instead of a near-duplicate — e.g. an Audible "L. A. McBride"
+// existing folder instead of a near-duplicate - e.g. an Audible "L. A. McBride"
 // placed under an existing "L.A. McBride" rather than beside it. When an author has
 // more than one spelling on the server the most common wins (first-seen breaks ties,
 // deterministically). Books at the library root (no author folder) and blank authors

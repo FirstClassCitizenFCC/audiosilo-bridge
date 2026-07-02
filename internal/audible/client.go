@@ -13,7 +13,7 @@ import (
 
 // Client is an authenticated Audible API client for one registered device. Calls
 // to the unrestricted endpoints (library, license, stats) are RSA-signed with the
-// device key — see signRequest.
+// device key - see signRequest.
 type Client struct {
 	creds   Credentials
 	key     *rsa.PrivateKey

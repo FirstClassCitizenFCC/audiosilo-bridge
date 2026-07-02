@@ -1,5 +1,5 @@
 // Package transfer writes audiobook files into a destination library tree. It is
-// the only component that writes content — the server is read-only over the
+// the only component that writes content - the server is read-only over the
 // network. Two backends share one interface: Local (this host or a mounted share)
 // and SFTP (over SSH, M3). Every placement is atomic (temp file + rename),
 // verified by size, and idempotent.
