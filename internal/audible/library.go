@@ -97,7 +97,7 @@ func (it libItem) toRecord(now time.Time) source.Record {
 // them here lets the UI say why up front. All checks are defensive: a missing
 // field never marks a book unavailable.
 func (it libItem) unavailableReason(now time.Time) string {
-	if d := parseAudibleDate(firstNonEmptyStr(it.ReleaseDate, it.IssueDate)); !d.IsZero() && d.After(now) {
+	if ReleaseIsUpcoming(firstNonEmptyStr(it.ReleaseDate, it.IssueDate), now) {
 		return "Not released yet (pre-order)"
 	}
 	switch it.ContentDeliveryType {
@@ -112,18 +112,32 @@ func (it libItem) unavailableReason(now time.Time) string {
 	return ""
 }
 
-// parseAudibleDate parses the date part of Audible's release/issue dates, which
-// arrive as "2016-08-01" or a full timestamp. Zero time when unparseable.
+// ReleaseIsUpcoming reports whether an Audible release/issue date falls after now -
+// a pre-order / not-yet-released title. A zero now disables the check; an empty or
+// unparseable date reads as already released (never withhold a real title). It is
+// the one definition of "upcoming" - seriesgap uses it too.
+func ReleaseIsUpcoming(date string, now time.Time) bool {
+	if now.IsZero() {
+		return false
+	}
+	d := parseAudibleDate(date)
+	return !d.IsZero() && d.After(now)
+}
+
+// parseAudibleDate parses Audible's release/issue dates, which arrive as
+// "2016-08-01" (sometimes with a time suffix), "2016-08", or "2016" depending on
+// the endpoint. Zero time when unparseable.
 func parseAudibleDate(s string) time.Time {
 	s = strings.TrimSpace(s)
-	if len(s) < 10 {
-		return time.Time{}
+	if len(s) > 10 {
+		s = s[:10] // a full timestamp leads with the date
 	}
-	t, err := time.Parse("2006-01-02", s[:10])
-	if err != nil {
-		return time.Time{}
+	for _, layout := range []string{"2006-01-02", "2006-01", "2006"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
 	}
-	return t
+	return time.Time{}
 }
 
 // parseSeq parses the free-form Audible series sequence ("1", "0.5", "1-3", "").

@@ -1,10 +1,7 @@
 package registry
 
 import (
-	"encoding/json"
 	"maps"
-	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 )
@@ -23,19 +20,18 @@ import (
 type OverrideStore struct {
 	mu     sync.Mutex
 	path   string
-	scopes map[string]*scopeOverrides // scopeKey → this library's overrides
+	scopes map[string]scopeOverrides // scopeKey → this library's overrides
 }
 
-// Overrides is one library's manual overrides (also the wire shape the facade
-// returns). Nil maps are tolerated on read and normalized to empty.
+// Overrides is one library's manual overrides. Nil maps are tolerated everywhere:
+// Get always returns non-nil maps, and Set stores nil as empty.
 type Overrides struct {
 	Matches map[string]string `json:"matches"`
 	Dests   map[string]string `json:"dests"`
 }
 
 type scopeOverrides struct {
-	ServerID  string `json:"server_id"`
-	LibraryID int64  `json:"library_id"`
+	LibraryScope
 	Overrides
 }
 
@@ -45,24 +41,13 @@ type overrideFile struct {
 
 // OpenOverrides loads the store from path (a missing file yields an empty set).
 func OpenOverrides(path string) (*OverrideStore, error) {
-	s := &OverrideStore{path: path, scopes: map[string]*scopeOverrides{}}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return s, nil
-		}
-		return nil, err
-	}
+	s := &OverrideStore{path: path, scopes: map[string]scopeOverrides{}}
 	var f overrideFile
-	if err := json.Unmarshal(data, &f); err != nil {
+	if err := loadJSONFile(path, &f); err != nil {
 		return nil, err
 	}
-	for i := range f.Entries {
-		e := f.Entries[i]
-		s.scopes[scopeKey(e.ServerID, e.LibraryID)] = &e
+	for _, e := range f.Entries {
+		s.scopes[scopeKey(e.ServerID, e.LibraryID)] = e
 	}
 	return s, nil
 }
@@ -72,7 +57,7 @@ func (s *OverrideStore) Get(serverID string, libraryID int64) Overrides {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := Overrides{Matches: map[string]string{}, Dests: map[string]string{}}
-	if sc := s.scopes[scopeKey(serverID, libraryID)]; sc != nil {
+	if sc, ok := s.scopes[scopeKey(serverID, libraryID)]; ok {
 		maps.Copy(out.Matches, sc.Matches)
 		maps.Copy(out.Dests, sc.Dests)
 	}
@@ -80,15 +65,24 @@ func (s *OverrideStore) Get(serverID string, libraryID int64) Overrides {
 }
 
 // Set replaces a (server, library)'s overrides wholesale and persists atomically.
-// Empty maps drop the scope entirely so the file doesn't accrue empty entries.
+// Nil maps are stored as empty; clearing both drops the scope entirely so the file
+// doesn't accrue empty entries.
 func (s *OverrideStore) Set(serverID string, libraryID int64, ov Overrides) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := scopeKey(serverID, libraryID)
 	if len(ov.Matches) == 0 && len(ov.Dests) == 0 {
 		delete(s.scopes, key)
-	} else {
-		s.scopes[key] = &scopeOverrides{ServerID: serverID, LibraryID: libraryID, Overrides: ov}
+		return s.save()
+	}
+	if ov.Matches == nil {
+		ov.Matches = map[string]string{}
+	}
+	if ov.Dests == nil {
+		ov.Dests = map[string]string{}
+	}
+	s.scopes[key] = scopeOverrides{
+		LibraryScope: LibraryScope{ServerID: serverID, LibraryID: libraryID}, Overrides: ov,
 	}
 	return s.save()
 }
@@ -97,25 +91,10 @@ func (s *OverrideStore) Set(serverID string, libraryID int64, ov Overrides) erro
 func (s *OverrideStore) save() error {
 	f := overrideFile{}
 	for _, sc := range s.scopes {
-		f.Entries = append(f.Entries, *sc)
+		f.Entries = append(f.Entries, sc)
 	}
 	sort.Slice(f.Entries, func(i, j int) bool {
-		if f.Entries[i].ServerID != f.Entries[j].ServerID {
-			return f.Entries[i].ServerID < f.Entries[j].ServerID
-		}
-		return f.Entries[i].LibraryID < f.Entries[j].LibraryID
+		return lessScope(f.Entries[i].LibraryScope, f.Entries[j].LibraryScope)
 	})
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return saveJSONFileAtomic(s.path, f)
 }

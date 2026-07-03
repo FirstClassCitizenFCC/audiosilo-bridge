@@ -64,6 +64,15 @@ func Run(ctx context.Context, items []PlannedItem, opts RunOptions) ([]ItemResul
 			continue
 		}
 
+		// A record its source marked unacquirable fails with the reason instead of
+		// being attempted - acquiring it would only produce an opaque refusal (e.g.
+		// Audible denying a license for a periodical or a rights-less title).
+		if reason := it.Record.UnavailableReason; reason != "" {
+			results = append(results, ItemResult{RelPath: it.RelPath, Err: reason})
+			emit("error", reason, 0, 0)
+			continue
+		}
+
 		src := it.Record.SrcPath
 		var cleanup func()
 		if src == "" && opts.Acquirer != nil {

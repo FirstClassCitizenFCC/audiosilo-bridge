@@ -32,8 +32,8 @@ type licenseResp struct {
 func denialDetail(lr licenseResp) string {
 	var parts []string
 	for _, r := range lr.ContentLicense.DenialReasons {
-		s := firstNonEmptyStr(r.Message, strings.TrimSpace(strings.Join([]string{r.ValidationType, r.RejectionReason}, " ")))
-		if s = strings.TrimSpace(s); s != "" {
+		s := strings.TrimSpace(firstNonEmptyStr(r.Message, r.ValidationType+" "+r.RejectionReason))
+		if s != "" {
 			parts = append(parts, s)
 		}
 	}

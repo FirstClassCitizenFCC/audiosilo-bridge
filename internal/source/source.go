@@ -21,7 +21,8 @@ type Record struct {
 	Key         string // dedup/resume key: ASIN if present, else the basename
 	// UnavailableReason, when non-empty, says why this record can't be acquired
 	// (e.g. an Audible periodical or a title without download rights). File-based
-	// sources leave it empty; an import must not attempt an unavailable record.
+	// sources leave it empty; importjob.Run fails such records with the reason
+	// instead of attempting them.
 	UnavailableReason string
 }
 

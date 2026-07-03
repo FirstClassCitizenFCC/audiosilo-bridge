@@ -45,6 +45,14 @@ func TestOverrideStore(t *testing.T) {
 		t.Fatalf("Get returned an aliased map: %+v", again)
 	}
 
+	// A half-nil Set is stored with the nil map as empty (no "null" in the file).
+	if err := s2.Set("srvB", 1, Overrides{Dests: map[string]string{"B03": "X/Y.m4b"}}); err != nil {
+		t.Fatal(err)
+	}
+	if g := s2.Get("srvB", 1); g.Matches == nil || len(g.Matches) != 0 || g.Dests["B03"] != "X/Y.m4b" {
+		t.Fatalf("nil Matches should round-trip as empty: %+v", g)
+	}
+
 	// Clearing to empty drops the scope from disk.
 	if err := s2.Set("srvA", 1, Overrides{}); err != nil {
 		t.Fatal(err)
