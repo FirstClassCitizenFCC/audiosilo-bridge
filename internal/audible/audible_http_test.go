@@ -68,10 +68,19 @@ func TestClientLibrary(t *testing.T) {
 		if r.Header.Get("x-adp-token") != "ADP" || r.Header.Get("x-adp-signature") == "" {
 			t.Errorf("request not signed: %v", r.Header)
 		}
+		if rg := r.URL.Query().Get("response_groups"); !strings.Contains(rg, "customer_rights") {
+			t.Errorf("response_groups missing customer_rights: %q", rg)
+		}
 		_, _ = w.Write([]byte(`{"items":[
 			{"asin":"B01","title":"Soulsmith","authors":[{"name":"Will Wight"}],
 			 "narrators":[{"name":"Travis Baldree"}],
-			 "series":[{"title":"Cradle","sequence":"2"}],"release_date":"2016-08-01"}
+			 "series":[{"title":"Cradle","sequence":"2"}],"release_date":"2016-08-01",
+			 "customer_rights":{"is_consumable_offline":true}},
+			{"asin":"B02","title":"Victorian Secrets","content_delivery_type":"Periodical",
+			 "customer_rights":{"is_consumable_offline":true}},
+			{"asin":"B03","title":"Left the Catalog",
+			 "customer_rights":{"is_consumable_offline":false}},
+			{"asin":"B04","title":"Future Book","release_date":"2999-01-01"}
 		]}`))
 	}))
 	defer ts.Close()
@@ -80,7 +89,7 @@ func TestClientLibrary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recs) != 1 {
+	if len(recs) != 4 {
 		t.Fatalf("got %d records", len(recs))
 	}
 	r := recs[0]
@@ -89,6 +98,19 @@ func TestClientLibrary(t *testing.T) {
 	}
 	if r.Year != "2016" || r.FileName != "Soulsmith.m4b" || r.SrcPath != "" {
 		t.Fatalf("record fields: year=%q file=%q src=%q", r.Year, r.FileName, r.SrcPath)
+	}
+	// A normal owned book is downloadable; the rest each carry their reason.
+	if r.UnavailableReason != "" {
+		t.Fatalf("owned book marked unavailable: %q", r.UnavailableReason)
+	}
+	if got := recs[1].UnavailableReason; !strings.Contains(got, "periodical") {
+		t.Fatalf("periodical reason = %q", got)
+	}
+	if got := recs[2].UnavailableReason; !strings.Contains(got, "download rights") {
+		t.Fatalf("no-rights reason = %q", got)
+	}
+	if got := recs[3].UnavailableReason; !strings.Contains(got, "pre-order") {
+		t.Fatalf("pre-order reason = %q", got)
 	}
 }
 
@@ -129,6 +151,26 @@ func TestClientLicense(t *testing.T) {
 	}
 	if k != "aaaa1111bbbb2222cccc3333dddd4444" || iv2 != "4444dddd3333cccc2222bbbb1111aaaa" {
 		t.Fatalf("voucher key/iv = %q / %q", k, iv2)
+	}
+}
+
+// A denied license (no voucher) must surface Audible's denial reason, not just
+// "no license voucher returned" - the reason is the only clue the user gets.
+func TestClientLicenseDenied(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"content_license":{
+			"status_code":"Denied",
+			"license_denial_reasons":[{"rejectionReason":"ContentEligibility","validationType":"Ownership"}]
+		}}`))
+	}))
+	defer ts.Close()
+
+	_, _, _, err := testClient(t, ts.URL).License(context.Background(), "B00")
+	if err == nil {
+		t.Fatal("expected an error for a denied license")
+	}
+	if !strings.Contains(err.Error(), "ContentEligibility") || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("denial detail missing from error: %v", err)
 	}
 }
 

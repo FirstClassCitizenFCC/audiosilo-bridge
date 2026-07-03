@@ -6,17 +6,41 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 type licenseResp struct {
 	ContentLicense struct {
 		LicenseResponse string `json:"license_response"` // base64 encrypted voucher
+		StatusCode      string `json:"status_code"`      // "Granted" / "Denied"
+		// DenialReasons explain a Denied license (mixed-case keys are Audible's).
+		DenialReasons []struct {
+			Message         string `json:"message"`
+			RejectionReason string `json:"rejectionReason"`
+			ValidationType  string `json:"validationType"`
+		} `json:"license_denial_reasons"`
 		ContentMetadata struct {
 			ContentURL struct {
 				OfflineURL string `json:"offline_url"` // presigned download URL
 			} `json:"content_url"`
 		} `json:"content_metadata"`
 	} `json:"content_license"`
+}
+
+// denialDetail summarizes why a license was denied, for the import error message
+// ("" when Audible sent no usable detail).
+func denialDetail(lr licenseResp) string {
+	var parts []string
+	for _, r := range lr.ContentLicense.DenialReasons {
+		s := firstNonEmptyStr(r.Message, strings.TrimSpace(strings.Join([]string{r.ValidationType, r.RejectionReason}, " ")))
+		if s = strings.TrimSpace(s); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 && lr.ContentLicense.StatusCode != "" && lr.ContentLicense.StatusCode != "Granted" {
+		return "status " + lr.ContentLicense.StatusCode
+	}
+	return strings.Join(parts, "; ")
 }
 
 // License requests a download license for an owned book and unwraps the voucher,
@@ -33,6 +57,9 @@ func (c *Client) License(ctx context.Context, asin string) (downloadURL, key, iv
 		return "", "", "", err
 	}
 	if lr.ContentLicense.LicenseResponse == "" {
+		if detail := denialDetail(lr); detail != "" {
+			return "", "", "", fmt.Errorf("audible refused a download license for %s (%s)", asin, detail)
+		}
 		return "", "", "", fmt.Errorf("no license voucher returned for %s", asin)
 	}
 	key, iv, err = DecryptVoucher(lr.ContentLicense.LicenseResponse,

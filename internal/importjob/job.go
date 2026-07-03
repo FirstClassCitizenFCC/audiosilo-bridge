@@ -109,6 +109,27 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 	return items, nil
 }
 
+// ApplyDestinations replaces planned destinations with user-chosen ones, keyed by
+// Record.Key (the ASIN for Audible records). A destination is the full
+// library-relative path including the filename - the UI computes it when the user
+// picks a folder (see frontend src/lib/destpath.ts, which mirrors this contract).
+// Anything unsafe (absolute, empty, or escaping the root after Clean) is ignored
+// and the planned path kept; transfer.SafeJoin re-checks at place time.
+func ApplyDestinations(items []PlannedItem, dests map[string]string) {
+	for i, it := range items {
+		d, ok := dests[it.Record.Key]
+		if !ok {
+			continue
+		}
+		d = strings.TrimLeft(path.Clean(strings.TrimSpace(d)), "/")
+		if d == "" || d == "." || d == ".." || strings.HasPrefix(d, "../") {
+			continue
+		}
+		items[i].RelPath = d
+		items[i].Note = "manually chosen destination"
+	}
+}
+
 // BookMatcher matches records against a fixed server-book list via the shared
 // pkg/match matcher. It converts the candidate slice once so matching many records
 // against the same library is O(library) instead of O(records × library) - the

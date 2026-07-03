@@ -53,6 +53,33 @@ func TestPlan(t *testing.T) {
 	}
 }
 
+func TestApplyDestinations(t *testing.T) {
+	items := []PlannedItem{
+		{Record: source.Record{Key: "A1"}, RelPath: "Various/Halo/Evolutions/Halo - Evolutions.m4b"},
+		{Record: source.Record{Key: "A2"}, RelPath: "Will Wight/Cradle/C02 - Soulsmith/Soulsmith.m4b"},
+		{Record: source.Record{Key: "A3"}, RelPath: "Author/Book/Book.m4b"},
+	}
+	ApplyDestinations(items, map[string]string{
+		"A1": "HALO/Evolutions/Halo - Evolutions.m4b", // normal override
+		"A3": "../outside/Book.m4b",                   // traversal is ignored
+		"A9": "Nowhere/x.m4b",                         // unknown key is ignored
+	})
+	if items[0].RelPath != "HALO/Evolutions/Halo - Evolutions.m4b" || items[0].Note != "manually chosen destination" {
+		t.Fatalf("override not applied: %+v", items[0])
+	}
+	if items[1].RelPath != "Will Wight/Cradle/C02 - Soulsmith/Soulsmith.m4b" {
+		t.Fatalf("untouched item changed: %q", items[1].RelPath)
+	}
+	if items[2].RelPath != "Author/Book/Book.m4b" {
+		t.Fatalf("unsafe override applied: %q", items[2].RelPath)
+	}
+	// Leading slashes are stripped, not treated as absolute host paths.
+	ApplyDestinations(items, map[string]string{"A2": "//Flat/Soulsmith.m4b"})
+	if items[1].RelPath != "Flat/Soulsmith.m4b" {
+		t.Fatalf("slash-prefixed override = %q", items[1].RelPath)
+	}
+}
+
 func TestPlanTemplateMode(t *testing.T) {
 	// No server calls are needed for a standalone with an explicit template, but
 	// Plan still issues a search for the existence check, so stub it empty.

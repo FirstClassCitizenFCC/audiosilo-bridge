@@ -19,6 +19,10 @@ type Record struct {
 	Sequence    float64
 	HasSequence bool
 	Key         string // dedup/resume key: ASIN if present, else the basename
+	// UnavailableReason, when non-empty, says why this record can't be acquired
+	// (e.g. an Audible periodical or a title without download rights). File-based
+	// sources leave it empty; an import must not attempt an unavailable record.
+	UnavailableReason string
 }
 
 // Source discovers importable audiobooks.
