@@ -53,6 +53,34 @@ func TestOverrideStore(t *testing.T) {
 		t.Fatalf("nil Matches should round-trip as empty: %+v", g)
 	}
 
+	// The ignore set round-trips and coexists with matches/dests.
+	if err := s2.Set("srvC", 1, Overrides{Ignored: map[string]bool{"B09": true}}); err != nil {
+		t.Fatal(err)
+	}
+	sIg, err := OpenOverrides(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := sIg.Get("srvC", 1); !g.Ignored["B09"] || g.Matches == nil || g.Ignored == nil {
+		t.Fatalf("ignore set should round-trip with non-nil maps: %+v", g)
+	}
+	// An ignore-only scope survives (not treated as empty).
+	if g := sIg.Get("srvC", 1); len(g.Ignored) != 1 {
+		t.Fatalf("ignore-only scope was dropped: %+v", g)
+	}
+
+	// Update writes one field's owner without clobbering another owner's field: seed
+	// matches, then Update only Ignored - matches must survive.
+	if err := s2.Set("srvD", 1, Overrides{Matches: map[string]string{"B1": "path/one"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.Update("srvD", 1, func(ov *Overrides) { ov.Ignored = map[string]bool{"B2": true} }); err != nil {
+		t.Fatal(err)
+	}
+	if g := s2.Get("srvD", 1); g.Matches["B1"] != "path/one" || !g.Ignored["B2"] {
+		t.Fatalf("Update clobbered an untouched field: %+v", g)
+	}
+
 	// Clearing to empty drops the scope from disk.
 	if err := s2.Set("srvA", 1, Overrides{}); err != nil {
 		t.Fatal(err)
@@ -61,7 +89,7 @@ func TestOverrideStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g := s3.Get("srvA", 1); len(g.Matches) != 0 || len(g.Dests) != 0 {
+	if g := s3.Get("srvA", 1); len(g.Matches) != 0 || len(g.Dests) != 0 || len(g.Ignored) != 0 {
 		t.Fatalf("cleared scope should be gone after reopen: %+v", g)
 	}
 }

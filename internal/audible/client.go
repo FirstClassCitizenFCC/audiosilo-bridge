@@ -67,12 +67,26 @@ func (c *Client) doSigned(ctx context.Context, method, path string, body []byte,
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s: HTTP %d: %s", method, path, resp.StatusCode, snippet(data))
+		return &httpError{StatusCode: resp.StatusCode, Method: method, Path: path, Body: snippet(data)}
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)
 	}
 	return nil
+}
+
+// httpError is a non-2xx response from the Audible API. It carries the status code
+// so callers can react to it (e.g. split an over-large batch on a 400) instead of
+// string-matching the message.
+type httpError struct {
+	StatusCode int
+	Method     string
+	Path       string
+	Body       string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("%s %s: HTTP %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
 }
 
 func snippet(b []byte) string {

@@ -14,6 +14,8 @@ import (
 //     the server under a name the auto-matcher missed).
 //   - Dests: ASIN → full library-relative destination (folder + filename) the user
 //     chose for an import instead of the planned placement.
+//   - Ignored: ASIN → true for books the user never wants the stats sync to touch
+//     (e.g. a shared account's kids' series). Persisted so the choice sticks.
 //
 // It's non-secret UI bookkeeping, so it lives in a plain JSON file beside the
 // registry (atomic temp+rename save), like the sync-status and series-watch stores.
@@ -28,6 +30,7 @@ type OverrideStore struct {
 type Overrides struct {
 	Matches map[string]string `json:"matches"`
 	Dests   map[string]string `json:"dests"`
+	Ignored map[string]bool   `json:"ignored"`
 }
 
 type scopeOverrides struct {
@@ -56,10 +59,11 @@ func OpenOverrides(path string) (*OverrideStore, error) {
 func (s *OverrideStore) Get(serverID string, libraryID int64) Overrides {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := Overrides{Matches: map[string]string{}, Dests: map[string]string{}}
+	out := Overrides{Matches: map[string]string{}, Dests: map[string]string{}, Ignored: map[string]bool{}}
 	if sc, ok := s.scopes[scopeKey(serverID, libraryID)]; ok {
 		maps.Copy(out.Matches, sc.Matches)
 		maps.Copy(out.Dests, sc.Dests)
+		maps.Copy(out.Ignored, sc.Ignored)
 	}
 	return out
 }
@@ -70,8 +74,30 @@ func (s *OverrideStore) Get(serverID string, libraryID int64) Overrides {
 func (s *OverrideStore) Set(serverID string, libraryID int64, ov Overrides) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.setLocked(serverID, libraryID, ov)
+}
+
+// Update atomically applies mut to a (server, library)'s overrides and persists. The
+// read-modify-write happens without releasing the lock, so two callers that each own a
+// different field (SaveOverrides writes matches/dests; SetStatsIgnored writes the
+// ignore set) can't lose one another's change - which a caller-side Get-then-Set could.
+func (s *OverrideStore) Update(serverID string, libraryID int64, mut func(ov *Overrides)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ov := Overrides{Matches: map[string]string{}, Dests: map[string]string{}, Ignored: map[string]bool{}}
+	if sc, ok := s.scopes[scopeKey(serverID, libraryID)]; ok {
+		maps.Copy(ov.Matches, sc.Matches)
+		maps.Copy(ov.Dests, sc.Dests)
+		maps.Copy(ov.Ignored, sc.Ignored)
+	}
+	mut(&ov)
+	return s.setLocked(serverID, libraryID, ov)
+}
+
+// setLocked is Set's body; the caller must hold s.mu.
+func (s *OverrideStore) setLocked(serverID string, libraryID int64, ov Overrides) error {
 	key := scopeKey(serverID, libraryID)
-	if len(ov.Matches) == 0 && len(ov.Dests) == 0 {
+	if len(ov.Matches) == 0 && len(ov.Dests) == 0 && len(ov.Ignored) == 0 {
 		delete(s.scopes, key)
 		return s.save()
 	}
@@ -80,6 +106,9 @@ func (s *OverrideStore) Set(serverID string, libraryID int64, ov Overrides) erro
 	}
 	if ov.Dests == nil {
 		ov.Dests = map[string]string{}
+	}
+	if ov.Ignored == nil {
+		ov.Ignored = map[string]bool{}
 	}
 	s.scopes[key] = scopeOverrides{
 		LibraryScope: LibraryScope{ServerID: serverID, LibraryID: libraryID}, Overrides: ov,
