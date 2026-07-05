@@ -69,6 +69,18 @@ func TestOverrideStore(t *testing.T) {
 		t.Fatalf("ignore-only scope was dropped: %+v", g)
 	}
 
+	// Update writes one field's owner without clobbering another owner's field: seed
+	// matches, then Update only Ignored - matches must survive.
+	if err := s2.Set("srvD", 1, Overrides{Matches: map[string]string{"B1": "path/one"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.Update("srvD", 1, func(ov *Overrides) { ov.Ignored = map[string]bool{"B2": true} }); err != nil {
+		t.Fatal(err)
+	}
+	if g := s2.Get("srvD", 1); g.Matches["B1"] != "path/one" || !g.Ignored["B2"] {
+		t.Fatalf("Update clobbered an untouched field: %+v", g)
+	}
+
 	// Clearing to empty drops the scope from disk.
 	if err := s2.Set("srvA", 1, Overrides{}); err != nil {
 		t.Fatal(err)

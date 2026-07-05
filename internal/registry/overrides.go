@@ -74,6 +74,28 @@ func (s *OverrideStore) Get(serverID string, libraryID int64) Overrides {
 func (s *OverrideStore) Set(serverID string, libraryID int64, ov Overrides) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.setLocked(serverID, libraryID, ov)
+}
+
+// Update atomically applies mut to a (server, library)'s overrides and persists. The
+// read-modify-write happens without releasing the lock, so two callers that each own a
+// different field (SaveOverrides writes matches/dests; SetStatsIgnored writes the
+// ignore set) can't lose one another's change - which a caller-side Get-then-Set could.
+func (s *OverrideStore) Update(serverID string, libraryID int64, mut func(ov *Overrides)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ov := Overrides{Matches: map[string]string{}, Dests: map[string]string{}, Ignored: map[string]bool{}}
+	if sc, ok := s.scopes[scopeKey(serverID, libraryID)]; ok {
+		maps.Copy(ov.Matches, sc.Matches)
+		maps.Copy(ov.Dests, sc.Dests)
+		maps.Copy(ov.Ignored, sc.Ignored)
+	}
+	mut(&ov)
+	return s.setLocked(serverID, libraryID, ov)
+}
+
+// setLocked is Set's body; the caller must hold s.mu.
+func (s *OverrideStore) setLocked(serverID string, libraryID int64, ov Overrides) error {
 	key := scopeKey(serverID, libraryID)
 	if len(ov.Matches) == 0 && len(ov.Dests) == 0 && len(ov.Ignored) == 0 {
 		delete(s.scopes, key)
