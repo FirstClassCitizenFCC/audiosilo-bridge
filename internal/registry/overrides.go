@@ -14,6 +14,8 @@ import (
 //     the server under a name the auto-matcher missed).
 //   - Dests: ASIN → full library-relative destination (folder + filename) the user
 //     chose for an import instead of the planned placement.
+//   - Ignored: ASIN → true for books the user never wants the stats sync to touch
+//     (e.g. a shared account's kids' series). Persisted so the choice sticks.
 //
 // It's non-secret UI bookkeeping, so it lives in a plain JSON file beside the
 // registry (atomic temp+rename save), like the sync-status and series-watch stores.
@@ -28,6 +30,7 @@ type OverrideStore struct {
 type Overrides struct {
 	Matches map[string]string `json:"matches"`
 	Dests   map[string]string `json:"dests"`
+	Ignored map[string]bool   `json:"ignored"`
 }
 
 type scopeOverrides struct {
@@ -56,10 +59,11 @@ func OpenOverrides(path string) (*OverrideStore, error) {
 func (s *OverrideStore) Get(serverID string, libraryID int64) Overrides {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := Overrides{Matches: map[string]string{}, Dests: map[string]string{}}
+	out := Overrides{Matches: map[string]string{}, Dests: map[string]string{}, Ignored: map[string]bool{}}
 	if sc, ok := s.scopes[scopeKey(serverID, libraryID)]; ok {
 		maps.Copy(out.Matches, sc.Matches)
 		maps.Copy(out.Dests, sc.Dests)
+		maps.Copy(out.Ignored, sc.Ignored)
 	}
 	return out
 }
@@ -71,7 +75,7 @@ func (s *OverrideStore) Set(serverID string, libraryID int64, ov Overrides) erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := scopeKey(serverID, libraryID)
-	if len(ov.Matches) == 0 && len(ov.Dests) == 0 {
+	if len(ov.Matches) == 0 && len(ov.Dests) == 0 && len(ov.Ignored) == 0 {
 		delete(s.scopes, key)
 		return s.save()
 	}
@@ -80,6 +84,9 @@ func (s *OverrideStore) Set(serverID string, libraryID int64, ov Overrides) erro
 	}
 	if ov.Dests == nil {
 		ov.Dests = map[string]string{}
+	}
+	if ov.Ignored == nil {
+		ov.Ignored = map[string]bool{}
 	}
 	s.scopes[key] = scopeOverrides{
 		LibraryScope: LibraryScope{ServerID: serverID, LibraryID: libraryID}, Overrides: ov,

@@ -26,6 +26,9 @@ type libItem struct {
 	IssueDate           string      `json:"issue_date"`
 	ContentType         string      `json:"content_type"`
 	ContentDeliveryType string      `json:"content_delivery_type"`
+	// RuntimeLengthMin comes from the product_attrs response group (minute-rounded,
+	// 0/absent for shows and some titles).
+	RuntimeLengthMin int `json:"runtime_length_min"`
 	// CustomerRights needs the customer_rights response group. nil when Audible
 	// omits it - treat that as downloadable (defensive default).
 	CustomerRights *customerRights `json:"customer_rights"`
@@ -73,6 +76,7 @@ func (it libItem) toRecord(now time.Time) source.Record {
 	rec := source.Record{
 		Title: it.Title, TitleShort: it.Title, ASIN: it.ASIN, Key: it.ASIN,
 		FileName:          safeFileName(it.Title) + ".m4b",
+		RuntimeSec:        float64(it.RuntimeLengthMin) * 60,
 		UnavailableReason: it.unavailableReason(now),
 	}
 	if len(it.Authors) > 0 {
