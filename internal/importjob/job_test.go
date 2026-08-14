@@ -80,6 +80,55 @@ func TestApplyDestinations(t *testing.T) {
 	}
 }
 
+// A record whose automatic match the user rejected ("Not on server") must be
+// planned as not existing, so Run imports it instead of skipping it.
+func TestPlanRejectedExistence(t *testing.T) {
+	books := []serverapi.Book{{RelPath: "Will Wight/Cradle/C01 - Unsouled", Title: "Unsouled", Author: "Will Wight", Series: "Cradle", SeriesIndex: 1}}
+	recs := []source.Record{{Key: "A1", SrcPath: "/tmp/Unsouled.m4b", Title: "Unsouled", Author: "Will Wight", Series: "Cradle", Sequence: 1, HasSequence: true}}
+
+	// Sanity: without a rejection the record is detected on the server.
+	plain, err := Plan(context.Background(), nil, 1, recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plain[0].ExistsOnServer {
+		t.Fatalf("record should match the server book: %+v", plain[0])
+	}
+
+	rej, err := Plan(context.Background(), nil, 1, recs, PlanOptions{
+		Mode: placement.ModeAuto, Books: books, Rejected: map[string]bool{"A1": true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rej[0].ExistsOnServer {
+		t.Fatalf("rejected record still planned as on server: %+v", rej[0])
+	}
+}
+
+// A path matched by more than one record is contested - at least one of those
+// matches is wrong, so identity-durable writes (the ASIN backfill) must skip it.
+func TestBookMatcherContested(t *testing.T) {
+	m := NewBookMatcher([]serverapi.Book{
+		{RelPath: "a/one", Title: "One", Author: "Au", ASIN: "B001"},
+		{RelPath: "a/two", Title: "Two", Author: "Au", ASIN: "B002"},
+	})
+	for _, asin := range []string{"B001", "B001", "B002"} {
+		if _, ok := m.Match(source.Record{Title: "x", Author: "Au", ASIN: asin}); !ok {
+			t.Fatalf("no match for %s", asin)
+		}
+	}
+	if !m.Contested("a/one") {
+		t.Fatal("doubly-claimed path should be contested")
+	}
+	if m.Contested("a/two") {
+		t.Fatal("singly-claimed path should not be contested")
+	}
+	if m.Contested("a/none") {
+		t.Fatal("unclaimed path should not be contested")
+	}
+}
+
 func TestPlanTemplateMode(t *testing.T) {
 	// No server calls are needed for a standalone with an explicit template, but
 	// Plan still issues a search for the existence check, so stub it empty.

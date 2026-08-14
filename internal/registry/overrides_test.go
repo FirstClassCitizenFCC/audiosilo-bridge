@@ -69,6 +69,18 @@ func TestOverrideStore(t *testing.T) {
 		t.Fatalf("ignore-only scope was dropped: %+v", g)
 	}
 
+	// The rejection set round-trips and a rejection-only scope survives.
+	if err := s2.Set("srvE", 1, Overrides{Rejected: map[string]bool{"B10": true}}); err != nil {
+		t.Fatal(err)
+	}
+	sRej, err := OpenOverrides(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := sRej.Get("srvE", 1); !g.Rejected["B10"] || g.Rejected == nil || len(g.Rejected) != 1 {
+		t.Fatalf("rejection set should round-trip with non-nil maps: %+v", g)
+	}
+
 	// Update writes one field's owner without clobbering another owner's field: seed
 	// matches, then Update only Ignored - matches must survive.
 	if err := s2.Set("srvD", 1, Overrides{Matches: map[string]string{"B1": "path/one"}}); err != nil {

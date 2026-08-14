@@ -31,8 +31,11 @@ type RunOptions struct {
 	OnProgress   func(Progress)
 }
 
-// ItemResult is the outcome of one item.
+// ItemResult is the outcome of one item. Key identifies the source record
+// (Record.Key - the ASIN for Audible records) so a caller can map results back
+// to its own per-record state without relying on result ordering.
 type ItemResult struct {
+	Key            string
 	RelPath        string
 	Placed         bool
 	AlreadyPresent bool
@@ -59,7 +62,7 @@ func Run(ctx context.Context, items []PlannedItem, opts RunOptions) ([]ItemResul
 		}
 
 		if it.ExistsOnServer {
-			results = append(results, ItemResult{RelPath: it.RelPath, Skipped: true})
+			results = append(results, ItemResult{Key: it.Record.Key, RelPath: it.RelPath, Skipped: true})
 			emit("skipped", "", 0, 0)
 			continue
 		}
@@ -68,7 +71,7 @@ func Run(ctx context.Context, items []PlannedItem, opts RunOptions) ([]ItemResul
 		// being attempted - acquiring it would only produce an opaque refusal (e.g.
 		// Audible denying a license for a periodical or a rights-less title).
 		if reason := it.Record.UnavailableReason; reason != "" {
-			results = append(results, ItemResult{RelPath: it.RelPath, Err: reason})
+			results = append(results, ItemResult{Key: it.Record.Key, RelPath: it.RelPath, Err: reason})
 			emit("error", reason, 0, 0)
 			continue
 		}
@@ -84,7 +87,7 @@ func Run(ctx context.Context, items []PlannedItem, opts RunOptions) ([]ItemResul
 				emit(stage, "", copied, total)
 			})
 			if err != nil {
-				results = append(results, ItemResult{RelPath: it.RelPath, Err: err.Error()})
+				results = append(results, ItemResult{Key: it.Record.Key, RelPath: it.RelPath, Err: err.Error()})
 				emit("error", err.Error(), 0, 0)
 				continue
 			}
@@ -100,12 +103,12 @@ func Run(ctx context.Context, items []PlannedItem, opts RunOptions) ([]ItemResul
 			cleanup()
 		}
 		if err != nil {
-			results = append(results, ItemResult{RelPath: it.RelPath, Err: err.Error()})
+			results = append(results, ItemResult{Key: it.Record.Key, RelPath: it.RelPath, Err: err.Error()})
 			emit("error", err.Error(), 0, 0)
 			continue
 		}
 		placedAny = placedAny || !res.AlreadyPresent
-		results = append(results, ItemResult{RelPath: it.RelPath, Placed: true, AlreadyPresent: res.AlreadyPresent})
+		results = append(results, ItemResult{Key: it.Record.Key, RelPath: it.RelPath, Placed: true, AlreadyPresent: res.AlreadyPresent})
 		emit("placed", "", 0, 0)
 	}
 

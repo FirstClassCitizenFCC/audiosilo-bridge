@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -111,6 +112,84 @@ func TestClientLibrary(t *testing.T) {
 	}
 	if got := recs[3].UnavailableReason; !strings.Contains(got, "pre-order") {
 		t.Fatalf("pre-order reason = %q", got)
+	}
+}
+
+// libraryPageJSON renders a /1.0/library page of count items whose ASINs are unique
+// within tag - so the same tag twice is a replayed page, and different tags are
+// genuinely different pages. Item 0 of every page carries NO asin: the pager must
+// stay correct for an item it cannot key on. Called from the test goroutine (never
+// the handler's), so a marshal failure can legitimately t.Fatal.
+func libraryPageJSON(t *testing.T, tag string, count int) []byte {
+	t.Helper()
+	items := make([]map[string]string, count)
+	for i := range count {
+		items[i] = map[string]string{
+			"asin":  fmt.Sprintf("B%s-%05d", tag, i),
+			"title": fmt.Sprintf("Book %s-%d", tag, i),
+		}
+		if i == 0 {
+			delete(items[i], "asin")
+		}
+	}
+	b, err := json.Marshal(map[string]any{"items": items})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// An endpoint that replays a full page (rather than returning an empty one) must
+// stop the pager at the first page contributing nothing new, and never duplicate a
+// book. Before the guard, a short page was the only exit; and while the dedupe was
+// keyed on the ASIN alone, a single item without one was re-appended every page and
+// kept the "nothing new" stop from ever firing.
+func TestClientLibraryStopsOnRepeatedPage(t *testing.T) {
+	page := libraryPageJSON(t, "same", libraryPageSize) // identical every time
+	var requests int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = w.Write(page)
+	}))
+	defer ts.Close()
+
+	recs, err := testClient(t, ts.URL).Library(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != libraryPageSize {
+		t.Fatalf("got %d records, want %d (the replayed page was appended again)", len(recs), libraryPageSize)
+	}
+	if requests != 2 {
+		t.Fatalf("made %d requests, want 2 (one page, one that proved it repeats)", requests)
+	}
+}
+
+// The dedupe guard must not stop a genuinely multi-page library - including across
+// two consecutive FULL pages, where only the third page ends the walk.
+func TestClientLibraryPaginates(t *testing.T) {
+	const extra = 3 // a short final page ends the walk
+	pages := map[string][]byte{
+		"1": libraryPageJSON(t, "1", libraryPageSize),
+		"2": libraryPageJSON(t, "2", libraryPageSize),
+		"3": libraryPageJSON(t, "3", extra),
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, ok := pages[r.URL.Query().Get("page")]
+		if !ok {
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write(page)
+	}))
+	defer ts.Close()
+
+	recs, err := testClient(t, ts.URL).Library(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := 2*libraryPageSize + extra; len(recs) != want {
+		t.Fatalf("got %d records, want %d (pagination dropped a page)", len(recs), want)
 	}
 }
 

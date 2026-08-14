@@ -16,6 +16,9 @@ import (
 //     chose for an import instead of the planned placement.
 //   - Ignored: ASIN → true for books the user never wants the stats sync to touch
 //     (e.g. a shared account's kids' series). Persisted so the choice sticks.
+//   - Rejected: ASIN → true for books whose automatic server match the user has
+//     declared wrong ("Not on server") - the book is treated as not present, so
+//     it can be imported despite the matcher's opinion.
 //
 // It's non-secret UI bookkeeping, so it lives in a plain JSON file beside the
 // registry (atomic temp+rename save), like the sync-status and series-watch stores.
@@ -28,9 +31,10 @@ type OverrideStore struct {
 // Overrides is one library's manual overrides. Nil maps are tolerated everywhere:
 // Get always returns non-nil maps, and Set stores nil as empty.
 type Overrides struct {
-	Matches map[string]string `json:"matches"`
-	Dests   map[string]string `json:"dests"`
-	Ignored map[string]bool   `json:"ignored"`
+	Matches  map[string]string `json:"matches"`
+	Dests    map[string]string `json:"dests"`
+	Ignored  map[string]bool   `json:"ignored"`
+	Rejected map[string]bool   `json:"rejected,omitempty"`
 }
 
 type scopeOverrides struct {
@@ -59,13 +63,27 @@ func OpenOverrides(path string) (*OverrideStore, error) {
 func (s *OverrideStore) Get(serverID string, libraryID int64) Overrides {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := Overrides{Matches: map[string]string{}, Dests: map[string]string{}, Ignored: map[string]bool{}}
+	out := emptyOverrides()
 	if sc, ok := s.scopes[scopeKey(serverID, libraryID)]; ok {
-		maps.Copy(out.Matches, sc.Matches)
-		maps.Copy(out.Dests, sc.Dests)
-		maps.Copy(out.Ignored, sc.Ignored)
+		copyOverrides(&out, sc.Overrides)
 	}
 	return out
+}
+
+// emptyOverrides returns an Overrides with every map non-nil.
+func emptyOverrides() Overrides {
+	return Overrides{
+		Matches: map[string]string{}, Dests: map[string]string{},
+		Ignored: map[string]bool{}, Rejected: map[string]bool{},
+	}
+}
+
+// copyOverrides copies src's entries into dst's (non-nil) maps.
+func copyOverrides(dst *Overrides, src Overrides) {
+	maps.Copy(dst.Matches, src.Matches)
+	maps.Copy(dst.Dests, src.Dests)
+	maps.Copy(dst.Ignored, src.Ignored)
+	maps.Copy(dst.Rejected, src.Rejected)
 }
 
 // Set replaces a (server, library)'s overrides wholesale and persists atomically.
@@ -84,11 +102,9 @@ func (s *OverrideStore) Set(serverID string, libraryID int64, ov Overrides) erro
 func (s *OverrideStore) Update(serverID string, libraryID int64, mut func(ov *Overrides)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ov := Overrides{Matches: map[string]string{}, Dests: map[string]string{}, Ignored: map[string]bool{}}
+	ov := emptyOverrides()
 	if sc, ok := s.scopes[scopeKey(serverID, libraryID)]; ok {
-		maps.Copy(ov.Matches, sc.Matches)
-		maps.Copy(ov.Dests, sc.Dests)
-		maps.Copy(ov.Ignored, sc.Ignored)
+		copyOverrides(&ov, sc.Overrides)
 	}
 	mut(&ov)
 	return s.setLocked(serverID, libraryID, ov)
@@ -97,19 +113,15 @@ func (s *OverrideStore) Update(serverID string, libraryID int64, mut func(ov *Ov
 // setLocked is Set's body; the caller must hold s.mu.
 func (s *OverrideStore) setLocked(serverID string, libraryID int64, ov Overrides) error {
 	key := scopeKey(serverID, libraryID)
-	if len(ov.Matches) == 0 && len(ov.Dests) == 0 && len(ov.Ignored) == 0 {
+	if len(ov.Matches) == 0 && len(ov.Dests) == 0 && len(ov.Ignored) == 0 && len(ov.Rejected) == 0 {
 		delete(s.scopes, key)
 		return s.save()
 	}
-	if ov.Matches == nil {
-		ov.Matches = map[string]string{}
-	}
-	if ov.Dests == nil {
-		ov.Dests = map[string]string{}
-	}
-	if ov.Ignored == nil {
-		ov.Ignored = map[string]bool{}
-	}
+	// Normalize nil maps to empty via the same two helpers Get/Update use, so
+	// adding a field means updating one field list, not three.
+	norm := emptyOverrides()
+	copyOverrides(&norm, ov)
+	ov = norm
 	s.scopes[key] = scopeOverrides{
 		LibraryScope: LibraryScope{ServerID: serverID, LibraryID: libraryID}, Overrides: ov,
 	}

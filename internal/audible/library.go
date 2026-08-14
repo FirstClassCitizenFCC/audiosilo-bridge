@@ -47,14 +47,41 @@ type seriesRef struct {
 	Sequence string `json:"sequence"`
 }
 
+const (
+	// libraryPageSize is the per-request item count; a short page means the last one.
+	libraryPageSize = 1000
+	// maxLibraryPages bounds the pager. At libraryPageSize that allows a 250,000-title
+	// account - far beyond any real library - while keeping a misbehaving endpoint
+	// finite: the only exit used to be a short page, so an endpoint that clamped `page`
+	// or replayed the last one for an out-of-range value appended 1000 records per
+	// request until the caller's deadline, with nothing bounding the memory.
+	maxLibraryPages = 250
+)
+
+// dedupeKey identifies a library item for the pager's dedupe. The ASIN is the real
+// identity, but it MUST fall back to something non-empty: an item keyed on "" is
+// never recorded as seen, so a replayed page re-appends it every time and the
+// "contributed nothing new" stop never fires - one blank-ASIN item was enough to
+// spin the pager to its page cap. The API always sends an ASIN; this is the
+// defensive path, and collapsing two same-titled ASIN-less items loses nothing
+// (Record.Key is the ASIN, so downstream can't tell them apart anyway).
+func (it libItem) dedupeKey() string {
+	if it.ASIN != "" {
+		return it.ASIN
+	}
+	return "title:" + it.Title
+}
+
 // Library lists the account's owned audiobooks as import records (metadata only;
-// SrcPath is empty - the file is fetched on demand by Acquire).
+// SrcPath is empty - the file is fetched on demand by Acquire). Items are deduped
+// by dedupeKey, so a repeated page can neither duplicate a book nor spin the pager.
 func (c *Client) Library(ctx context.Context) ([]source.Record, error) {
 	var recs []source.Record
-	for page := 1; ; page++ {
+	seen := make(map[string]bool, libraryPageSize) // one page is the common case
+	for page := 1; page <= maxLibraryPages; page++ {
 		q := url.Values{
 			"response_groups": {"contributors,series,product_desc,product_attrs,customer_rights"},
-			"num_results":     {"1000"},
+			"num_results":     {strconv.Itoa(libraryPageSize)},
 			"page":            {strconv.Itoa(page)},
 		}
 		var resp libraryResp
@@ -62,10 +89,18 @@ func (c *Client) Library(ctx context.Context) ([]source.Record, error) {
 			return nil, err
 		}
 		now := time.Now()
+		before := len(recs)
 		for _, it := range resp.Items {
+			k := it.dedupeKey()
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
 			recs = append(recs, it.toRecord(now))
 		}
-		if len(resp.Items) < 1000 {
+		// A short page is the last one. A full page that contributed nothing new means
+		// the endpoint is replaying a page instead of advancing - stop either way.
+		if len(resp.Items) < libraryPageSize || len(recs) == before {
 			break
 		}
 	}

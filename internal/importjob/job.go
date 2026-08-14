@@ -35,6 +35,11 @@ type PlanOptions struct {
 	// per record - essential for a large library, where per-book queries trip the
 	// server's rate limiter (HTTP 429). When nil, Plan queries the server per book.
 	Books []serverapi.Book
+	// Rejected marks records (by Record.Key - the ASIN for Audible records) whose
+	// automatic server match the user has declared wrong ("Not on server"). Plan
+	// reports them as not existing, so Run imports them instead of skipping them -
+	// folded into planning so every caller gets correct items by construction.
+	Rejected map[string]bool
 }
 
 // Plan computes a destination and an existence check for each record against a
@@ -91,7 +96,7 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 			return nil, err
 		}
 		exists := false
-		if !opts.SkipExistsCheck {
+		if !opts.SkipExistsCheck && !opts.Rejected[rec.Key] {
 			if matcher != nil {
 				_, exists = matcher.Match(rec)
 			} else {
@@ -134,9 +139,12 @@ func ApplyDestinations(items []PlannedItem, dests map[string]string) {
 // pkg/match matcher. It converts the candidate slice once so matching many records
 // against the same library is O(library) instead of O(records × library) - the
 // pre-flight and stats-sync loops match the whole Audible library against it.
+// It also counts how many records have claimed each matched path (see Contested).
+// Not safe for concurrent use.
 type BookMatcher struct {
-	books []serverapi.Book
-	cands []match.Book
+	books  []serverapi.Book
+	cands  []match.Book
+	claims map[string]int // matched rel_path → how many records claimed it
 }
 
 // NewBookMatcher builds a matcher over an already-fetched library book list.
@@ -145,7 +153,7 @@ func NewBookMatcher(books []serverapi.Book) *BookMatcher {
 	for i, b := range books {
 		cands[i] = match.Book{Title: b.Title, Author: b.Author, Series: b.Series, SeriesIndex: b.SeriesIndex, ASIN: b.ASIN}
 	}
-	return &BookMatcher{books: books, cands: cands}
+	return &BookMatcher{books: books, cands: cands, claims: map[string]int{}}
 }
 
 // Match finds the server book corresponding to rec (ASIN → author + series +
@@ -160,7 +168,15 @@ func (m *BookMatcher) Match(rec source.Record) (serverapi.Book, bool) {
 	if !ok {
 		return serverapi.Book{}, false
 	}
+	m.claims[m.books[i].RelPath]++
 	return m.books[i], true
+}
+
+// Contested reports whether more than one record has matched path since the
+// matcher was built - meaning at least one of those matches is wrong, so nothing
+// identity-durable (like an ASIN backfill) should be derived from any of them.
+func (m *BookMatcher) Contested(path string) bool {
+	return m.claims[path] > 1
 }
 
 // MatchInBooks is a one-shot match over books (the per-book existence path). For
