@@ -49,9 +49,9 @@ func TestFindSiblings(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"books":[` +
-			`{"rel_path":"Will Wight/Cradle/C01 - Unsouled","series":"Cradle","series_index":1},` +
-			`{"rel_path":"Will Wight/Cradle/C02 - Soulsmith","series":"The Cradle","series_index":2},` +
-			`{"rel_path":"Will Wight/Elder Empire/EE01","series":"Elder Empire","series_index":1}` +
+			`{"rel_path":"Will Wight/Cradle/C01 - Unsouled","author":"Will Wight","series":"Cradle","series_index":1},` +
+			`{"rel_path":"Will Wight/Cradle/C02 - Soulsmith","author":"Will Wight","series":"The Cradle","series_index":2},` +
+			`{"rel_path":"Will Wight/Elder Empire/EE01","author":"Will Wight","series":"Elder Empire","series_index":1}` +
 			`]}`))
 	}))
 	defer srv.Close()
@@ -68,5 +68,48 @@ func TestFindSiblings(t *testing.T) {
 	// A standalone (no series) returns nil without consulting the server.
 	if s, err := FindSiblings(context.Background(), c, 3, "Will Wight", ""); err != nil || s != nil {
 		t.Fatalf("standalone: got %+v, %v", s, err)
+	}
+}
+
+func TestSiblingsFromBooksMultiAuthor(t *testing.T) {
+	books := []serverapi.Book{
+		{RelPath: "Shirtaloon/HWFWM/FWM01", Author: "Shirtaloon, Travis Deverell", Series: "He Who Fights WIth Monsters"},
+		{RelPath: "Shirtaloon/HWFWM/FWM02", Author: "Shirtaloon & Travis Deverell", Series: "He Who Fights With Monsters"},
+		{RelPath: "Someone/HWFWM/X01", Author: "Someone Else", Series: "He Who Fights With Monsters"},
+		{RelPath: "Shirtaloon/Other/O01", Author: "Shirtaloon", Series: "Other Series"},
+	}
+	// Allowed: the Audible record's single author is one of the credited authors.
+	got := SiblingsFromBooks(books, "Shirtaloon", "He Who Fights with Monsters")
+	if len(got) != 2 || got[0].RelPath != "Shirtaloon/HWFWM/FWM01" || got[1].RelPath != "Shirtaloon/HWFWM/FWM02" {
+		t.Fatalf("multi-author siblings = %+v", got)
+	}
+	if len(SiblingsFromBooks(books, "Travis Deverell", "He Who Fights With Monsters")) != 2 {
+		t.Fatal("second credited author should match too")
+	}
+	// Denied: a different author in the same series, and a partial-name overlap.
+	if s := SiblingsFromBooks(books, "Jane Doe", "He Who Fights With Monsters"); len(s) != 0 {
+		t.Fatalf("unrelated author matched: %+v", s)
+	}
+	if s := SiblingsFromBooks(books, "Travis", "He Who Fights With Monsters"); len(s) != 0 {
+		t.Fatalf("partial name matched: %+v", s)
+	}
+}
+
+func TestSameAuthor(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"L. A. McBride", "L.A. McBride", true},
+		{"Shirtaloon, Travis Deverell", "Shirtaloon", true},
+		{"Ilona Andrews and Gordon Andrews", "Gordon Andrews", true},
+		{"Ilona Andrews; Gordon Andrews", "Ilona Andrews", true},
+		{"Brandon Sanderson", "Brandon Anderson", false},
+		{"Dan Anderson", "Dan", false},
+		{"", "", false},
+	} {
+		if got := sameAuthor(tc.a, tc.b); got != tc.want {
+			t.Errorf("sameAuthor(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
 	}
 }

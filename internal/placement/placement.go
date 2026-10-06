@@ -10,6 +10,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Kind describes how confident the suggestion is.
@@ -116,6 +117,16 @@ func seriesWithSiblings(in Input) Suggestion {
 	tmpl, ok := pickTemplate(in.Siblings)
 	authorSeg, middle, _ := splitRelPath(tmpl.RelPath)
 	prefix, width, parsed := parseCode(leafCode(lastSegment(tmpl.RelPath)))
+	if bareTitle(in.Title) {
+		// Nothing of its own to name the folder by: follow the sibling's naming
+		// ("He Who Fights With Monsters - Book 12" → "… - Book 13") when it carries
+		// its number, else the series name.
+		if t, ok := titleFromSibling(lastSegment(tmpl.RelPath), in); ok {
+			in.Title = t
+		} else {
+			in.Title = seriesTitle(in)
+		}
+	}
 
 	note := "matched existing series folders"
 	if !ok || !parsed {
@@ -138,6 +149,9 @@ func seriesWithSiblings(in Input) Suggestion {
 }
 
 func seriesNew(in Input) Suggestion {
+	if bareTitle(in.Title) {
+		in.Title = seriesTitle(in)
+	}
 	prefix := guessShortcode(in.SeriesName)
 	leaf := buildLeaf(prefix, 2, in)
 	rel := authorSegment(in) + "/" + sanitize(in.SeriesName) + "/" + leaf
@@ -157,6 +171,63 @@ func buildLeaf(prefix string, width int, in Input) string {
 	}
 	num := formatSequence(in.Sequence, width)
 	return sanitize(prefix + num + " - " + in.Title)
+}
+
+// bareTitle reports whether a cleaned title has nothing of its own to name a folder
+// by - no letters at all, e.g. the "13" left of "He Who Fights with Monsters 13: A
+// LitRPG Adventure" once the series name and genre subtitle are stripped.
+func bareTitle(t string) bool {
+	return !strings.ContainsFunc(t, unicode.IsLetter)
+}
+
+// seriesTitle names a bare-titled book by its series: "He Who Fights with Monsters
+// 13" rather than "13".
+func seriesTitle(in Input) string {
+	return strings.TrimSpace(in.SeriesName + " " + in.Title)
+}
+
+// titleFromSibling reuses a sibling folder's title for a bare-titled book by
+// renumbering it: leaf "FWM12 - He Who Fights With Monsters - Book 12" gives
+// "He Who Fights With Monsters - Book 13" for sequence 13. ok is false when the
+// sibling's title doesn't carry its own number (a real title like "Wintersteel").
+func titleFromSibling(leaf string, in Input) (string, bool) {
+	code := leafCode(leaf)
+	if !in.HasSequence || code == leaf {
+		return "", false
+	}
+	rest := leaf[len(code)+len(" - "):]
+	prefix, _, ok := parseCode(code)
+	if !ok || bareTitle(rest) {
+		return "", false
+	}
+	n, err := strconv.ParseFloat(code[len(prefix):], 64)
+	if err != nil {
+		return "", false
+	}
+	num := strconv.FormatFloat(n, 'f', -1, 64)
+	i := lastNumberAt(rest, num)
+	if i < 0 {
+		return "", false
+	}
+	return rest[:i] + strconv.FormatFloat(in.Sequence, 'f', -1, 64) + rest[i+len(num):], true
+}
+
+// lastNumberAt is the index of the last occurrence of num in s that stands alone
+// (not part of a longer number), or -1.
+func lastNumberAt(s, num string) int {
+	for end := len(s); ; {
+		i := strings.LastIndex(s[:end], num)
+		if i < 0 {
+			return -1
+		}
+		j := i + len(num)
+		before := i > 0 && (isDigit(s[i-1]) || s[i-1] == '.')
+		after := j < len(s) && (isDigit(s[j]) || s[j] == '.' && j+1 < len(s) && isDigit(s[j+1]))
+		if !before && !after {
+			return i
+		}
+		end = i
+	}
 }
 
 // formatSequence renders a series position zero-padded to width, preserving a

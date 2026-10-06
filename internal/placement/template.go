@@ -67,15 +67,19 @@ type Vars struct {
 // varsFromInput extracts template variables from an Input, resolving the shortcode
 // and padding width from the series siblings (reusing the Auto-mode primitives).
 func varsFromInput(in Input) Vars {
+	title := in.Title
+	if bareTitle(title) && in.SeriesName != "" {
+		title = seriesTitle(in) // "He Who Fights with Monsters 13", not "13"
+	}
 	short := strings.TrimSpace(in.TitleShort)
-	if short == "" {
-		short = in.Title
+	if short == "" || bareTitle(short) {
+		short = title
 	}
 	code, width := resolveShortcode(in)
 	return Vars{
 		Author:      in.Author,
 		Series:      in.SeriesName,
-		Title:       in.Title,
+		Title:       title,
 		TitleShort:  short,
 		Narrator:    in.Narrator,
 		ASIN:        in.ASIN,

@@ -63,6 +63,40 @@ func TestSuggest(t *testing.T) {
 			wantKind: SeriesExisting,
 		},
 		{
+			// A title that cleans down to its number borrows the sibling's naming,
+			// renumbered, instead of producing "FWM13 - 13".
+			name: "bare title follows sibling naming",
+			in: Input{
+				Author: "Shirtaloon", Title: "13", SeriesName: "He Who Fights with Monsters",
+				Sequence: 13, HasSequence: true, Filename: "HWFWM 13.m4b",
+				Siblings: []Sibling{
+					{RelPath: "Shirtaloon/He Who Fights With Monsters/FWM09 - He Who Fights With Monsters - Book 9"},
+					{RelPath: "Shirtaloon/He Who Fights With Monsters/FWM12 - He Who Fights With Monsters - Book 12", SeriesIndex: 12},
+				},
+			},
+			wantPath: "Shirtaloon/He Who Fights With Monsters/FWM13 - He Who Fights With Monsters - Book 13/HWFWM 13.m4b",
+			wantKind: SeriesExisting,
+		},
+		{
+			name: "bare title with real-titled siblings uses the series name",
+			in: Input{
+				Author: "Will Wight", Title: "13", SeriesName: "Cradle",
+				Sequence: 13, HasSequence: true, Filename: "Cradle 13.m4b",
+				Siblings: []Sibling{{RelPath: "Will Wight/Cradle/C12 - Waybound", SeriesIndex: 12}},
+			},
+			wantPath: "Will Wight/Cradle/C13 - Cradle 13/Cradle 13.m4b",
+			wantKind: SeriesExisting,
+		},
+		{
+			name: "bare title in a new series uses the series name",
+			in: Input{
+				Author: "Shirtaloon", Title: "13", SeriesName: "He Who Fights with Monsters",
+				Sequence: 13, HasSequence: true, Filename: "HWFWM 13.m4b",
+			},
+			wantPath: "Shirtaloon/He Who Fights with Monsters/HWFWM13 - He Who Fights with Monsters 13/HWFWM 13.m4b",
+			wantKind: SeriesNew,
+		},
+		{
 			name: "universe nesting preserves middle segments",
 			in: Input{
 				Author: "Robin Hobb", Title: "Ship of Destiny", SeriesName: "Liveship Traders",
@@ -190,5 +224,26 @@ func TestFormatSequence(t *testing.T) {
 		if got := formatSequence(tt.seq, tt.width); got != tt.want {
 			t.Errorf("formatSequence(%v,%d) = %q, want %q", tt.seq, tt.width, got, tt.want)
 		}
+	}
+}
+
+func TestTitleFromSibling(t *testing.T) {
+	in := Input{Sequence: 2.5, HasSequence: true}
+	for _, tc := range []struct {
+		leaf, want string
+		ok         bool
+	}{
+		{"FWM02 - He Who Fights With Monsters - Book 2", "He Who Fights With Monsters - Book 2.5", true},
+		{"X02 - Part 12 of Book 2", "Part 12 of Book 2.5", true}, // the standalone 2, not the one in 12
+		{"C02 - Soulsmith", "", false},                           // a real title: no number to renumber
+		{"FWM02", "", false},                                     // no title part at all
+	} {
+		got, ok := titleFromSibling(tc.leaf, in)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("titleFromSibling(%q) = %q, %v; want %q, %v", tc.leaf, got, ok, tc.want, tc.ok)
+		}
+	}
+	if _, ok := titleFromSibling("FWM02 - Book 2", Input{}); ok {
+		t.Error("no sequence must not renumber")
 	}
 }

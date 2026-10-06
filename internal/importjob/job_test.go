@@ -16,7 +16,7 @@ func TestPlan(t *testing.T) {
 	// Existing siblings in the Cradle series (drives the C##/width-2 convention).
 	mux.HandleFunc("/api/v1/libraries/1/books", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"books":[{"rel_path":"Will Wight/Cradle/C01 - Unsouled","series":"Cradle","series_index":1}]}`))
+		_, _ = w.Write([]byte(`{"books":[{"rel_path":"Will Wight/Cradle/C01 - Unsouled","author":"Will Wight","series":"Cradle","series_index":1}]}`))
 	})
 	// Search always returns the existing "Unsouled" so the existence check can
 	// match book 1 (by author+title) but not the new book 2.
@@ -50,6 +50,66 @@ func TestPlan(t *testing.T) {
 	// Book 1 already exists (search matches author+title).
 	if !items[1].ExistsOnServer {
 		t.Fatal("Unsouled should be detected on the server")
+	}
+}
+
+// The real He Who Fights with Monsters case: the server's tags credit both authors
+// and spell the series folder "WIth", while the Audible record carries only its
+// first author and a title that cleans down to the bare number. The book must land
+// in the existing series folder, named like its siblings - not in a near-duplicate
+// "He Who Fights with Monsters/HWFWM13 - 13" beside it.
+func TestPlanMultiAuthorSiblingsBareTitle(t *testing.T) {
+	books := []serverapi.Book{
+		{RelPath: "Shirtaloon/He Who Fights WIth Monsters/FWM01 - He Who Fights With Monsters - Book 1", Title: "He Who Fights with Monsters", Author: "Shirtaloon, Travis Deverell", Series: "He Who Fights WIth Monsters"},
+		{RelPath: "Shirtaloon/He Who Fights WIth Monsters/FWM12 - He Who Fights With Monsters - Book 12", Title: "He Who Fights with Monsters 12: A LitRPG Adventure", Author: "Shirtaloon, Travis Deverell", Series: "He Who Fights WIth Monsters"},
+	}
+	recs := []source.Record{{
+		Key: "B0XXX", FileName: "He Who Fights with Monsters 13 - A LitRPG Adventure.m4b",
+		Title:  "He Who Fights with Monsters 13: A LitRPG Adventure",
+		Author: "Shirtaloon", Series: "He Who Fights with Monsters", Sequence: 13, HasSequence: true,
+	}}
+	items, err := Plan(context.Background(), nil, 1, recs, PlanOptions{Mode: placement.ModeAuto, Books: books, SkipExistsCheck: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Shirtaloon/He Who Fights WIth Monsters/FWM13 - He Who Fights With Monsters - Book 13/He Who Fights with Monsters 13 - A LitRPG Adventure.m4b"
+	if items[0].RelPath != want {
+		t.Fatalf("placement:\n got: %q\nwant: %q", items[0].RelPath, want)
+	}
+}
+
+// Without a pre-fetched list, Plan fetches the library once (unfiltered - the
+// server's author filter is exact) and matches siblings client-side.
+func TestPlanFetchesLibraryOnce(t *testing.T) {
+	calls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/libraries/1/books", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if a := r.URL.Query().Get("author"); a != "" {
+			t.Errorf("library fetched with exact author filter %q", a)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"books":[{"rel_path":"Shirtaloon/HWFWM/FWM01 - One","author":"Shirtaloon, Travis Deverell","series":"He Who Fights With Monsters"}]}`))
+	})
+	mux.HandleFunc("/api/v1/search", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"books":[]}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	recs := []source.Record{
+		{SrcPath: "/tmp/a.m4b", Title: "Two", Author: "Shirtaloon", Series: "He Who Fights With Monsters", Sequence: 2, HasSequence: true},
+		{SrcPath: "/tmp/b.m4b", Title: "Three", Author: "Shirtaloon", Series: "He Who Fights With Monsters", Sequence: 3, HasSequence: true},
+	}
+	items, err := Plan(context.Background(), serverapi.New(srv.URL, false), 1, recs, PlanOptions{Mode: placement.ModeAuto})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("library fetched %d times, want 1", calls)
+	}
+	if items[1].RelPath != "Shirtaloon/HWFWM/FWM03 - Three/b.m4b" {
+		t.Fatalf("placement = %q", items[1].RelPath)
 	}
 }
 

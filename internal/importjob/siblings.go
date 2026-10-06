@@ -6,6 +6,7 @@ package importjob
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"github.com/kodestar/audiosilo-manager/internal/serverapi"
@@ -14,25 +15,19 @@ import (
 
 // FindSiblings returns the books in a library that belong to the same author and
 // (tolerantly-normalized) series as the target - the existing entries a placement
-// anchors on. It fetches the whole author and matches the series client-side,
-// because the server's series filter is an exact match and would miss folders like
-// "The Primal Hunter" vs "Primal Hunter". Returns nil for a standalone (no series).
+// anchors on. It fetches the library and matches client-side (SiblingsFromBooks),
+// because the server's author and series filters are exact matches and would miss
+// "The Primal Hunter" vs "Primal Hunter", or an Audible "Shirtaloon" against a
+// tagged "Shirtaloon, Travis Deverell". Returns nil for a standalone (no series).
 func FindSiblings(ctx context.Context, c *serverapi.Client, libraryID int64, author, series string) ([]serverapi.Book, error) {
 	if strings.TrimSpace(series) == "" {
 		return nil, nil
 	}
-	books, err := c.ListBooks(ctx, libraryID, author, "", 1000)
+	books, err := c.ListBooks(ctx, libraryID, "", "", 0)
 	if err != nil {
 		return nil, err
 	}
-	target := match.NormalizeSeries(series)
-	var out []serverapi.Book
-	for _, b := range books {
-		if match.NormalizeSeries(b.Series) == target {
-			out = append(out, b)
-		}
-	}
-	return out, nil
+	return SiblingsFromBooks(books, author, series), nil
 }
 
 // SiblingsFromBooks is the local equivalent of FindSiblings: it filters an
@@ -47,7 +42,7 @@ func SiblingsFromBooks(books []serverapi.Book, author, series string) []serverap
 	target := match.NormalizeSeries(series)
 	var out []serverapi.Book
 	for _, b := range books {
-		if sameNorm(b.Author, author) && match.NormalizeSeries(b.Series) == target {
+		if sameAuthor(b.Author, author) && match.NormalizeSeries(b.Series) == target {
 			out = append(out, b)
 		}
 	}
@@ -103,10 +98,40 @@ func authorFolderSeg(rel string) string {
 	return parts[0]
 }
 
-// sameNorm reports whether two strings are equal after tolerant normalization. It
-// uses the shared match.Normalize so the manager identifies authors identically to
-// the server (a differently-spaced author still compares equal).
-func sameNorm(a, b string) bool {
-	na := match.Normalize(a)
-	return na != "" && na == match.Normalize(b)
+// sameAuthor reports whether two author credits share a person. A credit may name
+// several authors - an embedded tag reads "Shirtaloon, Travis Deverell" where the
+// Audible record carries only its first author - so each side is split into names
+// and any (normalized) overlap counts. Siblings also require the same series, so a
+// shared co-author alone never links unrelated books.
+func sameAuthor(a, b string) bool {
+	names := map[string]bool{}
+	for _, n := range authorNames(a) {
+		names[n] = true
+	}
+	for _, n := range authorNames(b) {
+		if names[n] {
+			return true
+		}
+	}
+	return false
+}
+
+// authorSep splits a multi-author credit: commas, semicolons, ampersands, slashes
+// and a standalone "and".
+var authorSep = regexp.MustCompile(`(?i)\s*(?:[,;&/]|\band\b)\s*`)
+
+// authorNames is a credit's individual names, normalized with the shared
+// match.Normalize (so the manager compares names as the server does), plus
+// the whole credit so an unsplit equality still matches.
+func authorNames(credit string) []string {
+	out := []string{}
+	if n := match.Normalize(credit); n != "" {
+		out = append(out, n)
+	}
+	for _, p := range authorSep.Split(credit, -1) {
+		if n := match.Normalize(p); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
 }

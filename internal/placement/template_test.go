@@ -115,3 +115,17 @@ func TestParseErrors(t *testing.T) {
 		}
 	}
 }
+
+// A bare (number-only) title renders as "<Series> <n>" in template mode too.
+func TestTemplateBareTitle(t *testing.T) {
+	sug, err := SuggestWith(ModeTemplate, "{Author}/{Series}/{Title}/{OriginalFilename}", Input{
+		Author: "Shirtaloon", Title: "13", TitleShort: "13", SeriesName: "He Who Fights with Monsters",
+		Sequence: 13, HasSequence: true, Filename: "b.m4b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := path.Join(sug.RelPath, sug.Filename); got != "Shirtaloon/He Who Fights with Monsters/He Who Fights with Monsters 13/b.m4b" {
+		t.Fatalf("got %q", got)
+	}
+}

@@ -58,19 +58,21 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 		matcher = NewBookMatcher(opts.Books)
 		authorFolders = AuthorFolders(opts.Books)
 	}
+	// siblingBooks is the list siblings are matched against: the pre-fetched books,
+	// else the library fetched once on the first series record (the server's author
+	// filter is exact, so siblings are always matched client-side - see FindSiblings).
+	siblingBooks, fetched := opts.Books, opts.Books != nil
 	for _, rec := range recs {
 		var siblings []placement.Sibling
 		if strings.TrimSpace(rec.Series) != "" {
-			var found []serverapi.Book
-			if opts.Books != nil {
-				found = SiblingsFromBooks(opts.Books, rec.Author, rec.Series)
-			} else {
+			if !fetched {
 				var err error
-				if found, err = FindSiblings(ctx, c, libraryID, rec.Author, rec.Series); err != nil {
+				if siblingBooks, err = c.ListBooks(ctx, libraryID, "", "", 0); err != nil {
 					return nil, err
 				}
+				fetched = true
 			}
-			for _, b := range found {
+			for _, b := range SiblingsFromBooks(siblingBooks, rec.Author, rec.Series) {
 				siblings = append(siblings, placement.Sibling{RelPath: b.RelPath, SeriesIndex: b.SeriesIndex})
 			}
 		}
