@@ -1,21 +1,18 @@
 package importjob
 
 import (
-	"context"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
-	"github.com/kodestar/audiosilo-bridge/internal/serverapi"
+	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-server/pkg/match"
 )
 
 func TestAuthorFolders(t *testing.T) {
-	m := AuthorFolders([]serverapi.Book{
-		{RelPath: "L.A. McBride/Series/B01 - One", Author: "L.A. McBride"},
-		{RelPath: "L.A. McBride/Series/B02 - Two", Author: "L.A. McBride"},
-		{RelPath: "Will Wight/Cradle/C01 - Unsouled", Author: "Will Wight"},
-		{RelPath: "loose-single-file.m4b", Author: "Nobody"}, // no author folder
+	m := AuthorFolders([]link.LibraryBook{
+		{Path: "L.A. McBride/Series/B01 - One", Authors: []string{"L.A. McBride"}},
+		{Path: "L.A. McBride/Series/B02 - Two", Authors: []string{"L.A. McBride"}},
+		{Path: "Will Wight/Cradle/C01 - Unsouled", Authors: []string{"Will Wight"}},
+		{Path: "loose-single-file.m4b", Authors: []string{"Nobody"}}, // no author folder
 	})
 	// A differently-spaced author resolves to the existing folder spelling.
 	if got := m[match.Normalize("L. A. McBride")]; got != "L.A. McBride" {
@@ -35,52 +32,47 @@ func TestAuthorFolders(t *testing.T) {
 
 func TestAuthorFoldersPicksMostCommon(t *testing.T) {
 	// Two spellings already on the server; the dominant one wins (deterministically).
-	m := AuthorFolders([]serverapi.Book{
-		{RelPath: "L. A. McBride/A/x", Author: "L. A. McBride"},
-		{RelPath: "L.A. McBride/B/y", Author: "L.A. McBride"},
-		{RelPath: "L.A. McBride/C/z", Author: "L.A. McBride"},
+	m := AuthorFolders([]link.LibraryBook{
+		{Path: "L. A. McBride/A/x", Authors: []string{"L. A. McBride"}},
+		{Path: "L.A. McBride/B/y", Authors: []string{"L.A. McBride"}},
+		{Path: "L.A. McBride/C/z", Authors: []string{"L.A. McBride"}},
 	})
 	if got := m[match.Normalize("L.A. McBride")]; got != "L.A. McBride" {
 		t.Errorf("most-common folder = %q, want %q", got, "L.A. McBride")
 	}
 }
 
-func TestFindSiblings(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"books":[` +
-			`{"rel_path":"Will Wight/Cradle/C01 - Unsouled","author":"Will Wight","series":"Cradle","series_index":1},` +
-			`{"rel_path":"Will Wight/Cradle/C02 - Soulsmith","author":"Will Wight","series":"The Cradle","series_index":2},` +
-			`{"rel_path":"Will Wight/Elder Empire/EE01","author":"Will Wight","series":"Elder Empire","series_index":1}` +
-			`]}`))
-	}))
-	defer srv.Close()
-
-	c := serverapi.New(srv.URL, false)
-	got, err := FindSiblings(context.Background(), c, 3, "Will Wight", "Cradle")
-	if err != nil {
-		t.Fatal(err)
+func TestSiblingsFromBooksTolerantSeries(t *testing.T) {
+	books := []link.LibraryBook{
+		{Path: "Will Wight/Cradle/C01 - Unsouled", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Cradle", Position: "1"}}},
+		{Path: "Will Wight/Cradle/C02 - Soulsmith", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "The Cradle", Position: "2"}}},
+		{Path: "Will Wight/Elder Empire/EE01", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Elder Empire", Position: "1"}}},
 	}
+	got := SiblingsFromBooks(books, "Will Wight", "Cradle")
 	if len(got) != 2 {
 		t.Fatalf("want 2 Cradle siblings (tolerant of 'The Cradle'), got %d: %+v", len(got), got)
 	}
-
-	// A standalone (no series) returns nil without consulting the server.
-	if s, err := FindSiblings(context.Background(), c, 3, "Will Wight", ""); err != nil || s != nil {
-		t.Fatalf("standalone: got %+v, %v", s, err)
+	if s := SiblingsFromBooks(books, "Will Wight", ""); s != nil {
+		t.Fatalf("standalone: got %+v", s)
+	}
+	if pos, ok := SeriesPosition(got[1], "Cradle"); !ok || pos != 2 {
+		t.Fatalf("SeriesPosition = %v, %v", pos, ok)
+	}
+	if _, ok := SeriesPosition(got[1], "Elder Empire"); ok {
+		t.Fatal("a book outside the series has no position in it")
 	}
 }
 
 func TestSiblingsFromBooksMultiAuthor(t *testing.T) {
-	books := []serverapi.Book{
-		{RelPath: "Shirtaloon/HWFWM/FWM01", Author: "Shirtaloon, Travis Deverell", Series: "He Who Fights WIth Monsters"},
-		{RelPath: "Shirtaloon/HWFWM/FWM02", Author: "Shirtaloon & Travis Deverell", Series: "He Who Fights With Monsters"},
-		{RelPath: "Someone/HWFWM/X01", Author: "Someone Else", Series: "He Who Fights With Monsters"},
-		{RelPath: "Shirtaloon/Other/O01", Author: "Shirtaloon", Series: "Other Series"},
+	books := []link.LibraryBook{
+		{Path: "Shirtaloon/HWFWM/FWM01", Authors: []string{"Shirtaloon, Travis Deverell"}, Series: []link.SeriesRef{{Name: "He Who Fights WIth Monsters"}}},
+		{Path: "Shirtaloon/HWFWM/FWM02", Authors: []string{"Shirtaloon & Travis Deverell"}, Series: []link.SeriesRef{{Name: "He Who Fights With Monsters"}}},
+		{Path: "Someone/HWFWM/X01", Authors: []string{"Someone Else"}, Series: []link.SeriesRef{{Name: "He Who Fights With Monsters"}}},
+		{Path: "Shirtaloon/Other/O01", Authors: []string{"Shirtaloon"}, Series: []link.SeriesRef{{Name: "Other Series"}}},
 	}
 	// Allowed: the Audible record's single author is one of the credited authors.
 	got := SiblingsFromBooks(books, "Shirtaloon", "He Who Fights with Monsters")
-	if len(got) != 2 || got[0].RelPath != "Shirtaloon/HWFWM/FWM01" || got[1].RelPath != "Shirtaloon/HWFWM/FWM02" {
+	if len(got) != 2 || got[0].Path != "Shirtaloon/HWFWM/FWM01" || got[1].Path != "Shirtaloon/HWFWM/FWM02" {
 		t.Fatalf("multi-author siblings = %+v", got)
 	}
 	if len(SiblingsFromBooks(books, "Travis Deverell", "He Who Fights With Monsters")) != 2 {

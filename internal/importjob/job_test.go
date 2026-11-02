@@ -1,38 +1,24 @@
 package importjob
 
 import (
-	"context"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
+	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/placement"
-	"github.com/kodestar/audiosilo-bridge/internal/serverapi"
 	"github.com/kodestar/audiosilo-bridge/internal/source"
 )
 
 func TestPlan(t *testing.T) {
-	mux := http.NewServeMux()
-	// Existing siblings in the Cradle series (drives the C##/width-2 convention).
-	mux.HandleFunc("/api/v1/libraries/1/books", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"books":[{"rel_path":"Will Wight/Cradle/C01 - Unsouled","author":"Will Wight","series":"Cradle","series_index":1}]}`))
-	})
-	// Search always returns the existing "Unsouled" so the existence check can
-	// match book 1 (by author+title) but not the new book 2.
-	mux.HandleFunc("/api/v1/search", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"books":[{"title":"Unsouled","author":"Will Wight","series":"Cradle"}]}`))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	c := serverapi.New(srv.URL, false)
-
+	// An existing sibling in the Cradle series (drives the C##/width-2 convention),
+	// and the existing "Unsouled" the existence check matches by author + title.
+	books := []link.LibraryBook{
+		{Path: "Will Wight/Cradle/C01 - Unsouled", Title: "Unsouled", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Cradle", Position: "1"}}},
+	}
 	recs := []source.Record{
 		{SrcPath: "/tmp/Soulsmith.m4b", Title: "Soulsmith", Author: "Will Wight", Series: "Cradle", Sequence: 2, HasSequence: true},
 		{SrcPath: "/tmp/Unsouled.m4b", Title: "Unsouled", Author: "Will Wight", Series: "Cradle", Sequence: 1, HasSequence: true},
 	}
-	items, err := Plan(context.Background(), c, 1, recs, PlanOptions{Mode: placement.ModeAuto})
+	items, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +33,7 @@ func TestPlan(t *testing.T) {
 	if items[0].ExistsOnServer {
 		t.Fatal("Soulsmith should not be detected on the server")
 	}
-	// Book 1 already exists (search matches author+title).
+	// Book 1 already exists (author + title).
 	if !items[1].ExistsOnServer {
 		t.Fatal("Unsouled should be detected on the server")
 	}
@@ -59,16 +45,16 @@ func TestPlan(t *testing.T) {
 // in the existing series folder, named like its siblings - not in a near-duplicate
 // "He Who Fights with Monsters/HWFWM13 - 13" beside it.
 func TestPlanMultiAuthorSiblingsBareTitle(t *testing.T) {
-	books := []serverapi.Book{
-		{RelPath: "Shirtaloon/He Who Fights WIth Monsters/FWM01 - He Who Fights With Monsters - Book 1", Title: "He Who Fights with Monsters", Author: "Shirtaloon, Travis Deverell", Series: "He Who Fights WIth Monsters"},
-		{RelPath: "Shirtaloon/He Who Fights WIth Monsters/FWM12 - He Who Fights With Monsters - Book 12", Title: "He Who Fights with Monsters 12: A LitRPG Adventure", Author: "Shirtaloon, Travis Deverell", Series: "He Who Fights WIth Monsters"},
+	books := []link.LibraryBook{
+		{Path: "Shirtaloon/He Who Fights WIth Monsters/FWM01 - He Who Fights With Monsters - Book 1", Title: "He Who Fights with Monsters", Authors: []string{"Shirtaloon, Travis Deverell"}, Series: []link.SeriesRef{{Name: "He Who Fights WIth Monsters"}}},
+		{Path: "Shirtaloon/He Who Fights WIth Monsters/FWM12 - He Who Fights With Monsters - Book 12", Title: "He Who Fights with Monsters 12: A LitRPG Adventure", Authors: []string{"Shirtaloon, Travis Deverell"}, Series: []link.SeriesRef{{Name: "He Who Fights WIth Monsters"}}},
 	}
 	recs := []source.Record{{
 		Key: "B0XXX", FileName: "He Who Fights with Monsters 13 - A LitRPG Adventure.m4b",
 		Title:  "He Who Fights with Monsters 13: A LitRPG Adventure",
 		Author: "Shirtaloon", Series: "He Who Fights with Monsters", Sequence: 13, HasSequence: true,
 	}}
-	items, err := Plan(context.Background(), nil, 1, recs, PlanOptions{Mode: placement.ModeAuto, Books: books, SkipExistsCheck: true})
+	items, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books, SkipExistsCheck: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,38 +64,23 @@ func TestPlanMultiAuthorSiblingsBareTitle(t *testing.T) {
 	}
 }
 
-// Without a pre-fetched list, Plan fetches the library once (unfiltered - the
-// server's author filter is exact) and matches siblings client-side.
-func TestPlanFetchesLibraryOnce(t *testing.T) {
-	calls := 0
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/libraries/1/books", func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if a := r.URL.Query().Get("author"); a != "" {
-			t.Errorf("library fetched with exact author filter %q", a)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"books":[{"rel_path":"Shirtaloon/HWFWM/FWM01 - One","author":"Shirtaloon, Travis Deverell","series":"He Who Fights With Monsters"}]}`))
-	})
-	mux.HandleFunc("/api/v1/search", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"books":[]}`))
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	recs := []source.Record{
-		{SrcPath: "/tmp/a.m4b", Title: "Two", Author: "Shirtaloon", Series: "He Who Fights With Monsters", Sequence: 2, HasSequence: true},
-		{SrcPath: "/tmp/b.m4b", Title: "Three", Author: "Shirtaloon", Series: "He Who Fights With Monsters", Sequence: 3, HasSequence: true},
-	}
-	items, err := Plan(context.Background(), serverapi.New(srv.URL, false), 1, recs, PlanOptions{Mode: placement.ModeAuto})
+// A book in several series anchors a placement in any of them, at its position
+// in that series.
+func TestPlanSiblingInSecondSeries(t *testing.T) {
+	books := []link.LibraryBook{{
+		Path: "Pratchett/Witches/W01 - Equal Rites", Title: "Equal Rites", Authors: []string{"Terry Pratchett"},
+		Series: []link.SeriesRef{{Name: "Discworld", Position: "3"}, {Name: "Witches", Position: "1"}},
+	}}
+	recs := []source.Record{{SrcPath: "/tmp/wa.m4b", Title: "Wyrd Sisters", Author: "Terry Pratchett", Series: "Witches", Sequence: 2, HasSequence: true}}
+	items, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 {
-		t.Fatalf("library fetched %d times, want 1", calls)
+	if items[0].RelPath != "Pratchett/Witches/W02 - Wyrd Sisters/wa.m4b" {
+		t.Fatalf("placement = %q", items[0].RelPath)
 	}
-	if items[1].RelPath != "Shirtaloon/HWFWM/FWM03 - Three/b.m4b" {
-		t.Fatalf("placement = %q", items[1].RelPath)
+	if items[0].ExistsOnServer {
+		t.Fatal("a new book in the series must not match its sibling")
 	}
 }
 
@@ -143,11 +114,11 @@ func TestApplyDestinations(t *testing.T) {
 // A record whose automatic match the user rejected ("Not on server") must be
 // planned as not existing, so Run imports it instead of skipping it.
 func TestPlanRejectedExistence(t *testing.T) {
-	books := []serverapi.Book{{RelPath: "Will Wight/Cradle/C01 - Unsouled", Title: "Unsouled", Author: "Will Wight", Series: "Cradle", SeriesIndex: 1}}
+	books := []link.LibraryBook{{Path: "Will Wight/Cradle/C01 - Unsouled", Title: "Unsouled", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Cradle", Position: "1"}}}}
 	recs := []source.Record{{Key: "A1", SrcPath: "/tmp/Unsouled.m4b", Title: "Unsouled", Author: "Will Wight", Series: "Cradle", Sequence: 1, HasSequence: true}}
 
 	// Sanity: without a rejection the record is detected on the server.
-	plain, err := Plan(context.Background(), nil, 1, recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
+	plain, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +126,7 @@ func TestPlanRejectedExistence(t *testing.T) {
 		t.Fatalf("record should match the server book: %+v", plain[0])
 	}
 
-	rej, err := Plan(context.Background(), nil, 1, recs, PlanOptions{
+	rej, err := Plan(recs, PlanOptions{
 		Mode: placement.ModeAuto, Books: books, Rejected: map[string]bool{"A1": true},
 	})
 	if err != nil {
@@ -169,9 +140,9 @@ func TestPlanRejectedExistence(t *testing.T) {
 // A path matched by more than one record is contested - at least one of those
 // matches is wrong, so identity-durable writes (the ASIN backfill) must skip it.
 func TestBookMatcherContested(t *testing.T) {
-	m := NewBookMatcher([]serverapi.Book{
-		{RelPath: "a/one", Title: "One", Author: "Au", ASIN: "B001"},
-		{RelPath: "a/two", Title: "Two", Author: "Au", ASIN: "B002"},
+	m := NewBookMatcher([]link.LibraryBook{
+		{Path: "a/one", Title: "One", Authors: []string{"Au"}, ASIN: "B001"},
+		{Path: "a/two", Title: "Two", Authors: []string{"Au"}, ASIN: "B002"},
 	})
 	for _, asin := range []string{"B001", "B001", "B002"} {
 		if _, ok := m.Match(source.Record{Title: "x", Author: "Au", ASIN: asin}); !ok {
@@ -190,17 +161,8 @@ func TestBookMatcherContested(t *testing.T) {
 }
 
 func TestPlanTemplateMode(t *testing.T) {
-	// No server calls are needed for a standalone with an explicit template, but
-	// Plan still issues a search for the existence check, so stub it empty.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"books":[]}`))
-	}))
-	defer srv.Close()
-	c := serverapi.New(srv.URL, false)
-
 	recs := []source.Record{{SrcPath: "/x/Warbreaker.m4b", Title: "Warbreaker", Author: "Brandon Sanderson"}}
-	items, err := Plan(context.Background(), c, 1, recs, PlanOptions{
+	items, err := Plan(recs, PlanOptions{
 		Mode: placement.ModeTemplate, Template: "{Author}/{Title}/{OriginalFilename}",
 	})
 	if err != nil {

@@ -10,7 +10,8 @@ import (
 
 // Credentials is the durable result of registering a device with Audible. It is
 // full Amazon account access (the device private key + adp_token sign unrestricted
-// API calls), so it is stored ONLY in the OS keychain, never the registry file.
+// API calls), so it is stored ONLY in the Bridge vault (internal/secrets), never in
+// the store, a job's params or result, a log line or the heartbeat.
 type Credentials struct {
 	AccessToken      string `json:"access_token"`  // ~60 min; refreshed via RefreshToken
 	RefreshToken     string `json:"refresh_token"` // durable
@@ -23,13 +24,13 @@ type Credentials struct {
 	ExpiresAt        int64  `json:"expires_at"`  // unix seconds for AccessToken
 }
 
-// Marshal/Unmarshal round-trip the credentials for keychain storage.
+// Marshal/ParseCredentials round-trip the credentials for the vault.
 func (c Credentials) Marshal() (string, error) {
 	b, err := json.Marshal(c)
 	return string(b), err
 }
 
-// ParseCredentials parses keychain-stored credentials JSON.
+// ParseCredentials parses vault-stored credentials JSON.
 func ParseCredentials(s string) (Credentials, error) {
 	var c Credentials
 	err := json.Unmarshal([]byte(s), &c)

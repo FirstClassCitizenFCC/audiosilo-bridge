@@ -1,13 +1,13 @@
 package importjob
 
 import (
-	"context"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/placement"
-	"github.com/kodestar/audiosilo-bridge/internal/serverapi"
 	"github.com/kodestar/audiosilo-bridge/internal/source"
 	"github.com/kodestar/audiosilo-server/pkg/match"
 )
@@ -26,15 +26,14 @@ type PlannedItem struct {
 type PlanOptions struct {
 	Mode     placement.Mode
 	Template string // used when Mode == placement.ModeTemplate
-	// SkipExistsCheck computes destinations without the per-book server search.
-	// Used by the Audible pre-flight, which checks existence in bulk instead (see
-	// MatchInBooks) so it doesn't issue one search per book.
+	// SkipExistsCheck computes destinations without the existence check (a caller
+	// that matched the records itself, see BookMatcher).
 	SkipExistsCheck bool
-	// Books is the library's books, pre-fetched in one call. When set, Plan matches
-	// siblings AND existence locally against this list instead of issuing a query
-	// per record - essential for a large library, where per-book queries trip the
-	// server's rate limiter (HTTP 429). When nil, Plan queries the server per book.
-	Books []serverapi.Book
+	// Books is the library's books (the server's paged listing, read whole). Plan
+	// matches siblings AND existence locally against it; nil is an empty library.
+	// (The manager could query the server per record; the Bridge always holds the
+	// listing, so there is no per-record path.)
+	Books []link.LibraryBook
 	// Rejected marks records (by Record.Key - the ASIN for Audible records) whose
 	// automatic server match the user has declared wrong ("Not on server"). Plan
 	// reports them as not existing, so Run imports them instead of skipping them -
@@ -43,42 +42,26 @@ type PlanOptions struct {
 }
 
 // Plan computes a destination and an existence check for each record against a
-// library. For series books it fetches the existing siblings so the placement
-// mirrors the established folder/shortcode convention.
-func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
+// library's books (opts.Books). For series books the existing siblings anchor the
+// placement so it mirrors the established folder/shortcode convention.
+func Plan(recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
 	items := make([]PlannedItem, 0, len(recs))
-	// Build the bulk-match candidate list once (not per record) for the local
-	// existence check.
-	var matcher *BookMatcher
-	// authorFolders maps normalized author → existing folder spelling, built once so
-	// a differently-spaced author reuses its existing folder (a nil map - the
-	// per-book path - just yields "" on lookup). See AuthorFolders.
-	var authorFolders map[string]string
-	if opts.Books != nil {
-		matcher = NewBookMatcher(opts.Books)
-		authorFolders = AuthorFolders(opts.Books)
-	}
-	// siblingBooks is the list siblings are matched against: the pre-fetched books,
-	// else the library fetched once on the first series record (the server's author
-	// filter is exact, so siblings are always matched client-side - see FindSiblings).
-	siblingBooks, fetched := opts.Books, opts.Books != nil
+	// Build the bulk-match candidate list once (not per record) for the existence
+	// check, and authorFolders (normalized author -> existing folder spelling) so a
+	// differently-spaced author reuses its existing folder. See AuthorFolders.
+	matcher := NewBookMatcher(opts.Books)
+	authorFolders := AuthorFolders(opts.Books)
 	for _, rec := range recs {
 		var siblings []placement.Sibling
 		if strings.TrimSpace(rec.Series) != "" {
-			if !fetched {
-				var err error
-				if siblingBooks, err = c.ListBooks(ctx, libraryID, "", "", 0); err != nil {
-					return nil, err
-				}
-				fetched = true
-			}
-			for _, b := range SiblingsFromBooks(siblingBooks, rec.Author, rec.Series) {
-				siblings = append(siblings, placement.Sibling{RelPath: b.RelPath, SeriesIndex: b.SeriesIndex})
+			for _, b := range SiblingsFromBooks(opts.Books, rec.Author, rec.Series) {
+				idx, _ := SeriesPosition(b, rec.Series)
+				siblings = append(siblings, placement.Sibling{RelPath: b.Path, SeriesIndex: idx})
 			}
 		}
 		// Name by the clean book title - strip the series prefix and "(Book N)" /
 		// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
-		// Truth", not "… - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
+		// Truth", not "... - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
 		clean := match.CleanTitle(rec.Title, rec.Series)
 		sug, err := placement.SuggestWith(opts.Mode, opts.Template, placement.Input{
 			Author:       rec.Author,
@@ -99,11 +82,7 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 		}
 		exists := false
 		if !opts.SkipExistsCheck && !opts.Rejected[rec.Key] {
-			if matcher != nil {
-				_, exists = matcher.Match(rec)
-			} else {
-				exists = existsOnServer(ctx, c, rec)
-			}
+			_, exists = matcher.Match(rec)
 		}
 		items = append(items, PlannedItem{
 			Record:         rec,
@@ -118,8 +97,7 @@ func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []sour
 
 // ApplyDestinations replaces planned destinations with user-chosen ones, keyed by
 // Record.Key (the ASIN for Audible records). A destination is the full
-// library-relative path including the filename - the UI computes it when the user
-// picks a folder (see frontend src/lib/destpath.ts, which mirrors this contract).
+// library-relative path including the filename, as the admin chose it.
 // Anything unsafe (absolute, empty, or escaping the root after Clean) is ignored
 // and the planned path kept; transfer.SafeJoin re-checks at place time.
 func ApplyDestinations(items []PlannedItem, dests map[string]string) {
@@ -139,39 +117,58 @@ func ApplyDestinations(items []PlannedItem, dests map[string]string) {
 
 // BookMatcher matches records against a fixed server-book list via the shared
 // pkg/match matcher. It converts the candidate slice once so matching many records
-// against the same library is O(library) instead of O(records × library) - the
-// pre-flight and stats-sync loops match the whole Audible library against it.
-// It also counts how many records have claimed each matched path (see Contested).
+// against the same library is O(library) instead of O(records x library) - the
+// poll matches the whole Audible library against it. A book in several series is
+// a candidate under each of them (any one may be the series Audible names). It
+// also counts how many records have claimed each matched path (see Contested).
 // Not safe for concurrent use.
 type BookMatcher struct {
-	books  []serverapi.Book
+	books  []link.LibraryBook
 	cands  []match.Book
-	claims map[string]int // matched rel_path → how many records claimed it
+	owner  []int          // cands[i] is a candidate for books[owner[i]]
+	claims map[string]int // matched path -> how many records claimed it
 }
 
 // NewBookMatcher builds a matcher over an already-fetched library book list.
-func NewBookMatcher(books []serverapi.Book) *BookMatcher {
-	cands := make([]match.Book, len(books))
+func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
+	m := &BookMatcher{books: books, claims: map[string]int{}}
 	for i, b := range books {
-		cands[i] = match.Book{Title: b.Title, Author: b.Author, Series: b.Series, SeriesIndex: b.SeriesIndex, ASIN: b.ASIN}
+		base := match.Book{Title: b.Title, Author: Credit(b.Authors), ASIN: b.ASIN, Narrators: b.Narrators}
+		if len(b.Series) == 0 {
+			m.cands = append(m.cands, base)
+			m.owner = append(m.owner, i)
+			continue
+		}
+		for _, s := range b.Series {
+			c := base
+			c.Series = s.Name
+			c.SeriesIndex, _ = parsePosition(s.Position)
+			m.cands = append(m.cands, c)
+			m.owner = append(m.owner, i)
+		}
 	}
-	return &BookMatcher{books: books, cands: cands, claims: map[string]int{}}
+	return m
 }
 
-// Match finds the server book corresponding to rec (ASIN → author + series +
-// series-stripped title-token overlap, sequence parsed from the title when the
-// server's index is 0). The matcher is shared with the server so both sides
-// identify the same book identically.
-func (m *BookMatcher) Match(rec source.Record) (serverapi.Book, bool) {
-	i, ok := match.Best(m.cands, match.Query{
+// Match finds the server book corresponding to rec (ASIN exact first, then author
+// + series + series-stripped title-token overlap, sequence parsed from the title
+// when the server has no position). The matcher is shared with the server so both
+// sides identify the same book identically.
+func (m *BookMatcher) Match(rec source.Record) (link.LibraryBook, bool) {
+	q := match.Query{
 		Title: rec.Title, TitleShort: rec.TitleShort, Author: rec.Author,
 		Series: rec.Series, Sequence: rec.Sequence, HasSequence: rec.HasSequence, ASIN: rec.ASIN,
-	})
-	if !ok {
-		return serverapi.Book{}, false
 	}
-	m.claims[m.books[i].RelPath]++
-	return m.books[i], true
+	if rec.Narrator != "" {
+		q.Narrators = []string{rec.Narrator}
+	}
+	i, ok := match.Best(m.cands, q)
+	if !ok {
+		return link.LibraryBook{}, false
+	}
+	b := m.books[m.owner[i]]
+	m.claims[b.Path]++
+	return b, true
 }
 
 // Contested reports whether more than one record has matched path since the
@@ -181,10 +178,38 @@ func (m *BookMatcher) Contested(path string) bool {
 	return m.claims[path] > 1
 }
 
-// MatchInBooks is a one-shot match over books (the per-book existence path). For
-// repeated matching against the same library, build a BookMatcher once and reuse it.
-func MatchInBooks(books []serverapi.Book, rec source.Record) (serverapi.Book, bool) {
+// MatchInBooks is a one-shot match over books. For repeated matching against the
+// same library, build a BookMatcher once and reuse it.
+func MatchInBooks(books []link.LibraryBook, rec source.Record) (link.LibraryBook, bool) {
 	return NewBookMatcher(books).Match(rec)
+}
+
+// Credit is a book's author credits as one string ("A, B"), the shape the
+// manager's server listing carried and pkg/match's author gate compares.
+func Credit(authors []string) string {
+	return strings.Join(authors, ", ")
+}
+
+// SeriesPosition is b's position in series (matched tolerantly, as siblings are),
+// and whether b is in it with a usable number.
+func SeriesPosition(b link.LibraryBook, series string) (float64, bool) {
+	target := match.NormalizeSeries(series)
+	for _, s := range b.Series {
+		if match.NormalizeSeries(s.Name) == target {
+			return parsePosition(s.Position)
+		}
+	}
+	return 0, false
+}
+
+// parsePosition reads a server series position ("3", "2.5"); anything else, and
+// "", is no position.
+func parsePosition(s string) (float64, bool) {
+	v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 func recordFileName(rec source.Record) string {
@@ -192,20 +217,4 @@ func recordFileName(rec source.Record) string {
 		return rec.FileName
 	}
 	return filepath.Base(rec.SrcPath)
-}
-
-// existsOnServer reports whether the book is already present - matched by ASIN when
-// available, otherwise by author + title (tolerant normalization). Used only on the
-// per-book query path (no pre-fetched book list); the bulk path uses MatchInBooks.
-func existsOnServer(ctx context.Context, c *serverapi.Client, rec source.Record) bool {
-	q := strings.TrimSpace(rec.TitleShort)
-	if q == "" {
-		q = rec.Title
-	}
-	candidates, err := c.Search(ctx, q, 50)
-	if err != nil {
-		return false
-	}
-	_, ok := MatchInBooks(candidates, rec)
-	return ok
 }

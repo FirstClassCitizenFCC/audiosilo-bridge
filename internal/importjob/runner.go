@@ -4,7 +4,6 @@ import (
 	"context"
 	"path"
 
-	"github.com/kodestar/audiosilo-bridge/internal/serverapi"
 	"github.com/kodestar/audiosilo-bridge/internal/source"
 	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
@@ -23,8 +22,10 @@ type Progress struct {
 
 // RunOptions configures Run.
 type RunOptions struct {
-	Client       *serverapi.Client // for the post-transfer rescan; nil skips it
-	LibraryID    int64
+	// Rescan asks the server to index what was placed (library-relative paths,
+	// each item's RelPath), once after the run; nil skips it. Its error is not the
+	// run's: the files are placed either way.
+	Rescan       func(ctx context.Context, placed []string) error
 	Transfer     transfer.Transfer
 	TransferRoot string
 	Acquirer     source.Acquirer // download-on-demand sources (nil for file sources)
@@ -49,7 +50,7 @@ type ItemResult struct {
 // just-in-time. Per-item progress is reported via opts.OnProgress.
 func Run(ctx context.Context, items []PlannedItem, opts RunOptions) ([]ItemResult, error) {
 	results := make([]ItemResult, 0, len(items))
-	placedAny := false
+	var placed []string
 
 	for i, it := range items {
 		emit := func(status, errMsg string, copied, total int64) {
@@ -107,16 +108,16 @@ func Run(ctx context.Context, items []PlannedItem, opts RunOptions) ([]ItemResul
 			emit("error", err.Error(), 0, 0)
 			continue
 		}
-		placedAny = placedAny || !res.AlreadyPresent
+		if !res.AlreadyPresent {
+			placed = append(placed, it.RelPath)
+		}
 		results = append(results, ItemResult{Key: it.Record.Key, RelPath: it.RelPath, Placed: true, AlreadyPresent: res.AlreadyPresent})
 		emit("placed", "", 0, 0)
 	}
 
 	// One rescan after all placements so the server indexes the new files.
-	if placedAny && opts.Client != nil {
-		if err := opts.Client.Scan(ctx, opts.LibraryID); err == nil {
-			_, _ = opts.Client.WaitForScan(ctx, opts.LibraryID)
-		}
+	if len(placed) > 0 && opts.Rescan != nil {
+		_ = opts.Rescan(ctx, placed)
 	}
 	return results, nil
 }

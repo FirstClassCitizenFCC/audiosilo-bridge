@@ -4,10 +4,11 @@
 // and strips DRM with ffmpeg into a plain .m4b - the same capability as the
 // open-source Libation / OpenAudible / audible-cli. It plugs into the import
 // pipeline as a source.Acquirer (download-on-demand), so placement, transfer, and
-// the skip-if-already-on-server check are shared with folder/drag-drop imports.
+// the skip-if-already-on-server check are shared with any other import source.
 //
 // Credentials (full Amazon account tokens + the device RSA key) are stored only in
-// the OS keychain. The decryption key for a book is never persisted.
+// the Bridge vault and are never logged. The decryption key for a book is never
+// persisted.
 package audible
 
 import (

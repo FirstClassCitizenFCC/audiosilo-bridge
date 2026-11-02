@@ -1,26 +1,25 @@
 package importjob
 
 import (
-	"context"
 	"testing"
 
+	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/placement"
-	"github.com/kodestar/audiosilo-bridge/internal/serverapi"
 	"github.com/kodestar/audiosilo-bridge/internal/source"
 )
 
 func TestMatchInBooks(t *testing.T) {
-	books := []serverapi.Book{
-		{RelPath: "Wight/Cradle/C01 - Unsouled", Title: "Unsouled", Author: "Will Wight", ASIN: "B01"},
-		{RelPath: "Sanderson/Mistborn", Title: "The Final Empire", Author: "Brandon Sanderson"},
+	books := []link.LibraryBook{
+		{Path: "Wight/Cradle/C01 - Unsouled", Title: "Unsouled", Authors: []string{"Will Wight"}, ASIN: "B01"},
+		{Path: "Sanderson/Mistborn", Title: "The Final Empire", Authors: []string{"Brandon Sanderson"}},
 	}
 
 	// ASIN wins.
-	if b, ok := MatchInBooks(books, source.Record{ASIN: "B01", Title: "different"}); !ok || b.RelPath != "Wight/Cradle/C01 - Unsouled" {
+	if b, ok := MatchInBooks(books, source.Record{ASIN: "B01", Title: "different"}); !ok || b.Path != "Wight/Cradle/C01 - Unsouled" {
 		t.Fatalf("ASIN match failed: %+v ok=%v", b, ok)
 	}
 	// Fall back to author + title (tolerant) when no ASIN.
-	if b, ok := MatchInBooks(books, source.Record{Author: "brandon sanderson", Title: "the final empire"}); !ok || b.RelPath != "Sanderson/Mistborn" {
+	if b, ok := MatchInBooks(books, source.Record{Author: "brandon sanderson", Title: "the final empire"}); !ok || b.Path != "Sanderson/Mistborn" {
 		t.Fatalf("author/title match failed: %+v ok=%v", b, ok)
 	}
 	// TitleShort also considered.
@@ -38,16 +37,16 @@ func TestMatchInBooks(t *testing.T) {
 // prefixes, series suffixes, and "Series Name N" with the number only. The server
 // rarely has ASINs or a series_index. These cases are drawn from that real data.
 func TestMatchInBooksRealWorld(t *testing.T) {
-	books := []serverapi.Book{
-		{RelPath: "k/dwk05", Author: "Jeff Kinney", Series: "Diary of a Wimpy Kid", Title: "Diary of a Wimpy Kid: The Ugly Truth (Book 5)"},
-		{RelPath: "k/dwk04", Author: "Jeff Kinney", Series: "Diary of a Wimpy Kid", Title: "Diary Of A Wimpy Kid 4 - Dog Days"},
-		{RelPath: "k/dwk15", Author: "Jeff Kinney", Series: "Diary of a Wimpy Kid", Title: "The Deep End - Diary of a Wimpy Kid Series, Book 15"},
-		{RelPath: "a/rrp3", Author: "Actus", Series: "Return of the Runebound Professor", Title: "Return of the Runebound Professor 3"},
-		{RelPath: "a/rrp5", Author: "Actus", Series: "Return of the Runebound Professor", Title: "Return of the Runebound Professor 5: A Progression Fantasy Epic"},
-		{RelPath: "kay/legion", Author: "A. F. Kay", Series: "Divine Apostasy", Title: "Legion's Fifth Vault"},
-		{RelPath: "oster/sand", Author: "Aaron Oster", Series: "Rise to Omniscience", Title: "RO07 - Sandqueen"},
-		{RelPath: "oster/silver", Author: "Aaron Oster", Series: "Rise to Omniscience", Title: "Silverspear: Rise to Omniscience, Book 6"},
-		{RelPath: "w/unsouled", Author: "Will Wight", Series: "Cradle", Title: "Unsouled", SeriesIndex: 1, ASIN: "B01"},
+	books := []link.LibraryBook{
+		{Path: "k/dwk05", Authors: []string{"Jeff Kinney"}, Series: []link.SeriesRef{{Name: "Diary of a Wimpy Kid"}}, Title: "Diary of a Wimpy Kid: The Ugly Truth (Book 5)"},
+		{Path: "k/dwk04", Authors: []string{"Jeff Kinney"}, Series: []link.SeriesRef{{Name: "Diary of a Wimpy Kid"}}, Title: "Diary Of A Wimpy Kid 4 - Dog Days"},
+		{Path: "k/dwk15", Authors: []string{"Jeff Kinney"}, Series: []link.SeriesRef{{Name: "Diary of a Wimpy Kid"}}, Title: "The Deep End - Diary of a Wimpy Kid Series, Book 15"},
+		{Path: "a/rrp3", Authors: []string{"Actus"}, Series: []link.SeriesRef{{Name: "Return of the Runebound Professor"}}, Title: "Return of the Runebound Professor 3"},
+		{Path: "a/rrp5", Authors: []string{"Actus"}, Series: []link.SeriesRef{{Name: "Return of the Runebound Professor"}}, Title: "Return of the Runebound Professor 5: A Progression Fantasy Epic"},
+		{Path: "kay/legion", Authors: []string{"A. F. Kay"}, Series: []link.SeriesRef{{Name: "Divine Apostasy"}}, Title: "Legion's Fifth Vault"},
+		{Path: "oster/sand", Authors: []string{"Aaron Oster"}, Series: []link.SeriesRef{{Name: "Rise to Omniscience"}}, Title: "RO07 - Sandqueen"},
+		{Path: "oster/silver", Authors: []string{"Aaron Oster"}, Series: []link.SeriesRef{{Name: "Rise to Omniscience"}}, Title: "Silverspear: Rise to Omniscience, Book 6"},
+		{Path: "w/unsouled", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Cradle", Position: "1"}}, Title: "Unsouled", ASIN: "B01"},
 	}
 	cases := []struct {
 		name     string
@@ -73,12 +72,12 @@ func TestMatchInBooksRealWorld(t *testing.T) {
 			}
 			continue
 		}
-		if !ok || got.RelPath != tc.wantPath {
-			t.Errorf("%s: got %q (path %q, ok=%v), want path %q", tc.name, got.Title, got.RelPath, ok, tc.wantPath)
+		if !ok || got.Path != tc.wantPath {
+			t.Errorf("%s: got %q (path %q, ok=%v), want path %q", tc.name, got.Title, got.Path, ok, tc.wantPath)
 		}
 	}
 	// ASIN still wins outright.
-	if got, ok := MatchInBooks(books, source.Record{ASIN: "B01", Title: "anything"}); !ok || got.RelPath != "w/unsouled" {
+	if got, ok := MatchInBooks(books, source.Record{ASIN: "B01", Title: "anything"}); !ok || got.Path != "w/unsouled" {
 		t.Errorf("ASIN match failed: %+v ok=%v", got, ok)
 	}
 }
@@ -92,10 +91,10 @@ func recWith(title, author, series string, seq float64) source.Record {
 }
 
 func TestSiblingsFromBooks(t *testing.T) {
-	books := []serverapi.Book{
-		{RelPath: "Kinney/Diary of a Wimpy Kid/DWK01", Author: "Jeff Kinney", Series: "Diary of a Wimpy Kid", SeriesIndex: 1},
-		{RelPath: "Kinney/Diary of a Wimpy Kid/DWK09", Author: "Jeff Kinney", Series: "Diary of a Wimpy Kid", SeriesIndex: 9},
-		{RelPath: "Other/Book", Author: "Someone Else", Series: "Other Series"},
+	books := []link.LibraryBook{
+		{Path: "Kinney/Diary of a Wimpy Kid/DWK01", Authors: []string{"Jeff Kinney"}, Series: []link.SeriesRef{{Name: "Diary of a Wimpy Kid", Position: "1"}}},
+		{Path: "Kinney/Diary of a Wimpy Kid/DWK09", Authors: []string{"Jeff Kinney"}, Series: []link.SeriesRef{{Name: "Diary of a Wimpy Kid", Position: "9"}}},
+		{Path: "Other/Book", Authors: []string{"Someone Else"}, Series: []link.SeriesRef{{Name: "Other Series"}}},
 	}
 	got := SiblingsFromBooks(books, "Jeff Kinney", "Diary of a Wimpy Kid")
 	if len(got) != 2 {
@@ -110,14 +109,14 @@ func TestSiblingsFromBooks(t *testing.T) {
 // nil client proves it (any per-book query would nil-panic). This is the fix for
 // the 429 the Audible pre-flight hit on a large library.
 func TestPlanUsesLocalBooksNoQueries(t *testing.T) {
-	books := []serverapi.Book{
-		{RelPath: "Kinney/Diary of a Wimpy Kid/DWK01 - The First", Author: "Jeff Kinney", Series: "Diary of a Wimpy Kid", SeriesIndex: 1, ASIN: "B1"},
+	books := []link.LibraryBook{
+		{Path: "Kinney/Diary of a Wimpy Kid/DWK01 - The First", Authors: []string{"Jeff Kinney"}, Series: []link.SeriesRef{{Name: "Diary of a Wimpy Kid", Position: "1"}}, ASIN: "B1"},
 	}
 	recs := []source.Record{
 		{ASIN: "B1", Title: "The First", Author: "Jeff Kinney", Series: "Diary of a Wimpy Kid", Sequence: 1, HasSequence: true, FileName: "a.m4b"},
 		{ASIN: "B5", Title: "The Ugly Truth", Author: "Jeff Kinney", Series: "Diary of a Wimpy Kid", Sequence: 5, HasSequence: true, FileName: "b.m4b"},
 	}
-	items, err := Plan(context.Background(), nil, 2, recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
+	items, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}

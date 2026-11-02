@@ -1,49 +1,38 @@
-// Package importjob orchestrates getting books onto a server: discovering import
-// candidates, computing their placement, transferring them, and triggering a
-// rescan. This file holds series-sibling detection - finding the existing books a
-// new book's placement should anchor on. Transfer/runner orchestration lands in M2.
+// Package importjob orchestrates getting books onto a server: matching import
+// candidates against the library's books, computing their placement, transferring
+// them, and asking for a rescan. This file holds series-sibling detection - finding
+// the existing books a new book's placement should anchor on.
 package importjob
 
 import (
-	"context"
 	"regexp"
 	"strings"
 
-	"github.com/kodestar/audiosilo-bridge/internal/serverapi"
+	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-server/pkg/match"
 )
 
-// FindSiblings returns the books in a library that belong to the same author and
+// SiblingsFromBooks filters a library's books to the same author and
 // (tolerantly-normalized) series as the target - the existing entries a placement
-// anchors on. It fetches the library and matches client-side (SiblingsFromBooks),
-// because the server's author and series filters are exact matches and would miss
-// "The Primal Hunter" vs "Primal Hunter", or an Audible "Shirtaloon" against a
-// tagged "Shirtaloon, Travis Deverell". Returns nil for a standalone (no series).
-func FindSiblings(ctx context.Context, c *serverapi.Client, libraryID int64, author, series string) ([]serverapi.Book, error) {
-	if strings.TrimSpace(series) == "" {
-		return nil, nil
-	}
-	books, err := c.ListBooks(ctx, libraryID, "", "", 0)
-	if err != nil {
-		return nil, err
-	}
-	return SiblingsFromBooks(books, author, series), nil
-}
-
-// SiblingsFromBooks is the local equivalent of FindSiblings: it filters an
-// already-fetched library book list to the same author + (tolerantly-normalized)
-// series, instead of issuing a query. The Audible pre-flight (and bulk import) hold
-// the whole library in memory, so matching locally avoids one request per book -
-// which otherwise trips the server's rate limiter (HTTP 429) on a large library.
-func SiblingsFromBooks(books []serverapi.Book, author, series string) []serverapi.Book {
+// anchors on. It matches client-side because exact author and series filters
+// would miss "The Primal Hunter" vs "Primal Hunter", or an Audible "Shirtaloon"
+// against a tagged "Shirtaloon, Travis Deverell". A book in several series is a
+// sibling when any of them is the target. Returns nil for a standalone (no series).
+func SiblingsFromBooks(books []link.LibraryBook, author, series string) []link.LibraryBook {
 	if strings.TrimSpace(series) == "" {
 		return nil
 	}
 	target := match.NormalizeSeries(series)
-	var out []serverapi.Book
+	var out []link.LibraryBook
 	for _, b := range books {
-		if sameAuthor(b.Author, author) && match.NormalizeSeries(b.Series) == target {
-			out = append(out, b)
+		if !sameAuthor(Credit(b.Authors), author) {
+			continue
+		}
+		for _, s := range b.Series {
+			if match.NormalizeSeries(s.Name) == target {
+				out = append(out, b)
+				break
+			}
 		}
 	}
 	return out
@@ -58,7 +47,7 @@ func SiblingsFromBooks(books []serverapi.Book, author, series string) []serverap
 // are skipped. Built once per plan (one pass) so the per-record lookup is O(1);
 // unlike siblings it keys on author alone (any series), so standalones and
 // first-in-series books reuse the folder too. Look up with authorFolders[match.Normalize(author)].
-func AuthorFolders(books []serverapi.Book) map[string]string {
+func AuthorFolders(books []link.LibraryBook) map[string]string {
 	type tally struct {
 		counts map[string]int
 		best   string
@@ -66,8 +55,8 @@ func AuthorFolders(books []serverapi.Book) map[string]string {
 	}
 	byAuthor := map[string]*tally{}
 	for _, b := range books {
-		seg := authorFolderSeg(b.RelPath)
-		key := match.Normalize(b.Author)
+		seg := authorFolderSeg(b.Path)
+		key := match.Normalize(Credit(b.Authors))
 		if seg == "" || key == "" {
 			continue
 		}
@@ -121,7 +110,7 @@ func sameAuthor(a, b string) bool {
 var authorSep = regexp.MustCompile(`(?i)\s*(?:[,;&/]|\band\b)\s*`)
 
 // authorNames is a credit's individual names, normalized with the shared
-// match.Normalize (so the manager compares names as the server does), plus
+// match.Normalize (so the Bridge compares names as the server does), plus
 // the whole credit so an unsplit equality still matches.
 func authorNames(credit string) []string {
 	out := []string{}

@@ -1,6 +1,6 @@
 // Package progress wraps an io.Reader or io.Writer to report byte progress to a
-// callback, throttled so a large copy doesn't flood the caller (the import UI's Wails
-// event bus). The Audible download (Reader) and the file transfer (Writer) share it
+// callback, throttled so a large copy doesn't flood the caller (a job's progress
+// updates). The Audible download (Reader) and the file transfer (Writer) share it
 // so they report at the same cadence.
 package progress
 

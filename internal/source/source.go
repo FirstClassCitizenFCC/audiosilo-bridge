@@ -1,6 +1,6 @@
 // Package source discovers importable audiobooks and normalizes their metadata.
 // A Source yields Records that point at local files (a folder walk or drag-drop);
-// a Source that must fetch bytes first (e.g. Audible, M5) also implements Acquirer.
+// a Source that must fetch bytes first (Audible) also implements Acquirer.
 package source
 
 import "context"

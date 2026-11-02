@@ -32,8 +32,12 @@ func TestRunPlacesAndSkips(t *testing.T) {
 	}
 
 	var statuses []string
+	var rescanned [][]string
 	res, err := Run(context.Background(), items, RunOptions{
-		// Client nil → skip the rescan (no server in this unit test).
+		Rescan: func(_ context.Context, placed []string) error {
+			rescanned = append(rescanned, placed)
+			return nil
+		},
 		Transfer: transfer.NewLocal(), TransferRoot: root,
 		OnProgress: func(p Progress) { statuses = append(statuses, p.Status) },
 	})
@@ -52,7 +56,27 @@ func TestRunPlacesAndSkips(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "Auth", "C", "C.m4b")); !os.IsNotExist(err) {
 		t.Fatal("C should not have been placed (unavailable)")
 	}
+	// One rescan, of what was placed only.
+	if len(rescanned) != 1 || !slices.Equal(rescanned[0], []string{"Auth/A/A.m4b"}) {
+		t.Fatalf("rescans = %v, want one of [Auth/A/A.m4b]", rescanned)
+	}
 	if !slices.Contains(statuses, "placed") || !slices.Contains(statuses, "skipped") || !slices.Contains(statuses, "error") {
 		t.Fatalf("progress statuses = %v, want placed + skipped + error", statuses)
+	}
+}
+
+// A run that placed nothing (every item skipped or already present) asks for no
+// rescan.
+func TestRunNoPlacementNoRescan(t *testing.T) {
+	items := []PlannedItem{{Record: source.Record{Title: "B"}, RelPath: "Auth/B/B.m4b", ExistsOnServer: true}}
+	called := false
+	if _, err := Run(context.Background(), items, RunOptions{
+		Rescan:   func(context.Context, []string) error { called = true; return nil },
+		Transfer: transfer.NewLocal(), TransferRoot: t.TempDir(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("rescan asked for with nothing placed")
 	}
 }
