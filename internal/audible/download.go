@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/kodestar/audiosilo-manager/internal/progress"
+	"github.com/kodestar/audiosilo-bridge/internal/progress"
 )
 
 // userAgent mimics the Audible iOS app, matching the reference clients

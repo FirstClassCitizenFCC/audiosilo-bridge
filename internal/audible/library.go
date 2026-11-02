@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kodestar/audiosilo-manager/internal/source"
+	"github.com/kodestar/audiosilo-bridge/internal/source"
 )
 
 type libraryResp struct {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kodestar/audiosilo-manager/internal/placement"
-	"github.com/kodestar/audiosilo-manager/internal/serverapi"
-	"github.com/kodestar/audiosilo-manager/internal/source"
+	"github.com/kodestar/audiosilo-bridge/internal/placement"
+	"github.com/kodestar/audiosilo-bridge/internal/serverapi"
+	"github.com/kodestar/audiosilo-bridge/internal/source"
 )
 
 func TestMatchInBooks(t *testing.T) {

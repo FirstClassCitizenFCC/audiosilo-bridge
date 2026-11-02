@@ -4,9 +4,9 @@ import (
 	"context"
 	"path"
 
-	"github.com/kodestar/audiosilo-manager/internal/serverapi"
-	"github.com/kodestar/audiosilo-manager/internal/source"
-	"github.com/kodestar/audiosilo-manager/internal/transfer"
+	"github.com/kodestar/audiosilo-bridge/internal/serverapi"
+	"github.com/kodestar/audiosilo-bridge/internal/source"
+	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
 // Progress reports the state of one item during a Run.

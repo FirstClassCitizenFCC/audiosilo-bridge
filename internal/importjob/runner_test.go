@@ -7,8 +7,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/kodestar/audiosilo-manager/internal/source"
-	"github.com/kodestar/audiosilo-manager/internal/transfer"
+	"github.com/kodestar/audiosilo-bridge/internal/source"
+	"github.com/kodestar/audiosilo-bridge/internal/transfer"
 )
 
 func TestRunPlacesAndSkips(t *testing.T) {

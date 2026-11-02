@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/kodestar/audiosilo-manager/internal/serverapi"
+	"github.com/kodestar/audiosilo-bridge/internal/serverapi"
 	"github.com/kodestar/audiosilo-server/pkg/match"
 )
 

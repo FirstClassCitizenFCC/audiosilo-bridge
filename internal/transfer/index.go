@@ -1,6 +1,23 @@
 package transfer
 
-import "strings"
+import (
+	"path"
+	"slices"
+	"strings"
+)
+
+// audioExtensions are the audio extensions the index records (lowercase, with
+// dot), the manager's audio.Extensions: the Bridge's engine keeps its own list in
+// internal/audio, which transfer doesn't import (it pulls in the meta module).
+var audioExtensions = []string{
+	".m4b", ".m4a", ".mp4", ".mp3", ".aac",
+	".flac", ".ogg", ".opus", ".wav", ".aif", ".aiff", ".wma",
+}
+
+// isAudio reports whether name (a path or filename) has an audio extension.
+func isAudio(name string) bool {
+	return slices.Contains(audioExtensions, strings.ToLower(path.Ext(name)))
+}
 
 // Index records the audio files already under a destination root, keyed by
 // lowercased basename. Matching on name (then confirming size) recognizes a book

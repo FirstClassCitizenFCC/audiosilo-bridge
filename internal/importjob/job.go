@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kodestar/audiosilo-manager/internal/placement"
-	"github.com/kodestar/audiosilo-manager/internal/serverapi"
-	"github.com/kodestar/audiosilo-manager/internal/source"
+	"github.com/kodestar/audiosilo-bridge/internal/placement"
+	"github.com/kodestar/audiosilo-bridge/internal/serverapi"
+	"github.com/kodestar/audiosilo-bridge/internal/source"
 	"github.com/kodestar/audiosilo-server/pkg/match"
 )
 

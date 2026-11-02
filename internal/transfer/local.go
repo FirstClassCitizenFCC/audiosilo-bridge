@@ -9,8 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/kodestar/audiosilo-manager/internal/audio"
-	"github.com/kodestar/audiosilo-manager/internal/progress"
+	"github.com/kodestar/audiosilo-bridge/internal/progress"
 )
 
 // SafeJoin resolves rel under root and guarantees the result cannot escape root
@@ -71,7 +70,7 @@ func (*Local) Index(_ context.Context, root string) (*Index, error) {
 			return err
 		}
 		name := d.Name()
-		if d.IsDir() || strings.HasPrefix(name, ".") || !audio.IsAudio(name) {
+		if d.IsDir() || strings.HasPrefix(name, ".") || !isAudio(name) {
 			return nil
 		}
 		rel, relErr := filepath.Rel(root, p)

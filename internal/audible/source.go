@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/kodestar/audiosilo-manager/internal/source"
+	"github.com/kodestar/audiosilo-bridge/internal/source"
 )
 
 // Source adapts an Audible Client to the import pipeline: Discover lists the owned
