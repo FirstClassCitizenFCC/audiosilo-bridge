@@ -1,0 +1,211 @@
+package importjob
+
+import (
+	"context"
+	"path"
+	"path/filepath"
+	"strings"
+
+	"github.com/kodestar/audiosilo-manager/internal/placement"
+	"github.com/kodestar/audiosilo-manager/internal/serverapi"
+	"github.com/kodestar/audiosilo-manager/internal/source"
+	"github.com/kodestar/audiosilo-server/pkg/match"
+)
+
+// PlannedItem is one import candidate with its computed destination and whether it
+// already exists on the server.
+type PlannedItem struct {
+	Record         source.Record
+	RelPath        string // suggested destination (folder + filename), library-relative
+	Kind           string // placement kind (series existing/new / standalone)
+	Note           string // human explanation of the placement
+	ExistsOnServer bool   // already indexed on the server (matched by ASIN or author+title)
+}
+
+// PlanOptions configures Plan.
+type PlanOptions struct {
+	Mode     placement.Mode
+	Template string // used when Mode == placement.ModeTemplate
+	// SkipExistsCheck computes destinations without the per-book server search.
+	// Used by the Audible pre-flight, which checks existence in bulk instead (see
+	// MatchInBooks) so it doesn't issue one search per book.
+	SkipExistsCheck bool
+	// Books is the library's books, pre-fetched in one call. When set, Plan matches
+	// siblings AND existence locally against this list instead of issuing a query
+	// per record - essential for a large library, where per-book queries trip the
+	// server's rate limiter (HTTP 429). When nil, Plan queries the server per book.
+	Books []serverapi.Book
+	// Rejected marks records (by Record.Key - the ASIN for Audible records) whose
+	// automatic server match the user has declared wrong ("Not on server"). Plan
+	// reports them as not existing, so Run imports them instead of skipping them -
+	// folded into planning so every caller gets correct items by construction.
+	Rejected map[string]bool
+}
+
+// Plan computes a destination and an existence check for each record against a
+// library. For series books it fetches the existing siblings so the placement
+// mirrors the established folder/shortcode convention.
+func Plan(ctx context.Context, c *serverapi.Client, libraryID int64, recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
+	items := make([]PlannedItem, 0, len(recs))
+	// Build the bulk-match candidate list once (not per record) for the local
+	// existence check.
+	var matcher *BookMatcher
+	// authorFolders maps normalized author → existing folder spelling, built once so
+	// a differently-spaced author reuses its existing folder (a nil map - the
+	// per-book path - just yields "" on lookup). See AuthorFolders.
+	var authorFolders map[string]string
+	if opts.Books != nil {
+		matcher = NewBookMatcher(opts.Books)
+		authorFolders = AuthorFolders(opts.Books)
+	}
+	// siblingBooks is the list siblings are matched against: the pre-fetched books,
+	// else the library fetched once on the first series record (the server's author
+	// filter is exact, so siblings are always matched client-side - see FindSiblings).
+	siblingBooks, fetched := opts.Books, opts.Books != nil
+	for _, rec := range recs {
+		var siblings []placement.Sibling
+		if strings.TrimSpace(rec.Series) != "" {
+			if !fetched {
+				var err error
+				if siblingBooks, err = c.ListBooks(ctx, libraryID, "", "", 0); err != nil {
+					return nil, err
+				}
+				fetched = true
+			}
+			for _, b := range SiblingsFromBooks(siblingBooks, rec.Author, rec.Series) {
+				siblings = append(siblings, placement.Sibling{RelPath: b.RelPath, SeriesIndex: b.SeriesIndex})
+			}
+		}
+		// Name by the clean book title - strip the series prefix and "(Book N)" /
+		// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
+		// Truth", not "… - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
+		clean := match.CleanTitle(rec.Title, rec.Series)
+		sug, err := placement.SuggestWith(opts.Mode, opts.Template, placement.Input{
+			Author:       rec.Author,
+			Title:        clean,
+			TitleShort:   clean,
+			SeriesName:   rec.Series,
+			Sequence:     rec.Sequence,
+			HasSequence:  rec.HasSequence,
+			Filename:     recordFileName(rec),
+			ASIN:         rec.ASIN,
+			Narrator:     rec.Narrator,
+			Year:         rec.Year,
+			Siblings:     siblings,
+			AuthorFolder: authorFolders[match.Normalize(rec.Author)],
+		})
+		if err != nil {
+			return nil, err
+		}
+		exists := false
+		if !opts.SkipExistsCheck && !opts.Rejected[rec.Key] {
+			if matcher != nil {
+				_, exists = matcher.Match(rec)
+			} else {
+				exists = existsOnServer(ctx, c, rec)
+			}
+		}
+		items = append(items, PlannedItem{
+			Record:         rec,
+			RelPath:        path.Join(sug.RelPath, sug.Filename),
+			Kind:           sug.Kind.String(),
+			Note:           sug.Note,
+			ExistsOnServer: exists,
+		})
+	}
+	return items, nil
+}
+
+// ApplyDestinations replaces planned destinations with user-chosen ones, keyed by
+// Record.Key (the ASIN for Audible records). A destination is the full
+// library-relative path including the filename - the UI computes it when the user
+// picks a folder (see frontend src/lib/destpath.ts, which mirrors this contract).
+// Anything unsafe (absolute, empty, or escaping the root after Clean) is ignored
+// and the planned path kept; transfer.SafeJoin re-checks at place time.
+func ApplyDestinations(items []PlannedItem, dests map[string]string) {
+	for i, it := range items {
+		d, ok := dests[it.Record.Key]
+		if !ok {
+			continue
+		}
+		d = strings.TrimLeft(path.Clean(strings.TrimSpace(d)), "/")
+		if d == "" || d == "." || d == ".." || strings.HasPrefix(d, "../") {
+			continue
+		}
+		items[i].RelPath = d
+		items[i].Note = "manually chosen destination"
+	}
+}
+
+// BookMatcher matches records against a fixed server-book list via the shared
+// pkg/match matcher. It converts the candidate slice once so matching many records
+// against the same library is O(library) instead of O(records × library) - the
+// pre-flight and stats-sync loops match the whole Audible library against it.
+// It also counts how many records have claimed each matched path (see Contested).
+// Not safe for concurrent use.
+type BookMatcher struct {
+	books  []serverapi.Book
+	cands  []match.Book
+	claims map[string]int // matched rel_path → how many records claimed it
+}
+
+// NewBookMatcher builds a matcher over an already-fetched library book list.
+func NewBookMatcher(books []serverapi.Book) *BookMatcher {
+	cands := make([]match.Book, len(books))
+	for i, b := range books {
+		cands[i] = match.Book{Title: b.Title, Author: b.Author, Series: b.Series, SeriesIndex: b.SeriesIndex, ASIN: b.ASIN}
+	}
+	return &BookMatcher{books: books, cands: cands, claims: map[string]int{}}
+}
+
+// Match finds the server book corresponding to rec (ASIN → author + series +
+// series-stripped title-token overlap, sequence parsed from the title when the
+// server's index is 0). The matcher is shared with the server so both sides
+// identify the same book identically.
+func (m *BookMatcher) Match(rec source.Record) (serverapi.Book, bool) {
+	i, ok := match.Best(m.cands, match.Query{
+		Title: rec.Title, TitleShort: rec.TitleShort, Author: rec.Author,
+		Series: rec.Series, Sequence: rec.Sequence, HasSequence: rec.HasSequence, ASIN: rec.ASIN,
+	})
+	if !ok {
+		return serverapi.Book{}, false
+	}
+	m.claims[m.books[i].RelPath]++
+	return m.books[i], true
+}
+
+// Contested reports whether more than one record has matched path since the
+// matcher was built - meaning at least one of those matches is wrong, so nothing
+// identity-durable (like an ASIN backfill) should be derived from any of them.
+func (m *BookMatcher) Contested(path string) bool {
+	return m.claims[path] > 1
+}
+
+// MatchInBooks is a one-shot match over books (the per-book existence path). For
+// repeated matching against the same library, build a BookMatcher once and reuse it.
+func MatchInBooks(books []serverapi.Book, rec source.Record) (serverapi.Book, bool) {
+	return NewBookMatcher(books).Match(rec)
+}
+
+func recordFileName(rec source.Record) string {
+	if rec.FileName != "" {
+		return rec.FileName
+	}
+	return filepath.Base(rec.SrcPath)
+}
+
+// existsOnServer reports whether the book is already present - matched by ASIN when
+// available, otherwise by author + title (tolerant normalization). Used only on the
+// per-book query path (no pre-fetched book list); the bulk path uses MatchInBooks.
+func existsOnServer(ctx context.Context, c *serverapi.Client, rec source.Record) bool {
+	q := strings.TrimSpace(rec.TitleShort)
+	if q == "" {
+		q = rec.Title
+	}
+	candidates, err := c.Search(ctx, q, 50)
+	if err != nil {
+		return false
+	}
+	_, ok := MatchInBooks(candidates, rec)
+	return ok
+}
