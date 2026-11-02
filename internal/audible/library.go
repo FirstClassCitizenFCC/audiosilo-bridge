@@ -154,7 +154,7 @@ func (it libItem) unavailableReason(now time.Time) string {
 // ReleaseIsUpcoming reports whether an Audible release/issue date falls after now -
 // a pre-order / not-yet-released title. A zero now disables the check; an empty or
 // unparseable date reads as already released (never withhold a real title). It is
-// the one definition of "upcoming" - seriesgap uses it too.
+// the one definition of "upcoming".
 func ReleaseIsUpcoming(date string, now time.Time) bool {
 	if now.IsZero() {
 		return false

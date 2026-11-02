@@ -153,20 +153,14 @@ func TestDecryptArgs(t *testing.T) {
 	if idxOf(aaxc, "-i") < 4 {
 		t.Fatalf("-i must come after the key/iv options: %v", aaxc)
 	}
-	aax := aaxArgs("in.aax", "1CEB00DA", "out.m4b")
-	if aax[0] != "-activation_bytes" || aax[1] != "1CEB00DA" {
-		t.Fatalf("aax args order wrong: %v", aax)
-	}
 	// Map audio + optional cover, NOT all streams: "-map 0" pulled in an AAXC
 	// data/text stream the m4b muxer can't write ("Could not write header").
-	for _, args := range [][]string{aaxc, aax} {
-		if idxOf(args, "0:a") < 0 || idxOf(args, "0:v?") < 0 {
-			t.Fatalf("must map audio + optional cover: %v", args)
-		}
-		for i := 0; i+1 < len(args); i++ {
-			if args[i] == "-map" && args[i+1] == "0" {
-				t.Fatalf(`must not map all streams ("-map 0"): %v`, args)
-			}
+	if idxOf(aaxc, "0:a") < 0 || idxOf(aaxc, "0:v?") < 0 {
+		t.Fatalf("must map audio + optional cover: %v", aaxc)
+	}
+	for i := 0; i+1 < len(aaxc); i++ {
+		if aaxc[i] == "-map" && aaxc[i+1] == "0" {
+			t.Fatalf(`must not map all streams ("-map 0"): %v`, aaxc)
 		}
 	}
 }

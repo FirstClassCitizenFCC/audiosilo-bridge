@@ -21,7 +21,6 @@ type Credentials struct {
 	CustomerID       string `json:"customer_id"`
 	Marketplace      string `json:"marketplace"` // locale code (see Marketplace)
 	ExpiresAt        int64  `json:"expires_at"`  // unix seconds for AccessToken
-	ActivationBytes  string `json:"activation_bytes,omitempty"`
 }
 
 // Marshal/Unmarshal round-trip the credentials for keychain storage.

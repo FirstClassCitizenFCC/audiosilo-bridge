@@ -18,15 +18,6 @@ func aaxcArgs(in, key, iv, out string) []string {
 	}, remuxArgs(out)...)
 }
 
-// aaxArgs builds ffmpeg arguments to decrypt a legacy AAX file with the
-// account-wide activation bytes (8 hex).
-func aaxArgs(in, activationBytes, out string) []string {
-	return append([]string{
-		"-activation_bytes", activationBytes,
-		"-i", in,
-	}, remuxArgs(out)...)
-}
-
 // remuxArgs are the shared output args for a lossless copy to m4b. It maps the
 // audio and (optionally) the cover image, but NOT data/text streams: an AAXC can
 // carry a timed-text/data stream that the ipod (m4b) muxer can't write, which
