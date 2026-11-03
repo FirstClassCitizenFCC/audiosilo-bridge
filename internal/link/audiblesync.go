@@ -81,6 +81,9 @@ const (
 	SyncRejected   = "rejected"
 	// SyncBehind: the place isn't ahead of the stored one (furthest only).
 	SyncBehind = "behind"
+	// SyncDurationMismatch: rejected, the book's length disagrees with the
+	// title's runtime on Audible (another edition or volume is matched).
+	SyncDurationMismatch = "duration_mismatch"
 )
 
 // SyncResult is one event's result.

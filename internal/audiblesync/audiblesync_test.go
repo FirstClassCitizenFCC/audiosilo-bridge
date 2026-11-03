@@ -118,6 +118,8 @@ type stubServer struct {
 	feedErr  error
 	feedAsks []string // since values
 	pageSize int
+	duration map[string]float64 // path -> the book's length on the server (0 unknown)
+	rejected map[string]string  // path -> the reason the server rejects its events
 }
 
 func (s *stubServer) PostAudibleListening(_ context.Context, account string, in link.AudibleListening) (*link.SyncAnswer, error) {
@@ -135,6 +137,8 @@ func (s *stubServer) PostAudibleListening(_ context.Context, account string, in 
 	for _, ev := range in.Events {
 		r := link.SyncResult{ID: ev.ID, Status: link.SyncApplied}
 		switch {
+		case s.rejected[ev.Path] != "":
+			r.Status, r.Reason = link.SyncRejected, s.rejected[ev.Path]
 		case seen[ev.ID]:
 			r.Status = link.SyncDuplicate
 		case ev.Kind == link.EventListen && *ev.ToPos <= s.server[ev.Path]:
@@ -171,10 +175,20 @@ func (s *stubServer) AudibleProgress(_ context.Context, account, since string, l
 	return page, nil
 }
 
+// resend appends row i again, changed by f (the server wrote it again: the
+// feed pages in write order, so it comes again whatever its updated_at).
+func (s *stubServer) resend(i int, f func(*link.AudibleProgressRow)) {
+	s.mu.Lock()
+	row := s.rows[i]
+	f(&row)
+	s.rows = append(s.rows, row)
+	s.mu.Unlock()
+}
+
 // add appends a server row (the feed's newest change).
 func (s *stubServer) add(path, asin string, pos float64, at time.Time, device string) {
 	s.mu.Lock()
-	s.rows = append(s.rows, link.AudibleProgressRow{LibraryID: 1, Path: path, ASIN: asin, Position: pos, Duration: 36000,
+	s.rows = append(s.rows, link.AudibleProgressRow{LibraryID: 1, Path: path, ASIN: asin, Position: pos, Duration: s.duration[path],
 		UpdatedAt: at.UTC().Format(time.RFC3339Nano), DeviceID: device, Version: int64(len(s.rows) + 1)})
 	s.mu.Unlock()
 }
@@ -531,5 +545,35 @@ func TestSyncWaitsAndLists(t *testing.T) {
 		t.Fatalf("the server's 503 wasn't recorded: %+v", a)
 	} else if _, held := waiting(a, e.now); held {
 		t.Fatalf("the server's 503 became a wait for Audible: %+v", a)
+	}
+}
+
+// The server rejects the places on a book whose length disagrees with the
+// title's runtime (duration_mismatch: another edition matched): the job counts
+// them, sends each once (no retry within the job), records no place heard for
+// them, and still ends done with the other titles synced.
+func TestSyncDurationMismatch(t *testing.T) {
+	e := newEnv(t)
+	heard := e.now.Add(-time.Hour).Truncate(time.Millisecond)
+	e.accts.places = map[string]audible.Position{
+		"B000000001": {PositionMs: 3_590_000, LastUpdated: heard}, // at the end: a listen and a finish
+		"B000000002": {PositionMs: 600_000, LastUpdated: heard},
+	}
+	e.srv.rejected = map[string]string{"A/One": link.SyncDurationMismatch}
+	res, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600), title("B000000002", "A/Two", 36000)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Rejected != 2 || res.Mismatched != 2 || res.Applied != 1 || res.Sent != 3 || len(e.srv.posted) != 1 {
+		t.Fatalf("result = %+v (%d posts)", res, len(e.srv.posted))
+	}
+	if x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000001"); x.HeardMs != -1 {
+		t.Fatalf("a rejected place was recorded as heard: %+v", x)
+	}
+	if x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000002"); x.HeardMs != 600_000 {
+		t.Fatalf("the other title's place wasn't recorded: %+v", x)
+	}
+	if a := e.account(t); a.SyncError != "" || a.SyncAt == "" {
+		t.Fatalf("a mismatch is no sync error: %+v", a)
 	}
 }

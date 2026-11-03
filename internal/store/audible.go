@@ -37,8 +37,9 @@ type AudibleAccount struct {
 	// RefusalSignIn or RefusalDevice, "" while it isn't.
 	RefusalKind string `json:"refusal_kind"`
 	// PushCursor and PushFrom are the push loop's place in the server's
-	// progress feed and the moment it first read it for this mapping (a row
-	// older is never pushed); both "" until then.
+	// progress feed and the moment a read of it first reached its end for this
+	// mapping (the baseline's end: until then older rows are history); both ""
+	// until then.
 	PushCursor string `json:"-"`
 	PushFrom   string `json:"-"`
 	// SyncAt is when a sync job or a push last went through, SyncError why the
@@ -96,7 +97,8 @@ func remapAudible(ctx context.Context, tx *sql.Tx, a AudibleAccount) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = '', push_from = '' WHERE id = ?`, a.ID); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, listed = 0 WHERE account = ?`, a.ID)
+	_, err = tx.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, listed = 0, row_version = -1, row_ms = -1,
+		row_duration = 0, row_seen = '' WHERE account = ?`, a.ID)
 	return err
 }
 

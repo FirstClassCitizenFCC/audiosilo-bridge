@@ -105,10 +105,12 @@ func TestSyncBothWaysAgainstTheFake(t *testing.T) {
 		}
 	}
 
-	// The push: a place on the server, still for 3 minutes, is written once.
+	// The push: a place on the server, still for 3 minutes since the Bridge
+	// read it, is written once.
 	p := NewPusher(o)
 	p.Tick(context.Background()) // the feed's start
 	srv.add("Books/B0FAKE0006", "B0FAKE0006", 1234.5, now, "web-1")
+	p.Tick(context.Background()) // read: still from now
 	now = now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	puts := fake.Calls().PutPositions
@@ -118,6 +120,7 @@ func TestSyncBothWaysAgainstTheFake(t *testing.T) {
 	}
 	// Within 5 s of it: not again.
 	srv.add("Books/B0FAKE0006", "B0FAKE0006", 1238, now, "web-1")
+	p.Tick(context.Background()) // read: still from now
 	now = now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if puts := fake.Calls().PutPositions; len(puts) != 1 {

@@ -36,6 +36,10 @@ func (e *env) started(t *testing.T, p *Pusher) {
 	}
 }
 
+// read runs a pass now: the rows added since are first read at this time,
+// the moment their stillness counts from.
+func (e *env) read(p *Pusher) { p.Tick(context.Background()) }
+
 func (e *env) sets() []string {
 	e.accts.mu.Lock()
 	defer e.accts.mu.Unlock()
@@ -53,17 +57,21 @@ func TestPushDebounce(t *testing.T) {
 	e.started(t, p)
 
 	e.srv.add("A/One", "B000000001", 600, e.now, "web-1")
+	e.read(p)
 	e.now = e.now.Add(time.Minute)
 	p.Tick(context.Background())
 	if len(e.sets()) != 0 {
 		t.Fatalf("a place a minute old was written: %v", e.sets())
 	}
-	// Still moving: the newest row restarts the wait.
+	// Still moving: the newest row restarts the wait, from when the Bridge
+	// reads it.
 	e.srv.add("A/One", "B000000001", 660, e.now, "web-1")
 	e.now = e.now.Add(2 * time.Minute)
 	p.Tick(context.Background())
+	e.now = e.now.Add(2 * time.Minute)
+	p.Tick(context.Background())
 	if len(e.sets()) != 0 {
-		t.Fatalf("a place still moving was written: %v", e.sets())
+		t.Fatalf("a place still for 2 minutes was written: %v", e.sets())
 	}
 	e.now = e.now.Add(time.Minute) // 3 minutes still
 	p.Tick(context.Background())
@@ -75,6 +83,7 @@ func TestPushDebounce(t *testing.T) {
 	p.Tick(context.Background())
 	// A row within 5 seconds of the place written isn't written again.
 	e.srv.add("A/One", "B000000001", 664, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 1 {
@@ -82,6 +91,7 @@ func TestPushDebounce(t *testing.T) {
 	}
 	// One further on is.
 	e.srv.add("A/One", "B000000001", 900, e.now, "web-1")
+	e.read(p)
 	e.now = e.now.Add(3 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@900000" || e.accts.acrs != 1 {
@@ -106,6 +116,7 @@ func TestPushEchoSuppression(t *testing.T) {
 	e.started(t, p)
 	e.srv.add("A/One", "B000000001", 700, e.now, DeviceID(acctID))
 	e.srv.add("A/Two", "B000000002", 1202, e.now, "web-1") // within 5 s of the place heard
+	e.read(p)                                              // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 0 {
@@ -113,6 +124,7 @@ func TestPushEchoSuppression(t *testing.T) {
 	}
 	// A real move on the second title is written.
 	e.srv.add("A/Two", "B000000002", 1500, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 1 || got[0] != "B000000002@1500000" {
@@ -132,6 +144,7 @@ func TestPushGuards(t *testing.T) {
 	e.srv.add("A/One", "B000000001", 3600*1.05+121, e.now, "web-1") // past an hour's runtime
 	e.srv.add("A/Other", "B000000002", 900, e.now, "web-1")         // not the title's book
 	e.srv.add("A/Three", "B000000003", 900, e.now, "web-1")         // never listed
+	e.read(p)                                                       // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 0 {
@@ -139,6 +152,7 @@ func TestPushGuards(t *testing.T) {
 	}
 	// Allowed: within the runtime's slack it is written.
 	e.srv.add("A/One", "B000000001", 3600*1.05+60, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 1 {
@@ -168,7 +182,7 @@ func TestPushBaselineSkipsHistory(t *testing.T) {
 	e.srv.add("A/Two", "B000000002", 900, e.now.Add(-2*time.Minute), "web-1")
 	p := NewPusher(e.o)
 	p.Tick(context.Background())
-	e.now = e.now.Add(2 * time.Minute)
+	e.now = e.now.Add(3 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 1 || got[0] != "B000000002@900000" {
 		t.Fatalf("sets = %v", got)
@@ -216,6 +230,7 @@ func TestPushRefusedOffAndBackoff(t *testing.T) {
 	e.started(t, p)
 
 	e.srv.add("A/One", "B000000001", 600, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	e.accts.setErr = audibleAnswer(t, http.StatusServiceUnavailable, "900")
 	p.Tick(context.Background())
@@ -246,6 +261,7 @@ func TestPushRefusedOffAndBackoff(t *testing.T) {
 	// Another HTTP refusal drops the place (not tried every minute) and
 	// records why; it never refuses the account.
 	e.srv.add("A/One", "B000000001", 2000, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	e.accts.setErr = audibleAnswer(t, http.StatusForbidden, "")
 	p.Tick(context.Background())
@@ -292,6 +308,7 @@ func TestPushLeavesAudibleFurtherOn(t *testing.T) {
 	p := NewPusher(e.o)
 	e.started(t, p)
 	e.srv.add("A/One", "B000000001", 3000, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 1 || got[0] != "B000000001@3000000" {
@@ -305,6 +322,7 @@ func TestPushLeavesAudibleFurtherOn(t *testing.T) {
 	e.accts.mu.Unlock()
 	e.now = e.now.Add(time.Minute)
 	e.srv.add("A/One", "B000000001", 3010, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 1 {
@@ -321,6 +339,7 @@ func TestPushLeavesAudibleFurtherOn(t *testing.T) {
 	// Audible is where the sync heard it; a move back on AudioSilo is written.
 	e.now = e.now.Add(time.Minute)
 	e.srv.add("A/One", "B000000001", 1200, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@1200000" {
@@ -366,6 +385,7 @@ func TestPushMarkersSupersede(t *testing.T) {
 	p := NewPusher(e.o)
 	e.started(t, p)
 	e.srv.add("A/One", "B000000001", 3000, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background()) // writes 3000 s
 	// Audible plays on to 5000 s, and the sync brings it in.
@@ -379,6 +399,7 @@ func TestPushMarkersSupersede(t *testing.T) {
 	// Back on AudioSilo to within 5 s of the place written before.
 	e.now = e.now.Add(time.Minute)
 	e.srv.add("A/One", "B000000001", 3002, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@3002000" {
@@ -388,6 +409,7 @@ func TestPushMarkersSupersede(t *testing.T) {
 	// AudioSilo is written too.
 	e.now = e.now.Add(time.Minute)
 	e.srv.add("A/One", "B000000001", 5001, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 3 || got[2] != "B000000001@5001000" {
@@ -410,6 +432,7 @@ func TestPushAudibleAnswers(t *testing.T) {
 
 	e.accts.acrErr = fmt.Errorf("%w: no content reference (acr) returned for B000000001", audible.ErrNoRights)
 	e.srv.add("A/One", "B000000001", 600, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	for range 3 {
 		p.Tick(ctx)
@@ -420,6 +443,7 @@ func TestPushAudibleAnswers(t *testing.T) {
 	}
 	e.accts.acrErr = fmt.Errorf("%w: no content reference (acr) returned for B000000001", audible.ErrThrottled)
 	e.srv.add("A/One", "B000000001", 700, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(ctx)
 	asks := len(e.srv.feedAsks)
@@ -434,6 +458,7 @@ func TestPushAudibleAnswers(t *testing.T) {
 	// A 502: kept, left for errorWait (the sync isn't held), then written.
 	e.accts.setErr = audibleAnswer(t, http.StatusBadGateway, "")
 	e.srv.add("A/One", "B000000001", 800, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(ctx)
 	if x, _ := e.db.GetAudiblePush(ctx, acctID, "B000000001"); x.WantMs == nil {
@@ -456,6 +481,7 @@ func TestPushAudibleAnswers(t *testing.T) {
 	e.accts.wrongACR = audibleAnswer(t, http.StatusNotFound, "")
 	acrs := e.accts.acrs
 	e.srv.add("A/One", "B000000001", 900, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(ctx)
 	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@900000" || e.accts.acrs != acrs+1 {
@@ -467,6 +493,7 @@ func TestPushAudibleAnswers(t *testing.T) {
 	e.accts.setErr = audibleAnswer(t, http.StatusTooManyRequests, "600")
 	e.accts.onSet = func() { e.now = e.now.Add(3 * time.Minute) }
 	e.srv.add("A/One", "B000000001", 1000, e.now, "web-1")
+	e.read(p) // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(ctx)
 	if a := e.account(t); a.SyncRetryAt != store.Timestamp(e.now.Add(10*time.Minute)) {
@@ -484,6 +511,7 @@ func TestPushPendingTitle(t *testing.T) {
 	e.started(t, p)
 	e.srv.add("A/Two", "B000000002", 900, e.now, "web-1")          // a title matched since the last sync
 	e.srv.add("A/One (right)", "B000000001", 1500, e.now, "web-1") // a title matched again
+	e.read(p)                                                      // the Bridge reads the rows: they are still from now
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
 	if got := e.sets(); len(got) != 0 {
@@ -511,5 +539,119 @@ func TestPushServerWait(t *testing.T) {
 	p.Tick(context.Background())
 	if len(e.srv.feedAsks) != 1 {
 		t.Fatalf("the server's wait wasn't kept: %v", e.srv.feedAsks)
+	}
+}
+
+// The feed pages in the order the server wrote rows, so a row comes again
+// with its updated_at unchanged (an edit, a diverged place applied): a new
+// place is new by its version and place, and its stillness counts from when
+// the Bridge first read it (its own clock), never the row's time. The same
+// row read again, or read again at its place with another version (its finish
+// or length changed), neither restarts the wait nor writes again.
+func TestPushRowSentAgain(t *testing.T) {
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000))
+	p := NewPusher(e.o)
+	e.started(t, p)
+	old := e.now.Add(-time.Hour) // a time far behind the feed's start
+	e.srv.add("A/One", "B000000001", 600, old, "web-1")
+	e.read(p)
+	e.now = e.now.Add(2 * time.Minute)
+	// The same row and the same place with a new version: the wait runs on.
+	e.srv.resend(0, func(*link.AudibleProgressRow) {})
+	e.srv.resend(0, func(r *link.AudibleProgressRow) { r.Version, r.Duration = 50, 36000 })
+	p.Tick(context.Background())
+	if len(e.sets()) != 0 {
+		t.Fatalf("written before 3 minutes still: %v", e.sets())
+	}
+	e.now = e.now.Add(time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 1 || got[0] != "B000000001@600000" {
+		t.Fatalf("sets = %v (a row an hour old by its time, new to the feed)", got)
+	}
+	if x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000001"); x.RowVersion != 50 || x.RowDuration != 36000 {
+		t.Fatalf("the version read again wasn't recorded: %+v", x)
+	}
+	// Written again with its updated_at unchanged and a new place: new, and
+	// still from the Bridge's read of it, not from the hour-old time.
+	e.srv.resend(0, func(r *link.AudibleProgressRow) { r.Version, r.Position = 51, 900 })
+	e.read(p)
+	e.now = e.now.Add(2 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 1 {
+		t.Fatalf("a place read 2 minutes ago was written: %v", got)
+	}
+	e.now = e.now.Add(time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@900000" {
+		t.Fatalf("a place written again with its old time wasn't pushed: %v", got)
+	}
+	// Read again unchanged: nothing more.
+	e.srv.resend(0, func(r *link.AudibleProgressRow) { r.Version, r.Position = 51, 900 })
+	e.now = e.now.Add(5 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 2 {
+		t.Fatalf("an unchanged row was written again: %v", got)
+	}
+}
+
+// The baseline is the first read of the feed TO ITS END: one that stops at
+// maxPages carries on at the next pass with history still history, and only
+// then the feed's start is set. After it, a row is new whatever its
+// updated_at (an offline backlog uploaded late is pushed).
+func TestPushBaselineAcrossPasses(t *testing.T) {
+	e := newEnv(t)
+	e.srv.pageSize = 1
+	var titles []store.AudibleSyncTitle
+	for i := range maxPages + 5 {
+		asin := fmt.Sprintf("B%09d", i+1)
+		titles = append(titles, st(asin, "A/"+asin, 36000))
+		e.srv.add("A/"+asin, asin, 600, e.now.Add(-24*time.Hour), "web-1")
+	}
+	e.list(t, titles...)
+	p := NewPusher(e.o)
+	p.Tick(context.Background())
+	if a := e.account(t); a.PushFrom != "" || a.PushCursor != fmt.Sprintf("c%d", maxPages) {
+		t.Fatalf("a baseline cut short = cursor %q from %q", a.PushCursor, a.PushFrom)
+	}
+	e.now = e.now.Add(time.Minute)
+	p.Tick(context.Background())
+	if a := e.account(t); a.PushFrom == "" || a.PushCursor != fmt.Sprintf("c%d", maxPages+5) {
+		t.Fatalf("the baseline's end = cursor %q from %q", a.PushCursor, a.PushFrom)
+	}
+	if w, _ := e.db.AudibleWaiting(context.Background(), acctID); len(w) != 0 {
+		t.Fatalf("history waits to be pushed: %+v", w)
+	}
+	// A place listened to offline yesterday, uploaded now: pushed.
+	e.srv.add("A/B000000001", "B000000001", 1200, e.now.Add(-20*time.Hour), "phone-1")
+	e.read(p)
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 1 || got[0] != "B000000001@1200000" {
+		t.Fatalf("a late row = %v", got)
+	}
+}
+
+// Denied: a place on a book whose length disagrees with the title's runtime
+// on Audible (another edition or volume matched, the server's
+// duration_mismatch) is never written; allowed: one whose length agrees, or
+// is unknown, is.
+func TestPushDurationMismatch(t *testing.T) {
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000), st("B000000002", "A/Two", 36000), st("B000000003", "A/Three", 36000))
+	e.srv.duration = map[string]float64{"A/One": 7200, "A/Two": 36500}
+	p := NewPusher(e.o)
+	e.started(t, p)
+	e.srv.add("A/One", "B000000001", 600, e.now, "web-1")
+	e.srv.add("A/Two", "B000000002", 600, e.now, "web-1")
+	e.srv.add("A/Three", "B000000003", 600, e.now, "web-1")
+	e.read(p)
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 2 || got[0] != "B000000002@600000" || got[1] != "B000000003@600000" {
+		t.Fatalf("sets = %v", got)
+	}
+	if x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000001"); x.WantMs != nil {
+		t.Fatalf("the mismatched place still waits: %+v", x)
 	}
 }

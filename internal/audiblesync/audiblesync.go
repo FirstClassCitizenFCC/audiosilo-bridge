@@ -90,6 +90,17 @@ func pastRuntime(placeS float64, runtimeS int64) bool {
 	return runtimeS > 0 && placeS > float64(runtimeS)*runtimeSlackPct+runtimeSlackS
 }
 
+// runtimeAgrees reports whether an Audible title's runtime and a book's
+// length (seconds) are one recording's: within 5% of the longer plus 2
+// minutes, or either unknown (the server's rule for duration_mismatch).
+func runtimeAgrees(runtimeS int64, durationS float64) bool {
+	if runtimeS <= 0 || durationS <= 0 {
+		return true
+	}
+	rt := float64(runtimeS)
+	return math.Abs(rt-durationS) <= max(rt, durationS)*(runtimeSlackPct-1)+runtimeSlackS
+}
+
 // atBookEnd reports whether a place (seconds) is at the end of a book of
 // runtimeS seconds; false when the runtime is unknown.
 func atBookEnd(placeS float64, runtimeS int64) bool {
@@ -135,9 +146,10 @@ type Store interface {
 	ListAudibleSync(ctx context.Context, account string, titles []store.AudibleSyncTitle) error
 	AudiblePushes(ctx context.Context, account string) ([]store.AudiblePush, error)
 	AudibleWaiting(ctx context.Context, account string) ([]store.AudiblePush, error)
-	WantAudiblePush(ctx context.Context, account, asin string, ms int64, rowUpdated time.Time) error
-	SeenAudibleRow(ctx context.Context, account, asin string, rowUpdated time.Time) error
-	PendAudiblePush(ctx context.Context, account, asin string, libraryID int64, path string, ms *int64, rowUpdated time.Time) error
+	WantAudiblePush(ctx context.Context, account, asin string, row store.AudibleRow) error
+	SeenAudibleRow(ctx context.Context, account, asin string, row store.AudibleRow) error
+	TouchAudibleRow(ctx context.Context, account, asin string, version int64, duration float64) error
+	PendAudiblePush(ctx context.Context, account, asin string, libraryID int64, path string, want bool, row store.AudibleRow) error
 	AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time) error
 	DropAudiblePush(ctx context.Context, account, asin string) error
 	AudibleHeard(ctx context.Context, x store.AudiblePush, ms int64, applied bool, since time.Time) error
@@ -319,6 +331,11 @@ type Result struct {
 	Behind     int `json:"behind"`
 	NotApplied int `json:"not_applied"`
 	Rejected   int `json:"rejected"`
+	// Mismatched: of the rejected, those on a book whose length disagrees
+	// with the title's runtime (duration_mismatch: another edition matched).
+	// Not sent again within the job; the next sync sends them again, so a
+	// corrected match syncs.
+	Mismatched int `json:"mismatched,omitempty"`
 	// Skipped places: Audible's echo of a place the Bridge wrote, a place past
 	// the runtime, one too old for the server, one at the start.
 	SkippedEcho        int `json:"skipped_echo,omitempty"`
@@ -495,6 +512,9 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 				res.NotApplied++
 			default:
 				res.Rejected++
+				if r.Reason == link.SyncDurationMismatch {
+					res.Mismatched++
+				}
 			}
 			hp, ok := heard[r.ID]
 			if !ok || r.Status == link.SyncRejected {
@@ -511,6 +531,10 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 			}
 		}
 		rep.Progress(jobs.Progress{Step: "server", Message: "Sending the places to the server", Done: res.Sent, Total: len(events)})
+	}
+	if res.Mismatched > 0 {
+		h.o.Log.Warn("audible: the server's books for some titles are another length than on Audible, so their matches look wrong; not synced",
+			"account", acct.ID, "events", res.Mismatched)
 	}
 	h.o.health(ctx, acct, nil, time.Time{})
 	h.o.Log.Info("audible: places synced", "account", acct.ID, "titles", res.Titles, "heard", res.Heard, "sent", res.Sent,
