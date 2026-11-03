@@ -97,7 +97,8 @@ func denialKind(lr licenseResp) error {
 }
 
 // denialDetail summarizes why a license was denied, for the import error message
-// ("" when Audible sent no usable detail).
+// ("" when Audible sent no usable detail), its account identifiers redacted
+// (Audible's reasons quote the customer id).
 func denialDetail(lr licenseResp) string {
 	var parts []string
 	for _, r := range lr.ContentLicense.DenialReasons {
@@ -109,7 +110,7 @@ func denialDetail(lr licenseResp) string {
 	if len(parts) == 0 && lr.ContentLicense.StatusCode != "" && lr.ContentLicense.StatusCode != "Granted" {
 		return "status " + lr.ContentLicense.StatusCode
 	}
-	return strings.Join(parts, "; ")
+	return RedactAccountIDs(strings.Join(parts, "; "))
 }
 
 // License requests a download license for an owned book and unwraps the

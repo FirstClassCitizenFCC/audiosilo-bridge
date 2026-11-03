@@ -442,6 +442,35 @@ func TestImportEnrichRefusedIsNotAFailure(t *testing.T) {
 	}
 }
 
+// Denied: Amazon's text reaching the import unredacted (belt and braces: the
+// client redacts it first) leaves the customer id out of the job's error,
+// result, progress and logs, as a coded failure and as a plain error; the ASIN
+// and the reason stay.
+func TestImportErrorsRedactAccountIDs(t *testing.T) {
+	for name, licErr := range map[string]error{
+		"coded":   fmt.Errorf("%w: B0FAKE0002 (%s)", audible.ErrNoRights, amazonRefusal),
+		"uncoded": errors.New(amazonRefusal),
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newImportEnv(t)
+			e.accts.licErr = []error{licErr}
+			res, err := e.run(context.Background(), e.params(nil))
+			if err == nil {
+				t.Fatal("expected a failure")
+			}
+			pb, _ := json.Marshal(e.progress)
+			for _, s := range []string{err.Error(), mustJSON(t, res), string(pb), e.logs.String()} {
+				if strings.Contains(s, "A1B2C3D4E5F6G7") {
+					t.Fatalf("customer id leaked: %.400s", s)
+				}
+			}
+			if msg := err.Error(); !strings.Contains(msg, "B00H3R0B0W") || !strings.Contains(msg, "being throttled") {
+				t.Fatalf("the reason was lost: %s", msg)
+			}
+		})
+	}
+}
+
 // Each refusal answers its code, leaves nothing in the library or the temp
 // folder, and says nothing secret.
 func TestImportCodes(t *testing.T) {

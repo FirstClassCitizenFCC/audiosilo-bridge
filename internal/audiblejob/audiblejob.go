@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/audible"
 	"github.com/kodestar/audiosilo-bridge/internal/audibleacct"
 	"github.com/kodestar/audiosilo-bridge/internal/importjob"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -148,8 +149,17 @@ type Result struct {
 	Books          int `json:"books"`
 }
 
-// Run polls the account.
+// Run polls the account. Its error passes through audible.RedactedError, so no
+// Amazon account identifier reaches the job's error, whatever wrapped it.
 func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
+	res, err := h.run(ctx, job, rep)
+	if err != nil {
+		return nil, audible.RedactedError(err)
+	}
+	return res, nil
+}
+
+func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
 	p, err := ParseParams(job.Params)
 	if err != nil {
 		return nil, err
@@ -293,6 +303,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 // the job's end, not the account's failure (the runner ends the job by its
 // context's cause).
 func (h *Handler) fail(ctx context.Context, account, why string) error {
+	why = audible.RedactAccountIDs(why)
 	if ctx.Err() != nil {
 		return errors.New(why)
 	}

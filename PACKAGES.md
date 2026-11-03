@@ -2098,7 +2098,13 @@ internal/
             real ones. CREDENTIALS ARE FULL AMAZON ACCOUNT ACCESS: they live only in
             the vault (sealed Credentials.Marshal JSON), never in the store, job
             params or results, logs, the heartbeat or agent staging; errors carry
-            Audible's answer, never a request body or token. The per-book key/iv are
+            Audible's answer, never a request body or token. That answer passes
+            RedactAccountIDs (redact.go) as it becomes an error (snippet, a
+            license's denial reasons): customer ids (labelled, or A + 10 or more
+            capitals with a digit), amzn1.* ids, device serials, emails and tokens
+            go, the ASIN (B0..., 10 digits) and the reason stay; audiblejob's job
+            errors, Failure messages and recorded poll failures pass it again
+            (RedactedError keeps errors.Is). The per-book key/iv are
             in ffmpeg's argv (visible in the container's process table): accepted.
             Deps: stdlib + progress + source.
             Build tag audiblefake (never in a release build or image; fake_off.go /

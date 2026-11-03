@@ -75,7 +75,8 @@ const downloadAttempts = 3
 const mappingPoll = time.Second
 
 // Failure is a failed import's result and error: a code from the list above
-// and a sentence for the console. It never holds a key, an iv or a URL.
+// and a sentence for the console. It never holds a key, an iv or a URL, nor an
+// Amazon account identifier (fail redacts its message).
 type Failure struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -84,7 +85,7 @@ type Failure struct {
 func (f *Failure) Error() string { return f.Message }
 
 func fail(code, format string, args ...any) *Failure {
-	return &Failure{Code: code, Message: fmt.Sprintf(format, args...)}
+	return &Failure{Code: code, Message: audible.RedactAccountIDs(fmt.Sprintf(format, args...))}
 }
 
 // refusedSignIn is the failure when Audible refuses the account's sign-in.
@@ -271,7 +272,9 @@ func (h *Importer) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (a
 		return f, f
 	}
 	if err != nil {
-		return nil, err
+		// Belt and braces: the audible client redacts Amazon's text where it
+		// becomes an error, and the job's error passes the same redactor.
+		return nil, audible.RedactedError(err)
 	}
 	return res, nil
 }
