@@ -134,6 +134,14 @@ internal/
             downloaded tool's first run, retries a run refused as busy
             (busyRetries) until the child forked mid-write has exec'd. No install
             holds the fork lock: every fork in the process would wait for it.
+  fsutil/   small filesystem helpers shared by the engine and the writers
+            (WriteFileAtomic, ...). Phase 4b: install*.go (moved from podcast)
+            InstallNoReplace(root, temp, name, link): an exclusive hard link then
+            the temp's removal, falling back where hard links are unsupported
+            (LinkUnsupported) to RenameNoReplace (renameat2 RENAME_NOREPLACE on
+            Linux) or RenameIfAbsent; an existing target is ErrExists (fs.ErrExist).
+            free_*.go: FreeBytes(path) and IsNoSpace(err) (ENOSPC/EDQUOT; Windows'
+            disk-full errors).
   execfile/ writes files the process will exec at once with syscall.ForkLock
             held for reading from open to close, so a concurrent fork can't hold
             the write descriptor and make the exec fail with ETXTBSY (WriteFile).
@@ -1819,7 +1827,9 @@ internal/
             edit re-checks only its library (each check stats files and writes a
             probe). Status(id) is one library's last check (a write job needs it
             mapped AND writable at the mount it uses now).
-  jobs/     the generic runner. Phase 2c-2b: dispatch.go owns ordinary and
+  jobs/     the generic runner. Phase 4b: CancelContext(parent) is a context
+            whose cancel reads as an admin's cancel (Resumes false), for handler
+            tests. Phase 2c-2b: dispatch.go owns ordinary and
             reserved dispatchers. InteractiveHandler opts a kind into the reserved
             pool (1), claimed only with negotiated min_priority=100. Download is
             1 with negotiation, 2 without it; light=2 and pipeline=25 stay fixed.
@@ -1980,7 +1990,9 @@ internal/
             overwriting a concurrent foreign file; a mount without
             hard links (SMB/CIFS, some NAS/FUSE shares) falls back to a no-replace
             rename (renameat2 RENAME_NOREPLACE on Linux, else an absence check
-            under the show and path locks; install*.go). Committed delete
+            under the show and path locks). Phase 4b moved the primitive to
+            fsutil (InstallNoReplace, RenameNoReplace, RenameIfAbsent); install.go
+            is a thin wrapper that keeps podcast's ErrInvalidFile. Committed delete
             manifests identify trash for cleanup after rescan or after 24 h.
             Invalid Fetch keeps its episode and grants no file authority. Shared
             phase2c2 fixtures are copied byte-for-byte, checked by manifest hashes.
@@ -2023,18 +2035,35 @@ internal/
             says preorder, show/periodical or no download rights); LastPositions
             (25 ASINs a request, split on a 400; Position{PositionMs, LastUpdated},
             last_updated read as UTC, zero when absent) and SetLastPosition (needs the
-            ACR, ContentACR); License + DecryptVoucher (AAXC key/iv) and Source.Acquire
-            (license, download, ffmpeg -c copy to .m4b; AAXC only: the manager's AAX
-            activation bytes and its sims series watch were dropped on import).
+            ACR, ContentACR); License + DecryptVoucher (AAXC key/iv) (AAXC only: the
+            manager's AAX activation bytes and its sims series watch were dropped on
+            import). Phase 4b: Client.License(ctx, asin) answers a License {URL, Key,
+            IV, Size} that redacts itself (String, GoString, LogValue; MarshalJSON
+            refuses), ErrNotReleased / ErrNoRights / ErrDenied from the denial's
+            reasons (a voucher that won't parse says so without its bytes);
+            Client.Title(asin) (GET /1.0/library/{asin}, ErrNotInLibrary on 404);
+            Decrypt(ctx, ffmpeg, in, out, lic): ffmpeg -audible_key/-audible_iv -c
+            copy -f ipod, its stderr redacted of key and iv (case-insensitive: ffmpeg
+            echoes a bad key value). The manager's Source.Acquire went (audiblejob
+            runs the steps). FINDING (ffmpeg 7.1.1): an UNENCRYPTED MP4 passes
+            through with the audible key and iv set (exit 0, chapters kept, audio
+            bit-identical; TestDecryptPassesAnUnencryptedMP4Through), so the fake
+            serves a plain .m4b and the real decrypt runs unchanged against it.
             Phase 4a additions: RefreshAccessToken (POST /auth/token) and Deregister
             (POST /auth/deregister, bearer, deregister_all_existing_accounts false:
             only this device; refreshes an access token within 2 min of expiry
             first; the caller forgets locally FIRST); Download resumes a partial file
             with a Range (206 from its end appended, anything else starts again, a
-            416 at its size is done; a failure leaves the partial in place but
-            nothing reuses it in 4a: 4b must check If-Range or the size before
-            resuming one under a new license's URL) and refuses past MaxBytes (default 4 GiB) keeping
-            nothing, its errors never naming the presigned URL (a request that got
+            416 at its size is done) and refuses past MaxBytes (default 4 GiB) keeping
+            nothing. Phase 4b: a partial resumes only with its state file
+            (StatePath: dest+".state", {size, etag, last_modified}, written before
+            the body) agreeing with DownloadOptions.ExpectedSize and holding a
+            validator or a size; the Range carries If-Range (a strong ETag, else
+            Last-Modified), so a 200 replaces the partial, and a 206 at another
+            offset or for another total starts again; BeforeWrite(total, held) lets
+            the caller refuse (free space) before a byte is written; a short body is
+            io.ErrUnexpectedEOF; RemovePartial deletes both files; a ctx cancel
+            stops it mid-body, its errors never naming the presigned URL (a request that got
             no answer names its URL without the query); every call backs off
             on 429/503 (Retry-After seconds or date, else 2 s doubling, 4 attempts,
             a wait over 2 min fails at once, a huge value too), each attempt signed
@@ -2061,9 +2090,19 @@ internal/
             /auth/token; /auth/deregister (this device only, recorded); signed calls
             verified against the issued key (unknown or deregistered 401, Refuse()
             403); library paging; lastpositions 400 over LastPositionsMax (10);
-            PUT lastpositions recorded. licenserequest answers 501 until Phase 4b (a
-            voucher from the device and customer ids, an unencrypted download).
-            Controls: Calls(), /_fake/calls, /_fake/refuse, /_fake/titles.
+            PUT lastpositions recorded. Phase 4b (content.go): GET /1.0/library/{asin};
+            POST /1.0/content/{asin}/licenserequest (Denied for not owned, a preorder
+            not released, no download rights; else Granted with a voucher sealed
+            from the device type + serial + customer id + asin, the key and iv
+            FakeKey(asin) gives, an offline_url on the fake with a one-license token,
+            content_reference's size and acr); GET /_fake/content/{asin}.aaxc (the
+            embedded testdata/fixture.m4b, 30 s, three chapters, retagged per title
+            by ffmpeg when there is one; http.ServeContent with an ETag, so Range
+            and If-Range; 403 once expired). Controls: Calls() (Licenses,
+            Downloads with their Range/If-Range), /_fake/calls, /_fake/refuse,
+            /_fake/titles, /_fake/cut?after=N (CutNextDownload: the next download
+            drops after N bytes), /_fake/expire (ExpireURLs), /_fake/release?asin=
+            (Release: a preorder out today).
             Recorder: the owner's recording transport, a 0600 JSON-lines file per
             run, scrubbed AS IT WRITES (secret keys and the customer, device and
             token subtrees redacted, headers from an allowlist, signed CDN queries
@@ -2098,7 +2137,10 @@ internal/
             the audible package; a stub in tests), which answers ErrRefused on a
             401/403 signed call: Library lists again when a sign-in again replaced
             the device meanwhile, else records the refusal (RefusedText) and runs
-            OnChange (the heartbeat's checklist). Errors carry Amazon's or the
+            OnChange (the heartbeat's checklist). Phase 4b: Title, License and
+            Download go through the same signed path (Manager.signed: open the
+            sign-in, call, on a refusal retry once with a newer sign-in, else record
+            it). Errors carry Amazon's or the
             server's answer, never a token;
             tests walk the data dir and the log for every stub secret, and the
             tagged tests run the whole life against the fake. Deps: audible, link,
@@ -2122,8 +2164,40 @@ internal/
             another edition); asin_set and a moved book are skipped, other failures
             counted (enrich_failed). Polled/Failed record the account's outcome (a
             poll stopped, cancelled or lost records nothing). The result is counts
-            only (no titles, no credential). Deps:
-            audibleacct (types), importjob, jobs, link, source, store.
+            only (no titles, no credential).
+            Phase 4b, import.go: audible.import (download lane; one per account at a
+            time, a per-account gate; params {account, asin, library_id, dest_path,
+            template}, unknown fields ignored, the rest validated). Steps reported
+            as progress {step, done, total}: license (also while waiting for the
+            gate or the mapping check), download, decrypt, place, rescan, enrich.
+            Checks the account (this Bridge's, mapped on this server, else
+            unknown_account), the library (the account's, a books one, mapped AND
+            writable at the mount in use, else not_writable), the title (preorder
+            not_released, no rights / not in the library no_rights, a refusal
+            audible_refused), works out the destination (Destination: Auto from the
+            paged books listing's siblings, or the template, or dest_path; a last
+            segment without an audio extension is a FOLDER and the title's file
+            name goes in it; refused paths are not_writable) and fails exists
+            BEFORE downloading when anything is there. License (denials mapped as
+            the title's), download to <data>/audible/tmp/<acct>-<asin>.aaxc.part
+            (free space: the tmp folder 2.2x the size less what the partial holds,
+            the library 1.1x, else disk_full; a dropped connection or a 5xx resumes
+            up to 3 attempts; a 401/403/410 licenses ONCE more, then
+            offline_url_expired), decrypt (audible.Decrypt to .m4b), install
+            (transfer.Local.Place), rescan (the placed file; the server answers the
+            book path, retried 3 times; failing says the book is placed), enrich
+            (the ASIN; asin_set is enriched false, no failure). Result {library_id,
+            path (the book's, from the rescan), files [{path, size}], bytes,
+            enriched}; a failure is Failure {code, message} as both result and
+            error. The license's key and iv live in memory and ffmpeg's argv only:
+            never a log, progress, result, error or file (tests walk them all).
+            Cleanup: a stop (jobs.Resumes) keeps the partial and its state for the
+            next start; a cancel, a lost claim or a failure deletes it; Abandon
+            deletes it for a job the runner ends unrun; the decrypted copy always
+            goes. SweepTmp at start keeps only *.aaxc.part younger than 7 days
+            (PartialMaxAge) with their state (decision 6). Deps:
+            audibleacct (types), audible, fsutil, importjob, jobs, link, mapping,
+            placement, source, store, transfer.
   importjob/ matching and placement against a library (the manager's, ported):
             BookMatcher over []link.LibraryBook (pkg/match.Best: ASIN exact first,
             then author + series + title tokens; a book in several series is a
@@ -2132,21 +2206,28 @@ internal/
             backfill), Plan(records, {Mode, Template, Books, Rejected}) (siblings by
             tolerant author + series, AuthorFolders reusing an existing author folder
             spelling, the existence check; no per-record server query),
-            ApplyDestinations, and Run (acquire, transfer.Place, one Rescan(placed
-            paths) callback). The manager's serverapi client went: the Bridge holds
-            the paged listing. Deps: link, placement, source, transfer,
+            ApplyDestinations (Run went in Phase 4b: audiblejob's import runs the
+            steps). The manager's serverapi client went: the Bridge holds
+            the paged listing. Deps: link, placement, source,
             audiosilo-server/pkg/match.
   placement/ where a new book goes (the manager's, as is): Auto (series siblings'
             folder and shortcode convention, else author/title) and templates.
   source/   Record (normalized metadata of one importable book: ASIN as Key,
             UnavailableReason; Phase 4a: Authors (every credit), SeriesPosition as
-            the source spells it, ReleaseDate YYYY-MM-DD or "") and the Source/Acquirer interfaces (source.go only;
-            the manager's folder walk, probe and OpenAudible reader were not
-            imported).
-  transfer/ Local only (SFTP was not imported): EnsureRoot, Index (basename +
-            size, lazily stat'd), Place (temp + rename, size-verified, idempotent).
-            Phase 4b hardens it before it writes a library: the podcast install's
-            no-replace primitive and a free-space check, through mapping.SafeJoin.
+            the source spells it, ReleaseDate YYYY-MM-DD or "") (source.go only;
+            the Source/Acquirer interfaces went in Phase 4b; the manager's folder
+            walk, probe and OpenAudible reader were not imported).
+  transfer/ Local only (SFTP and Index were not kept): EnsureRoot, CleanRel
+            (mapping.SafeJoin's rules, no empty path, no dot file name) and Place
+            (Phase 4b, hardened before it writes a library): every call through an
+            os.Root at the mapping's root (a symlink can't lead out); the same bytes
+            already there are AlreadyPresent, anything else (a different file, a
+            folder, a link) ErrExists; Headroom (1.1x) free at the nearest existing
+            folder else ErrDiskFull (also ENOSPC/EDQUOT during the copy); staged as a
+            .audiosilo-import-*.part dotfile beside the destination (0644, synced,
+            size-checked), installed with fsutil.InstallNoReplace, a file that
+            raced in kept (ErrExists, or AlreadyPresent when it is these bytes); a
+            failure or cancel leaves no staged copy. Deps: fsutil, mapping, progress.
   progress/ throttled byte-progress Reader/Writer (1 MiB) shared by the download
             and the transfer.
   generate/ sidecars.generate (Phase 1a): turns a server job into an ENGINE BOOK, follows
@@ -2777,7 +2858,10 @@ internal/
             (and a fake uname for the other OS's service file), each run in a
             temp HOME holding service files rendered by worker.Service, so no
             test reads this computer's own.
-  app/      Phase 4a: audible.go wires audibleacct (OnChange kicks a beat) and
+  app/      Phase 4b: audible.go also builds audiblejob's Importer (the
+            mapping registry, the mount, the engine's ffmpeg else tools.ffmpeg_path,
+            <data>/audible/tmp swept at start) and registers audible.import.
+            Phase 4a: audible.go wires audibleacct (OnChange kicks a beat) and
             registers audiblejob (so the heartbeat's kinds, and the server's
             features, gain audible); the Backend's Audible section: Audible (the
             accounts, the heartbeat's books libraries, the server's people read

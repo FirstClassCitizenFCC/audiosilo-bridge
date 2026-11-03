@@ -148,9 +148,13 @@ internal/
   audibleacct/ the Audible accounts: paste-back sign-in (PKCE + serial in memory 15 min),
               register, vault audible_<id>, mapping on the server first, deregister on remove
   audiblejob/ audible.poll (light): library -> paged server books -> BookMatcher ->
-              titles in calls of 500 (poll_id, final) -> unambiguous ASIN backfill
-  importjob/  BookMatcher (link.LibraryBook) + Plan + Run: match and place against a library
-  placement/ source/ transfer/ (Local) progress/  (the manager's, imported as is)
+              titles in calls of 500 (poll_id, final) -> unambiguous ASIN backfill;
+              audible.import (Phase 4b, download lane, one per account): license ->
+              resumable download -> ffmpeg decrypt -> placement -> no-replace install
+              -> rescan -> ASIN enrich
+  importjob/  BookMatcher (link.LibraryBook) + Plan: match and place against a library
+  transfer/   Local.Place: SafeJoin + os.Root, free-space check, no-replace install
+  placement/ source/ progress/  (the manager's, imported as is)
 web/          the page: Vite + React 19 + TS + Tailwind v4; pure logic in src/lib
 docker/       entrypoint.sh (own /bridge-data, umask 022, drop to PUID:PGID)
 Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, agent
@@ -166,9 +170,10 @@ link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, 
 through its own Engine/Server interfaces; `podcastjob -> {jobs, link, mapping, netguard, podcast, secrets, store}`;
 `podcast -> {fsutil, gofeed, x/net/html, x/text}`; `logring -> podcast`;
 `audible -> {progress, source}` (its tagged build also `audiblefake`, which never
-imports `audible`); `importjob -> {link, placement, source, transfer,
+imports `audible`); `importjob -> {link, placement, source,
 audiosilo-server/pkg/match}`; `audibleacct -> {audible, link, secrets, source, store}`;
-`audiblejob -> {audibleacct, importjob, jobs, link, source, store}` (app wires both); `transfer -> progress`;
+`audiblejob -> {audible, audibleacct, fsutil, importjob, jobs, link, mapping, placement,
+source, store, transfer}` (app wires both); `transfer -> {fsutil, mapping, progress}`;
 `jobs -> {link, store}`; `mapping -> {fsutil, link}`;
 `link`, `agentproto` and `workerproto` are leaves; `workers -> {asr, fsutil,
 scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`
@@ -221,6 +226,10 @@ in PACKAGES.md.
   store, job params and results, logs, the heartbeat and the agent staging dir
   never hold it (tests walk them), and the pasted sign-in page's code is never
   answered or logged.
+  An Audible license's key and iv (per book) are held in memory and passed
+  only in ffmpeg's argv (`-audible_key`/`-audible_iv`, visible in the container's
+  process table: accepted); ffmpeg's stderr is redacted of them, and a test walks
+  the import's logs, progress, result, error and files for them.
   Private feed.json files omit feed, enclosure, chapters and transcript URLs. Both
   log sinks and the page API redact URLs, including userinfo, paths and queries.
 - **The page answers the local network only and always asks for its password**,
@@ -400,6 +409,19 @@ Audible routes, and the optional `audible` setup item. The server's Audible rout
 are not behind the console's module toggle (the podcasts precedent): the page
 signs in either way and says the module must be on for the server to poll. Nothing
 downloads yet (4b), and places don't sync yet (4c).
+
+**Phase 4b (Audible acquisition):** `audible.import` (`audiblejob/import.go`,
+download lane, one per account): the title checked, a license (denials as
+`not_released`/`no_rights`/`audible_refused`), the AAXC downloaded to
+`<data>/audible/tmp` with a resumable, validated, capped download (If-Range
+against the partial's state file; 2.2x free there, 1.1x in the library, else
+`disk_full`; one new license on an expired URL, then `offline_url_expired`),
+decrypted by ffmpeg `-c copy` to .m4b, placed (Auto from the server's books
+listing, or the template / `dest_path`), installed with `transfer.Local` (never
+replacing: `exists`), a rescan and the ASIN enriched. A stop keeps the partial for
+the next start (swept after 7 days), a cancel or failure deletes it. The fake
+serves a plain .m4b as the AAXC (ffmpeg passes an unencrypted MP4 through with the
+key set) with Range, a cut and an expiry. No migration.
 
 See BRIDGE-PLAN.md's Status table for what is next.
 
