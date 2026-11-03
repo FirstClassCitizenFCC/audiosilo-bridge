@@ -186,6 +186,7 @@ type Store interface {
 	MapAudibleAccount(ctx context.Context, a store.AudibleAccount) error
 	AudiblePolled(ctx context.Context, id string, titles, matched int, at time.Time, keep string) error
 	RefuseAudibleAccount(ctx context.Context, id, why string, at time.Time) error
+	AudibleAccepted(ctx context.Context, id, why string) (bool, error)
 	AudibleAccountError(ctx context.Context, id, why string) error
 	DeleteAudibleAccount(ctx context.Context, id string) error
 }
@@ -671,6 +672,8 @@ func (m *Manager) open(id string) (audible.Credentials, error) {
 // is tried once more with a newer sign-in when one replaced the device
 // meanwhile, else it marks the account refused (RefusedText or ThrottledText),
 // runs OnChange and answers ErrRefused, or the throttled denial as it came.
+// A call Audible answers ends a sign-in refusal recorded before (a transient
+// 401/403), never a device's (ThrottledText: only a sign-in again ends it).
 func (m *Manager) signed(ctx context.Context, id string, call func(audible.Credentials) error) error {
 	creds, err := m.open(id)
 	if err != nil {
@@ -681,10 +684,14 @@ func (m *Manager) signed(ctx context.Context, id string, call func(audible.Crede
 		// A sign-in that finished meanwhile deregistered the device this call
 		// used: call again with the new one rather than mark it refused.
 		if fresh, ferr := m.credentials(id); ferr == nil && fresh.DeviceSerial != creds.DeviceSerial {
+			creds = fresh
 			err = call(fresh)
 		}
 	}
 	if !refusal(err) {
+		if err == nil {
+			m.accepted(ctx, id)
+		}
 		return err
 	}
 	throttled := errors.Is(err, audible.ErrThrottled)
@@ -692,15 +699,41 @@ func (m *Manager) signed(ctx context.Context, id string, call func(audible.Crede
 	if throttled {
 		why, msg = ThrottledText, "audible: Audible refused the account's device a license: it must sign in again"
 	}
-	if rerr := m.o.DB.RefuseAudibleAccount(context.WithoutCancel(ctx), id, why, m.o.Now()); rerr != nil {
-		m.o.Log.Warn("audible: recording a refusal failed", "account", id, "err", rerr)
+	// Under finishMu (held by a sign-in from its lookup until its row is
+	// stored), and only while the refused device is still the account's: a
+	// sign-in again that stored a new device after the check above must not
+	// be marked refused for the old one (a ThrottledText refusal outlives polls).
+	m.finishMu.Lock()
+	cur, cerr := m.credentials(id)
+	stale := cerr == nil && cur.DeviceSerial != creds.DeviceSerial
+	if !stale {
+		if rerr := m.o.DB.RefuseAudibleAccount(context.WithoutCancel(ctx), id, why, m.o.Now()); rerr != nil {
+			m.o.Log.Warn("audible: recording a refusal failed", "account", id, "err", rerr)
+		}
 	}
-	m.o.Log.Warn(msg, "account", id, "err", err)
-	m.o.OnChange()
+	m.finishMu.Unlock()
+	m.o.Log.Warn(msg, "account", id, "err", err, "replaced", stale)
+	if !stale {
+		m.o.OnChange()
+	}
 	if throttled {
 		return err
 	}
 	return ErrRefused
+}
+
+// accepted ends account id's sign-in refusal (RefusedText) after Audible
+// answered a signed call, running OnChange when it ended one.
+func (m *Manager) accepted(ctx context.Context, id string) {
+	ended, err := m.o.DB.AudibleAccepted(context.WithoutCancel(ctx), id, RefusedText)
+	if err != nil {
+		m.o.Log.Warn("audible: recording an accepted sign-in failed", "account", id, "err", err)
+		return
+	}
+	if ended {
+		m.o.Log.Info("audible: Audible accepts the account's sign-in again", "account", id)
+		m.o.OnChange()
+	}
 }
 
 // refusal reports whether err from a signed call refuses the account's device:

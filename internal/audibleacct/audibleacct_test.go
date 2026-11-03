@@ -679,6 +679,66 @@ func TestLibraryAfterASignInAgainIsNoRefusal(t *testing.T) {
 	}
 }
 
+// A refusal whose device another sign-in again replaced by the time it would be
+// recorded (here: during the retry) isn't recorded on the account.
+func TestRefusalOfAReplacedDeviceIsNotRecorded(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	calls := 0
+	e.svc.library = func(c audible.Credentials) ([]source.Record, error) {
+		calls++
+		next := c
+		next.DeviceSerial = fmt.Sprintf("SERIAL-NEW-%d", calls)
+		raw, err := next.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		if err := e.vault.Set(secrets.AudibleName(a.ID), raw); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w (HTTP 401)", ErrRefused)
+	}
+	if _, err := e.m.Library(context.Background(), a.ID); !errors.Is(err, ErrRefused) || calls != 2 {
+		t.Fatalf("library = %v (calls %d)", err, calls)
+	}
+	if got, _ := e.m.Account(context.Background(), a.ID); got.RefusedAt != "" {
+		t.Fatalf("a replaced device's refusal was recorded: %+v", got)
+	}
+}
+
+// A call Audible answers ends a sign-in refusal (a transient 401/403), never a
+// device's throttling.
+func TestAnAnsweredCallEndsOnlyASignInRefusal(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	ctx := context.Background()
+	e.svc.libraryErr = fmt.Errorf("%w (HTTP 401)", ErrRefused)
+	if _, err := e.m.Title(ctx, a.ID, "B0FAKE0003"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("refused title = %v", err)
+	}
+	e.svc.libraryErr = nil
+	if _, err := e.m.Title(ctx, a.ID, "B0FAKE0003"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.m.Account(ctx, a.ID); got.RefusedAt != "" || got.LastError != "" {
+		t.Fatalf("an answered call kept the sign-in refusal: %+v", got)
+	}
+
+	e.svc.libraryErr = fmt.Errorf("license denied: %w", audible.ErrThrottled)
+	if _, err := e.m.License(ctx, a.ID, "B0FAKE0003"); !errors.Is(err, audible.ErrThrottled) {
+		t.Fatalf("throttled license = %v", err)
+	}
+	e.svc.libraryErr = nil
+	if _, err := e.m.Title(ctx, a.ID, "B0FAKE0003"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.m.Account(ctx, a.ID); !Throttled(got) {
+		t.Fatalf("an answered call ended the throttling: %+v", got)
+	}
+}
+
 // An import's title read and license use the account's sign-in, and a refusal
 // on either marks the account refused as a poll's does.
 func TestImportCallsAndTheirRefusal(t *testing.T) {

@@ -1329,7 +1329,8 @@ internal/
             counts, clears a refusal, records device_profile); AudiblePolled clears
             refusal and error, except a refusal whose last_error is its keep
             argument (audibleacct.ThrottledText: a throttled device still lists);
-            AudibleAccountError leaves a refused account's reason alone. 0010 (4b owner fixes) adds audible_accounts.device_profile
+            AudibleAccountError leaves a refused account's reason alone; AudibleAccepted
+            ends a refusal only of the reason given (audibleacct.RefusedText). 0010 (4b owner fixes) adds audible_accounts.device_profile
             (audible.ProfileVersion at the sign-in; '' for one made before it was
             kept, which reads as the older profile). 0007 adds podcast_shows, a credential-free cache keyed by
             (server_id, show_id), indexed by server/library/feed hash. An empty
@@ -2217,7 +2218,11 @@ internal/
             denied as audible.ErrThrottled is a refusal too (signed retries it with a
             newer sign-in, else records refused_at with ThrottledText and answers the
             denial, not ErrRefused); Throttled(a) reads it; a poll keeps it, only a
-            sign-in again ends it (no new wire field: the page's refused). Finish
+            sign-in again ends it (no new wire field: the page's refused). A refusal
+            is recorded under finishMu and only while the refused device is still the
+            account's (a sign-in again that stored a new one meanwhile isn't marked);
+            any answered signed call ends a sign-in refusal (RefusedText, a transient
+            401/403), never ThrottledText. Finish
             records the device's profile (store device_profile from
             Credentials.Profile); OldProfile(a) (not audible.ProfileVersion, or none)
             flags an account that must sign in again ("Sign in again to keep
@@ -2303,7 +2308,9 @@ internal/
             same name), never no_rights; the account then reads refused, and every
             later import of it fails audible_refused at once, before the title read
             or a license (ThrottledText for a throttled account, else the sign-in
-            refusal's), after a marker's rescan-only resume, until a sign-in again) and the destination (Destination, a wrapper over
+            refusal's; the account read again first, since a sign-in may have ended it
+            while the job waited for the mapping), after a marker's rescan-only resume,
+            until a sign-in again) and the destination (Destination, a wrapper over
             destination(), which also returns the plan's kind and siblings and
             which the poll's plans share: dest_path FIRST, the
             template not consulted, else the template, else Auto from the paged

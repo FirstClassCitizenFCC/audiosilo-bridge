@@ -147,6 +147,19 @@ func (db *DB) RefuseAudibleAccount(ctx context.Context, id, why string, at time.
 	return err
 }
 
+// AudibleAccepted ends id's refusal when its reason is why (Audible answered a
+// signed call, so a sign-in it refused before is accepted again), reporting
+// whether it ended one. A refusal for another reason stays.
+func (db *DB) AudibleAccepted(ctx context.Context, id, why string) (bool, error) {
+	res, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET refused_at = '', last_error = ''
+		WHERE id = ? AND refused_at <> '' AND last_error = ?`, id, why)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // AudibleAccountError records why id's last poll failed (not a refusal). A
 // refused account keeps its refusal's reason: that is what it needs fixed.
 func (db *DB) AudibleAccountError(ctx context.Context, id, why string) error {

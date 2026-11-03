@@ -44,6 +44,7 @@ const (
 type stubImportAccounts struct {
 	mu       sync.Mutex
 	acct     store.AudibleAccount
+	acctThen []store.AudibleAccount // each Account read after the first answers the next
 	acctErr  error
 	title    source.Record
 	titleErr error
@@ -66,7 +67,11 @@ func (s *stubImportAccounts) Account(_ context.Context, id string) (store.Audibl
 	if id != s.acct.ID {
 		return store.AudibleAccount{}, audibleacct.ErrNotFound
 	}
-	return s.acct, nil
+	a := s.acct
+	if len(s.acctThen) > 0 {
+		s.acct, s.acctThen = s.acctThen[0], s.acctThen[1:]
+	}
+	return a, nil
 }
 
 func (s *stubImportAccounts) Title(context.Context, string, string) (source.Record, error) {
@@ -612,7 +617,17 @@ func TestImportOfARefusedAccountFailsFast(t *testing.T) {
 			e.tmpEmpty(t)
 		})
 	}
+	// A sign-in again that ended the refusal after the job's first read
+	// (while it waited for the library's mapping) imports.
 	e := newImportEnv(t)
+	signedIn := e.accts.acct
+	e.accts.acct.RefusedAt, e.accts.acct.LastError = "2026-11-03T10:00:00Z", audibleacct.ThrottledText
+	e.accts.acctThen = []store.AudibleAccount{signedIn}
+	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.licenses != 1 {
+		t.Fatalf("an account signed in again meanwhile: %v (licenses %d)", err, e.accts.licenses)
+	}
+
+	e = newImportEnv(t)
 	e.accts.acct.LastError = "could not list the Audible library: connection reset"
 	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.licenses != 1 {
 		t.Fatalf("an account with a poll error: %v (licenses %d)", err, e.accts.licenses)

@@ -371,6 +371,13 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	// A refused account fails here, before asking Audible anything: each queued
 	// import would only be refused in turn (a device denied licenses, for one,
 	// stays denied) until the owner signs in again, which ends the refusal.
+	// Read again: the job may have waited for the library's mapping, and a
+	// sign-in again meanwhile ended the refusal the first read saw.
+	if acct.RefusedAt != "" {
+		if acct, err = h.o.Accounts.Account(ctx, acct.ID); err != nil {
+			return nil, err
+		}
+	}
 	if acct.RefusedAt != "" {
 		if audibleacct.Throttled(acct) {
 			return nil, throttledDevice()

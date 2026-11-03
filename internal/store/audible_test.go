@@ -157,6 +157,25 @@ func TestAudiblePolledKeepsADeviceRefusal(t *testing.T) {
 	if got := get(); got.RefusedAt != Timestamp(at.Add(time.Hour)) || got.LastError != "throttled" || got.LastTitles != 4 {
 		t.Fatalf("the device refusal didn't stay: %+v", got)
 	}
+	// Another reason's acceptance leaves it; its own ends it.
+	if ended, err := db.AudibleAccepted(ctx, a.ID, "sign-in refused"); err != nil || ended {
+		t.Fatalf("accepted another reason = %v, %v", ended, err)
+	}
+	if got := get(); got.LastError != "throttled" {
+		t.Fatalf("the device refusal ended: %+v", got)
+	}
+	if err := db.RefuseAudibleAccount(ctx, a.ID, "sign-in refused", at); err != nil {
+		t.Fatal(err)
+	}
+	if ended, err := db.AudibleAccepted(ctx, a.ID, "sign-in refused"); err != nil || !ended {
+		t.Fatalf("accepted = %v, %v", ended, err)
+	}
+	if got := get(); got.RefusedAt != "" || got.LastError != "" {
+		t.Fatalf("accepted kept the refusal: %+v", got)
+	}
+	if err := db.RefuseAudibleAccount(ctx, a.ID, "throttled", at); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.SignInAudibleAccount(ctx, a, at.Add(3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
