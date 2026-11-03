@@ -190,7 +190,7 @@ func (it libItem) logOddDate(log *slog.Logger, now time.Time) {
 	if it.CustomerRights != nil {
 		rights = strconv.FormatBool(it.CustomerRights.IsConsumableOffline)
 	}
-	log.Info("audible: a title's release date is implausible, read as unknown",
+	log.Info("audible: a title's release or issue date is implausible, set aside",
 		"asin", it.ASIN, "title", it.Title, "release_date", it.ReleaseDate, "issue_date", it.IssueDate,
 		"content_delivery_type", it.ContentDeliveryType, "content_type", it.ContentType,
 		"is_consumable_offline", rights)

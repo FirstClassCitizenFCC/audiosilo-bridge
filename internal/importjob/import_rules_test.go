@@ -137,6 +137,8 @@ func TestKeepBest(t *testing.T) {
 		{"the same work tied with another keeps none", []Claim{{Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 3, Work: "v"}}, []bool{false, false, false}},
 		{"no work key is never a duplicate", []Claim{{Path: "a", Score: 3}, {Path: "a", Score: 3}}, []bool{false, false}},
 		{"an ASIN match beats a title match", []Claim{{Path: "a", Score: 3, Work: "x"}, {Path: "a", Score: 10, Work: "y"}}, []bool{false, true}},
+		{"the same work below the best keeps it too", []Claim{{Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 10, Work: "w"}, {Path: "a", Score: 2, Work: "v"}}, []bool{true, true, false}},
+		{"no keeper, no same work below it", []Claim{{Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 3, Work: "v"}, {Path: "a", Score: 1, Work: "w"}}, []bool{false, false, false}},
 		{"no claim", []Claim{{}, {Path: "a", Score: 1}}, []bool{false, true}},
 	}
 	for _, tc := range cases {
@@ -247,5 +249,38 @@ func TestWorkKey(t *testing.T) {
 	}
 	if WorkKey(source.Record{Title: "X", Author: "A"}) != WorkKey(source.Record{Title: "X", Authors: []string{"A"}}) {
 		t.Error("the first author alone is not the author set")
+	}
+	// A title that folds to nothing is no identity, so two such records never
+	// share a book as one work.
+	blank := source.Record{Title: " -- ", Authors: []string{"Tess Prat"}, SeriesPosition: "3"}
+	if k := WorkKey(blank); k != "" {
+		t.Errorf("a wordless title's key = %q, want none", k)
+	}
+	if keep := KeepBest([]Claim{{Path: "a", Score: 2, Work: WorkKey(blank)}, {Path: "a", Score: 2, Work: WorkKey(blank)}}); keep[0] || keep[1] {
+		t.Errorf("two wordless titles tied on one book kept %v", keep)
+	}
+}
+
+// SpanMismatch: a pack (a range position) matched to a book with no range is a
+// mismatch; a pack on a range book, or a single volume anywhere, is not.
+func TestSpanMismatch(t *testing.T) {
+	pack := audibleRec("B0SYN00081", "Iron Vale: Books 5-6", "Ona Fell", "Iron Vale", "5-6")
+	vol5 := audibleRec("B0SYN00082", "Iron Vale 5", "Ona Fell", "Iron Vale", "5")
+	single := link.LibraryBook{Path: "Fell/Iron Vale/IV05 - Ash Road", Series: series("Iron Vale", "5")}
+	ranged := link.LibraryBook{Path: "Fell/Iron Vale/IV05-06", Series: series("Iron Vale", "5-6")}
+	for _, tc := range []struct {
+		rec  source.Record
+		b    link.LibraryBook
+		want bool
+	}{
+		{pack, single, true},
+		{pack, link.LibraryBook{Path: "Fell/Iron Vale"}, true},
+		{pack, ranged, false},
+		{vol5, single, false},
+		{vol5, ranged, false},
+	} {
+		if got := SpanMismatch(tc.rec, tc.b); got != tc.want {
+			t.Errorf("SpanMismatch(%q #%s, %q) = %v, want %v", tc.rec.Title, tc.rec.SeriesPosition, tc.b.Path, got, tc.want)
+		}
 	}
 }

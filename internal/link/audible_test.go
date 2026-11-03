@@ -184,6 +184,7 @@ func TestRateLimitedRetryAfter(t *testing.T) {
 		{"99999999999999", 24 * time.Hour, 24 * time.Hour},
 		{time.Now().Add(90 * time.Second).UTC().Format(http.TimeFormat), 80 * time.Second, 90 * time.Second},
 		{time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat), 0, 0},
+		{time.Now().AddDate(1, 0, 0).UTC().Format(http.TimeFormat), 24 * time.Hour, 24 * time.Hour},
 	} {
 		retryAfter = tc.header
 		err := c.Enrich(context.Background(), 1, "A/One", "B000000001")

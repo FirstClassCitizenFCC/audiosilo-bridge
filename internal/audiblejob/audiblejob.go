@@ -4,8 +4,8 @@
 // first, then author, series and title), report the titles to the server in
 // calls of at most link.MaxAudibleTitles (the last one final, so the titles
 // the poll didn't see become gone there), then backfill the ASIN of each book
-// a title matched without doubt (the manager's Contested guard: a book two
-// titles matched is never enriched).
+// a title matched without doubt (a book two titles claimed is never enriched,
+// whichever kept it: importjob.KeepBest), paced (enrich.go).
 //
 // It writes nothing into a library and reads no credential itself: the account
 // manager (audibleacct) holds the sign-in and lists the library. Params,
@@ -99,7 +99,8 @@ func New(o Options) *Handler {
 // Kind is audible.poll.
 func (h *Handler) Kind() string { return Kind }
 
-// Lane is the light lane: a poll is a few API calls.
+// Lane is the light lane: a poll is a few API calls, then the paced ASIN
+// backfill (up to enrichBudget, the rest deferred to the next poll).
 func (h *Handler) Lane() string { return jobs.LaneLight }
 
 // Params are audible.poll's params.
@@ -251,8 +252,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		titles[i].Match = &link.AudibleMatch{LibraryID: acct.LibraryID, Path: b.Path, How: how}
 		// A book two titles claimed gets no ASIN: at least one of the claims
 		// was wrong. A preorder isn't out yet, so the book on disk is another
-		// edition: its ASIN would stay on that book for good.
-		if claimed[c.Path] == 1 && b.ASIN == "" && titles[i].State != link.AudiblePreorder {
+		// edition: its ASIN would stay on that book for good. A pack matched
+		// to a folder that holds no range may be one volume: not the pack's.
+		if claimed[c.Path] == 1 && b.ASIN == "" && titles[i].State != link.AudiblePreorder && !importjob.SpanMismatch(rec, b) {
 			hits = append(hits, hit{path: b.Path, asin: rec.ASIN})
 		}
 	}

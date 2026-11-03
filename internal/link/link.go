@@ -612,16 +612,19 @@ func (c *Client) doFound(ctx context.Context, method, path string, q url.Values,
 	return false, err
 }
 
-// retryAfter reads a Retry-After value (delay seconds or an HTTP date); 0 when
-// absent, unreadable or past.
+// maxRetryAfter bounds a Retry-After, in either form.
+const maxRetryAfter = 24 * time.Hour
+
+// retryAfter reads a Retry-After value (delay seconds or an HTTP date),
+// clamped at maxRetryAfter; 0 when absent, unreadable or past.
 func retryAfter(v string, now time.Time) time.Duration {
 	v = strings.TrimSpace(v)
 	if n, err := strconv.Atoi(v); err == nil {
 		// Clamped before the multiply so a huge value can't overflow.
-		return time.Duration(min(max(n, 0), 24*3600)) * time.Second
+		return time.Duration(min(max(n, 0), int(maxRetryAfter/time.Second))) * time.Second
 	}
 	if t, err := http.ParseTime(v); err == nil {
-		return max(t.Sub(now), 0)
+		return min(max(t.Sub(now), 0), maxRetryAfter)
 	}
 	return 0
 }

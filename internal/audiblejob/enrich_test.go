@@ -150,7 +150,9 @@ func TestEnrichDefersTheRest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if res.Enriched != 1 || res.EnrichDeferred != 2 || res.EnrichFailed != 0 || fs.enrichN != 2+enrichMaxLimited {
+		// One through, then enrichMaxLimited 429s in a row: the last of them
+		// leaves the rest, without a wait.
+		if res.Enriched != 1 || res.EnrichDeferred != 2 || res.EnrichFailed != 0 || fs.enrichN != 1+enrichMaxLimited {
 			t.Fatalf("result = %+v after %d calls", res, fs.enrichN)
 		}
 	})
@@ -245,5 +247,34 @@ func TestPollContestedKeepsTheBest(t *testing.T) {
 	}
 	if res.Matched != 3 || res.Contested != 3 || res.Enriched != 0 || len(fs.enriched) != 0 {
 		t.Fatalf("result = %+v, enriched %v", res, fs.enriched)
+	}
+}
+
+// TestPollPackOnVolumeNotEnriched: a pack whose title fell back to the folder
+// at its first volume's position matches it, but that folder may hold one
+// volume, so the pack's ASIN never goes onto it; a pack on its own range
+// folder is enriched.
+func TestPollPackOnVolumeNotEnriched(t *testing.T) {
+	t.Parallel()
+	fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{
+		{Path: "Fell/Iron Vale/IV05 - Ash Road", Title: "Ash Road", Authors: []string{"Ona Fell"},
+			Series: []link.SeriesRef{{Name: "Iron Vale", Position: "5"}}},
+		{Path: "Fell/Iron Vale/IV07-08", Title: "Iron Vale", Authors: []string{"Ona Fell"},
+			Series: []link.SeriesRef{{Name: "Iron Vale", Position: "7-8"}}},
+	}}
+	accts := &stubAccounts{acct: account(), recs: []source.Record{
+		{ASIN: "B0PACK0056", Title: "Iron Vale: Books 5-6", Author: "Ona Fell", Series: "Iron Vale", SeriesPosition: "5-6"},
+		{ASIN: "B0PACK0078", Title: "Iron Vale: Books 7-8", Author: "Ona Fell", Series: "Iron Vale", SeriesPosition: "7-8"},
+	}}
+	h := setup(t, fs, accts)
+	res, err := run(t, h, "acct0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Matched != 2 || res.Enriched != 1 {
+		t.Fatalf("result = %+v, enriched %v", res, fs.enriched)
+	}
+	if want := map[string]string{"Fell/Iron Vale/IV07-08": "B0PACK0078"}; fmt.Sprint(fs.enriched) != fmt.Sprint(want) {
+		t.Fatalf("enriched %v, want %v", fs.enriched, want)
 	}
 }

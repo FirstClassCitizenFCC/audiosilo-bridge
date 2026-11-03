@@ -307,8 +307,13 @@ type Claim struct {
 // (folded, in any order) and its series position. Two records with one key
 // are the same book owned twice (two ASINs, an edition each), which share a
 // book without contesting it; the position keeps apart the volumes a series
-// lists under one bare title.
+// lists under one bare title. A title that folds to nothing is no identity:
+// its key is "", which KeepBest never takes for the same work.
 func WorkKey(rec source.Record) string {
+	title := match.Fold(rec.Title)
+	if title == "" {
+		return ""
+	}
 	authors := rec.Authors
 	if len(authors) == 0 && rec.Author != "" {
 		authors = []string{rec.Author}
@@ -320,15 +325,32 @@ func WorkKey(rec source.Record) string {
 		}
 	}
 	slices.Sort(folded)
-	return match.Fold(rec.Title) + "\x00" + strings.Join(slices.Compact(folded), "\x00") + "\x00" + strings.TrimSpace(rec.SeriesPosition)
+	return title + "\x00" + strings.Join(slices.Compact(folded), "\x00") + "\x00" + strings.TrimSpace(rec.SeriesPosition)
+}
+
+// SpanMismatch reports whether rec spans books (its position is a range: a
+// pack) and b does not, as when a pack's title fell back to the folder at its
+// first volume's position. Such a match may be shown, but the pack's ASIN is
+// not the book's: an enrichment would stamp it onto what may be one volume.
+func SpanMismatch(rec source.Record, b link.LibraryBook) bool {
+	if _, ok := rangeStart(rec.SeriesPosition); !ok || rec.HasSequence {
+		return false
+	}
+	return !slices.ContainsFunc(b.Series, func(s link.SeriesRef) bool {
+		_, ok := rangeStart(s.Position)
+		return ok
+	})
 }
 
 // KeepBest settles books several records claimed: of the claims on one path,
 // only the single best score keeps its match, and a tie for the best keeps
 // none (the matcher can't tell which is the book, so none is called "on this
 // server"), unless every tied claim is the same work (WorkKey: one book owned
-// twice), which all keep it: dropping it would download it again. A path one record claimed keeps it.
-// keep[i] reports whether claims[i] stands; an empty Path is no claim.
+// twice), which all keep it: dropping it would download it again. A claim of
+// the same work as the one that keeps a book keeps it too, whatever its score
+// (the edition the book's ASIN names scores higher than the other). A path one
+// record claimed keeps it. keep[i] reports whether claims[i] stands; an empty
+// Path is no claim.
 func KeepBest(claims []Claim) []bool {
 	top := map[string][]int{} // path -> the claims at its best score
 	for i, c := range claims {
@@ -343,17 +365,23 @@ func KeepBest(claims []Claim) []bool {
 			top[c.Path] = append(at, i)
 		}
 	}
-	keep := make([]bool, len(claims))
-	for _, at := range top {
+	winner := map[string]int{} // path -> the claim that keeps it, -1 for none
+	for path, at := range top {
+		winner[path] = at[0]
 		for _, i := range at[1:] {
 			if claims[i].Work == "" || claims[i].Work != claims[at[0]].Work {
-				at = nil // a tie between two works: none keeps it
+				winner[path] = -1 // a tie between two works: none keeps it
 				break
 			}
 		}
-		for _, i := range at {
-			keep[i] = true
+	}
+	keep := make([]bool, len(claims))
+	for i, c := range claims {
+		if c.Path == "" {
+			continue
 		}
+		w := winner[c.Path]
+		keep[i] = w == i || (w >= 0 && c.Work != "" && c.Work == claims[w].Work)
 	}
 	return keep
 }

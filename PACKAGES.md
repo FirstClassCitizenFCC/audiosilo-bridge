@@ -2129,8 +2129,10 @@ internal/
             under ONE poll id (job, attempt and a random suffix), the last final (an
             empty library sends one empty final call, so the server marks every
             title gone), then Enrich (enrich.go) for each matched book without an
-            ASIN that no second title claimed (counted from the claims: contested) and no preorder matched
-            (not out yet: another edition), PACED: one PUT per 200 ms, a 429 waits
+            ASIN that no second title claimed (counted from the claims: contested), no preorder matched
+            (not out yet: another edition) and no pack matched to a book with no
+            range (importjob.SpanMismatch: the folder at its first volume's
+            position may hold that volume alone), PACED: one PUT per 200 ms, a 429 waits
             its Retry-After (else 2 s doubling) and halves the pace (to 2 s at the
             slowest), and a wait over 1 min, 5 429s in a row or 10 min of
             enriching leave the rest to the next poll (enrich_deferred: those books
@@ -2153,7 +2155,10 @@ internal/
             score, match.ScoreASIN for an ASIN), KeepBest
             (of the claims on one path the single best score keeps it; a tie keeps
             none, unless every tied claim is one WorkKey: folded title, folded
-            author set and position, the same book owned twice), Plan(records, {Mode, Template, Books, Rejected}) (siblings by
+            author set and position, the same book owned twice, and a claim of the
+            keeper's work keeps it at any score; a title that folds to nothing has
+            no key), SpanMismatch (a range record on a book with no
+            range: no enrichment), Plan(records, {Mode, Template, Books, Rejected}) (siblings by
             tolerant author + series, AuthorFolders reusing an existing author folder
             spelling, the existence check; no per-record server query),
             ApplyDestinations, and Run (acquire, transfer.Place, one Rescan(placed

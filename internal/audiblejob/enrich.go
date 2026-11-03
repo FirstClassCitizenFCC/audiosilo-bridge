@@ -66,7 +66,7 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 			if wait == 0 {
 				wait = enrichBackoff << (limited - 1)
 			}
-			if limited > enrichMaxLimited || wait > enrichMaxWait {
+			if limited >= enrichMaxLimited || wait > enrichMaxWait {
 				res.EnrichDeferred = len(hits) - i
 				break
 			}
