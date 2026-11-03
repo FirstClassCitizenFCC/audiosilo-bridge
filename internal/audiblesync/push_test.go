@@ -544,7 +544,7 @@ func TestPushServerWait(t *testing.T) {
 
 // The feed pages in the order the server wrote rows, so a row comes again
 // with its updated_at unchanged (an edit, a diverged place applied): a new
-// place is new by its version and place, and its stillness counts from when
+// place is new by its place alone, and its stillness counts from when
 // the Bridge first read it (its own clock), never the row's time. The same
 // row read again, or read again at its place with another version (its finish
 // or length changed), neither restarts the wait nor writes again, before the
