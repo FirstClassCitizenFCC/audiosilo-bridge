@@ -115,9 +115,6 @@ func postAuth(ctx context.Context, set settings, path string, mp Marketplace, co
 		}
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("Accept", "application/json")
-		// The profile's own user agent, as on every signed call: Go's default
-		// one names no app the device registered as.
-		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("x-amzn-identity-auth-domain", mp.AmazonAPIDomain())
 		if accessToken != "" {
 			req.Header.Set("Authorization", "Bearer "+accessToken)

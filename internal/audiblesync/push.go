@@ -113,12 +113,23 @@ func (p *Pusher) pause(id string, until time.Time) {
 // account reads a's feed from its cursor, records the places waiting, then
 // writes the ones due.
 func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount, now time.Time) {
-	from := now
-	baseline := a.PushFrom == ""
-	if !baseline {
+	// cutoff: a row changed before it is history. The first read (no start
+	// yet) takes the last baselineWindow; after it, the feed's start.
+	cutoff := now.Add(-baselineWindow)
+	if a.PushFrom != "" {
+		cutoff = now
 		if t, err := time.Parse(time.RFC3339Nano, a.PushFrom); err == nil {
-			from = t
+			cutoff = t
 		}
+	}
+	list, err := p.o.DB.AudiblePushes(ctx, a.ID)
+	if err != nil {
+		p.o.Log.Warn("audible: listing the places to push failed", "account", a.ID, "err", err)
+		return
+	}
+	titles := make(map[string]store.AudiblePush, len(list))
+	for _, x := range list {
+		titles[x.ASIN] = x
 	}
 	cursor := a.PushCursor
 	for range maxPages {
@@ -139,7 +150,7 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			return
 		}
 		for _, row := range page.Rows {
-			p.row(ctx, a, row, now, from, baseline)
+			p.row(ctx, a, titles, row, cutoff)
 		}
 		cursor = page.Next
 		if !page.More || page.Next == "" {
@@ -155,9 +166,9 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 // row records one server place: a place on a listed title's book that changed
 // since the row last seen becomes the title's waiting place. Audible's own
 // rows (the server leaves them out too), a book the title isn't matched to
-// and, at the first read, history (older than baselineWindow; after it, older
-// than the feed's start) are left.
-func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, row link.AudibleProgressRow, now, from time.Time, baseline bool) {
+// and history (changed before cutoff) are left. titles is account a's rows
+// by ASIN, kept up to date with what row records.
+func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[string]store.AudiblePush, row link.AudibleProgressRow, cutoff time.Time) {
 	if row.DeviceID == DeviceID(a.ID) {
 		return
 	}
@@ -165,8 +176,8 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, row link.Audib
 	if err != nil {
 		return
 	}
-	x, err := p.o.DB.GetAudiblePush(ctx, a.ID, row.ASIN)
-	if err != nil || !x.Listed || x.LibraryID != row.LibraryID || x.Path != row.Path {
+	x, ok := titles[row.ASIN]
+	if !ok || !x.Listed || x.LibraryID != row.LibraryID || x.Path != row.Path {
 		return
 	}
 	if x.RowUpdated != "" {
@@ -174,23 +185,22 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, row link.Audib
 			return
 		}
 	}
-	history := updated.Before(from)
-	if baseline {
-		history = now.Sub(updated) > baselineWindow
-	}
-	if history {
+	if updated.Before(cutoff) {
 		err = p.o.DB.SeenAudibleRow(ctx, a.ID, row.ASIN, updated)
 	} else {
 		err = p.o.DB.WantAudiblePush(ctx, a.ID, row.ASIN, ms(row.Position), updated)
 	}
 	if err != nil {
 		p.o.Log.Warn("audible: recording a server place failed", "account", a.ID, "err", err)
+		return
 	}
+	x.RowUpdated = store.Timestamp(updated)
+	titles[row.ASIN] = x
 }
 
 // due writes each waiting place whose row has been still for StillFor.
 func (p *Pusher) due(ctx context.Context, a store.AudibleAccount, now time.Time) {
-	list, err := p.o.DB.AudiblePushes(ctx, a.ID)
+	list, err := p.o.DB.AudibleWaiting(ctx, a.ID)
 	if err != nil {
 		p.o.Log.Warn("audible: listing the places to push failed", "account", a.ID, "err", err)
 		return
@@ -198,9 +208,6 @@ func (p *Pusher) due(ctx context.Context, a store.AudibleAccount, now time.Time)
 	for _, x := range list {
 		if ctx.Err() != nil {
 			return
-		}
-		if !x.Listed || x.WantMs == nil {
-			continue
 		}
 		updated, err := time.Parse(time.RFC3339Nano, x.RowUpdated)
 		if err != nil || now.Sub(updated) < StillFor {
@@ -223,9 +230,9 @@ func (p *Pusher) push(ctx context.Context, a store.AudibleAccount, x store.Audib
 	switch {
 	case want < 1000:
 		drop = "at the start"
-	case x.LastMs >= 0 && abs(want-x.LastMs) <= echoMs:
+	case near(want, x.LastMs):
 		drop = "the place written last"
-	case x.HeardMs >= 0 && abs(want-x.HeardMs) <= echoMs:
+	case near(want, x.HeardMs):
 		drop = "Audible's own place"
 	case pastRuntime(float64(want)/1000, x.RuntimeS):
 		drop = "past the runtime"
@@ -233,7 +240,7 @@ func (p *Pusher) push(ctx context.Context, a store.AudibleAccount, x store.Audib
 			"account", a.ID, "asin", x.ASIN)
 	}
 	if drop != "" {
-		if err := p.o.DB.AudiblePushed(ctx, a.ID, x.ASIN, want, now, false); err != nil {
+		if err := p.o.DB.DropAudiblePush(ctx, a.ID, x.ASIN); err != nil {
 			p.o.Log.Warn("audible: dropping a place failed", "account", a.ID, "err", err)
 		}
 		return false
@@ -256,7 +263,7 @@ func (p *Pusher) push(ctx context.Context, a store.AudibleAccount, x store.Audib
 		}
 		return p.failed(ctx, a, x, now, "writing the place to Audible", err)
 	}
-	if err := p.o.DB.AudiblePushed(ctx, a.ID, x.ASIN, want, now, true); err != nil {
+	if err := p.o.DB.AudiblePushed(ctx, a.ID, x.ASIN, want, now); err != nil {
 		p.o.Log.Warn("audible: recording a push failed", "account", a.ID, "err", err)
 	}
 	p.o.Log.Info("audible: place written to Audible", "account", a.ID, "asin", x.ASIN, "position_ms", want)
@@ -278,7 +285,7 @@ func (p *Pusher) failed(ctx context.Context, a store.AudibleAccount, x store.Aud
 		return true
 	}
 	if audible.HTTPStatus(err) != 0 {
-		_ = p.o.DB.AudiblePushed(ctx, a.ID, x.ASIN, *x.WantMs, now, false)
+		_ = p.o.DB.DropAudiblePush(ctx, a.ID, x.ASIN)
 	}
 	p.o.health(ctx, a, errors.New(what+": "+err.Error()), time.Time{})
 	return false

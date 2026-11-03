@@ -58,7 +58,6 @@ func (c *Client) doSigned(ctx context.Context, method, path string, body []byte,
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("User-Agent", userAgent)
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}

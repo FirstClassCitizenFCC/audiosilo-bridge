@@ -50,6 +50,9 @@ var Policies = []string{"all", "series", "manual"}
 // IDPattern is an account's id: the Bridge's own, opaque to the server.
 var IDPattern = regexp.MustCompile(`^[a-z0-9]{8,32}$`)
 
+// ASINPattern is an ASIN as the server takes one.
+var ASINPattern = regexp.MustCompile(`^[A-Z0-9]{10}$`)
+
 // Errors.
 var (
 	// ErrInvalid: a request the page can correct (an unknown marketplace or

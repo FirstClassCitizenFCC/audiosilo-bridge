@@ -44,7 +44,21 @@ func TestAudiblePushRows(t *testing.T) {
 		p.ACR != "CR!ACR1" || p.HeardMs != 30_000 || p.RuntimeS != 3600 || p.Path != "A/One" {
 		t.Fatalf("push = %+v, %v", p, err)
 	}
-	if err := db.AudiblePushed(ctx, a.ID, "B000000001", 60_000, at.Add(time.Minute), true); err != nil {
+	if w, err := db.AudibleWaiting(ctx, a.ID); err != nil || len(w) != 2 {
+		t.Fatalf("waiting = %+v, %v", w, err)
+	}
+	// Dropped: the waiting place goes without a write.
+	if err := db.DropAudiblePush(ctx, a.ID, "B000000002"); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := db.AudibleWaiting(ctx, a.ID); len(w) != 1 || w[0].ASIN != "B000000001" {
+		t.Fatalf("waiting after a drop = %+v", w)
+	}
+	if two, _ := db.GetAudiblePush(ctx, a.ID, "B000000002"); two.WantMs != nil || two.LastMs != -1 {
+		t.Fatalf("a drop wrote a push: %+v", two)
+	}
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000002", 90_000, at)
+	if err := db.AudiblePushed(ctx, a.ID, "B000000001", 60_000, at.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.WantMs != nil || p.LastMs != 60_000 || p.At != Timestamp(at.Add(time.Minute)) {

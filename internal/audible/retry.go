@@ -35,8 +35,10 @@ func retryable(status int) bool {
 var errBackoffTooLong = errors.New("audible asked to wait longer than the Bridge will")
 
 // sendWithBackoff sends the request newReq builds (a fresh one per attempt, so a
-// signature carries its own date) and returns the first answer that isn't a
-// 429/503, or the last one. A 429/503 body is drained and closed before the wait.
+// signature carries its own date) under the profile's user agent (Go's default
+// one names no app the device registered as), and returns the first answer
+// that isn't a 429/503, or the last one. A 429/503 body is drained and closed
+// before the wait.
 func sendWithBackoff(ctx context.Context, hc *http.Client, sleep func(context.Context, time.Duration) error,
 	newReq func() (*http.Request, error)) (*http.Response, error) {
 	for attempt := 1; ; attempt++ {
@@ -44,6 +46,7 @@ func sendWithBackoff(ctx context.Context, hc *http.Client, sleep func(context.Co
 		if err != nil {
 			return nil, withoutQuery(err) // a URL that doesn't parse is named in the error
 		}
+		req.Header.Set("User-Agent", userAgent)
 		resp, err := hc.Do(req)
 		if err != nil {
 			return nil, withoutQuery(err)

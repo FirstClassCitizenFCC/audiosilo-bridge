@@ -66,13 +66,17 @@ func (db *DB) ListAudibleSync(ctx context.Context, account string, titles []Audi
 	if _, err := tx.ExecContext(ctx, `UPDATE audible_push SET listed = 0 WHERE account = ?`, account); err != nil {
 		return err
 	}
+	upsert, err := tx.PrepareContext(ctx, `INSERT INTO audible_push (account, asin, library_id, path, runtime_s, listed)
+		VALUES (?, ?, ?, ?, ?, 1)
+		ON CONFLICT(account, asin) DO UPDATE SET
+			want_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN want_ms ELSE NULL END,
+			library_id = excluded.library_id, path = excluded.path, runtime_s = excluded.runtime_s, listed = 1`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = upsert.Close() }()
 	for _, t := range titles {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO audible_push (account, asin, library_id, path, runtime_s, listed)
-			VALUES (?, ?, ?, ?, ?, 1)
-			ON CONFLICT(account, asin) DO UPDATE SET
-				want_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN want_ms ELSE NULL END,
-				library_id = excluded.library_id, path = excluded.path, runtime_s = excluded.runtime_s, listed = 1`,
-			account, t.ASIN, t.LibraryID, t.Path, t.RuntimeS); err != nil {
+		if _, err := upsert.ExecContext(ctx, account, t.ASIN, t.LibraryID, t.Path, t.RuntimeS); err != nil {
 			return err
 		}
 	}
@@ -84,7 +88,18 @@ func (db *DB) ListAudibleSync(ctx context.Context, account string, titles []Audi
 
 // AudiblePushes lists account's rows, by ASIN.
 func (db *DB) AudiblePushes(ctx context.Context, account string) ([]AudiblePush, error) {
-	rows, err := db.sql.QueryContext(ctx, `SELECT `+audiblePushColumns+` FROM audible_push WHERE account = ? ORDER BY asin`, account)
+	return db.audiblePushes(ctx, `SELECT `+audiblePushColumns+` FROM audible_push WHERE account = ? ORDER BY asin`, account)
+}
+
+// AudibleWaiting lists account's listed rows with a place waiting to be
+// pushed, by ASIN.
+func (db *DB) AudibleWaiting(ctx context.Context, account string) ([]AudiblePush, error) {
+	return db.audiblePushes(ctx, `SELECT `+audiblePushColumns+` FROM audible_push
+		WHERE account = ? AND listed = 1 AND want_ms IS NOT NULL ORDER BY asin`, account)
+}
+
+func (db *DB) audiblePushes(ctx context.Context, query, account string) ([]AudiblePush, error) {
+	rows, err := db.sql.QueryContext(ctx, query, account)
 	if err != nil {
 		return nil, err
 	}
@@ -127,14 +142,15 @@ func (db *DB) SeenAudibleRow(ctx context.Context, account, asin string, rowUpdat
 	return err
 }
 
+// DropAudiblePush forgets (account, asin)'s waiting place without a write.
+func (db *DB) DropAudiblePush(ctx context.Context, account, asin string) error {
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL WHERE account = ? AND asin = ?`, account, asin)
+	return err
+}
+
 // AudiblePushed records that ms was written to Audible at at (the waiting
-// place goes), or, with pushed false, that the waiting place was dropped
-// without a write.
-func (db *DB) AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time, pushed bool) error {
-	if !pushed {
-		_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL WHERE account = ? AND asin = ?`, account, asin)
-		return err
-	}
+// place goes).
+func (db *DB) AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time) error {
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, last_ms = ?, at = ? WHERE account = ? AND asin = ?`,
 		ms, timestamp(at), account, asin)
 	return err

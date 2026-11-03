@@ -34,7 +34,6 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"regexp"
 	"strconv"
 	"time"
 
@@ -117,9 +116,6 @@ func EventID(account, asin string, positionMs int64, lastUpdated time.Time, kind
 // DeviceID is the server's device id for account's places.
 func DeviceID(account string) string { return "audible:" + account }
 
-// asinPattern is an ASIN as the server takes one.
-var asinPattern = regexp.MustCompile(`^[A-Z0-9]{10}$`)
-
 // Accounts is the part of the account manager the sync uses
 // (*audibleacct.Manager).
 type Accounts interface {
@@ -134,10 +130,11 @@ type Accounts interface {
 type Store interface {
 	ListAudibleSync(ctx context.Context, account string, titles []store.AudibleSyncTitle) error
 	AudiblePushes(ctx context.Context, account string) ([]store.AudiblePush, error)
-	GetAudiblePush(ctx context.Context, account, asin string) (store.AudiblePush, error)
+	AudibleWaiting(ctx context.Context, account string) ([]store.AudiblePush, error)
 	WantAudiblePush(ctx context.Context, account, asin string, ms int64, rowUpdated time.Time) error
 	SeenAudibleRow(ctx context.Context, account, asin string, rowUpdated time.Time) error
-	AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time, pushed bool) error
+	AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time) error
+	DropAudiblePush(ctx context.Context, account, asin string) error
 	AudibleHeard(ctx context.Context, account, asin string, ms int64) error
 	SetAudibleACR(ctx context.Context, account, asin, acr string) error
 	SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error
@@ -291,7 +288,7 @@ func ParseParams(raw json.RawMessage) (link.AudibleSyncParams, error) {
 	seen := make(map[string]bool, len(p.Titles))
 	for _, t := range p.Titles {
 		switch {
-		case !asinPattern.MatchString(t.ASIN) || seen[t.ASIN]:
+		case !audibleacct.ASINPattern.MatchString(t.ASIN) || seen[t.ASIN]:
 			return link.AudibleSyncParams{}, errors.New("bad params: each title's asin must be an ASIN, once")
 		case t.LibraryID <= 0 || t.Path == "" || t.RuntimeS < 0:
 			return link.AudibleSyncParams{}, errors.New("bad params: each title needs a library, a book path and a runtime of 0 or more")
@@ -376,7 +373,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	titles := make([]store.AudibleSyncTitle, len(p.Titles))
 	asins := make([]string, len(p.Titles))
 	for i, t := range p.Titles {
-		titles[i] = store.AudibleSyncTitle{ASIN: t.ASIN, LibraryID: t.LibraryID, Path: t.Path, RuntimeS: t.RuntimeS}
+		titles[i] = store.AudibleSyncTitle(t)
 		asins[i] = t.ASIN
 	}
 	if err := h.o.DB.ListAudibleSync(ctx, acct.ID, titles); err != nil {
@@ -404,8 +401,11 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 		}
 	}
 	var events []link.AudibleEvent
-	heard := map[string]int64{} // event id -> the place it carries (listens)
-	asinOf := map[string]string{}
+	type heardPlace struct {
+		asin string
+		ms   int64
+	}
+	heard := map[string]heardPlace{} // a listen's event id -> the place it carries
 	for _, t := range p.Titles {
 		pl, ok := places[t.ASIN]
 		if !ok {
@@ -426,7 +426,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 			res.SkippedOld++
 			continue
 		}
-		if x, ok := pushes[t.ASIN]; ok && x.LastMs >= 0 && abs(pl.PositionMs-x.LastMs) <= echoMs {
+		if x, ok := pushes[t.ASIN]; ok && near(pl.PositionMs, x.LastMs) {
 			// The place the push wrote, coming back.
 			res.SkippedEcho++
 			continue
@@ -437,10 +437,9 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 		}
 		stamp := at.UTC().Format(time.RFC3339)
 		id := EventID(acct.ID, t.ASIN, pl.PositionMs, pl.LastUpdated, "")
-		pos := placeS
 		events = append(events, link.AudibleEvent{ID: id, Kind: link.EventListen, LibraryID: t.LibraryID, Path: t.Path,
-			FromPos: &pos, ToPos: &pos, StartedAt: stamp, EndedAt: stamp, Start: "jump"})
-		heard[id], asinOf[id] = pl.PositionMs, t.ASIN
+			FromPos: &placeS, ToPos: &placeS, StartedAt: stamp, EndedAt: stamp, Start: "jump"})
+		heard[id] = heardPlace{t.ASIN, pl.PositionMs}
 		if atBookEnd(placeS, t.RuntimeS) {
 			fid := EventID(acct.ID, t.ASIN, pl.PositionMs, pl.LastUpdated, link.EventFinish)
 			events = append(events, link.AudibleEvent{ID: fid, Kind: link.EventFinish, LibraryID: t.LibraryID, Path: t.Path, At: stamp})
@@ -482,8 +481,11 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 			default:
 				res.Rejected++
 			}
-			if ms, ok := heard[r.ID]; ok && r.Status != link.SyncRejected {
-				if err := h.o.DB.AudibleHeard(ctx, acct.ID, asinOf[r.ID], ms); err != nil {
+			if hp, ok := heard[r.ID]; ok && r.Status != link.SyncRejected {
+				if x, ok := pushes[hp.asin]; ok && x.HeardMs == hp.ms {
+					continue // already recorded
+				}
+				if err := h.o.DB.AudibleHeard(ctx, acct.ID, hp.asin, hp.ms); err != nil {
 					h.o.Log.Warn("audible: recording a place heard failed", "account", acct.ID, "err", err)
 				}
 			}
@@ -495,6 +497,9 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 		"applied", res.Applied, "behind", res.Behind, "duplicate", res.Duplicate)
 	return res, nil
 }
+
+// near reports whether v is within echoMs of ref (-1: none).
+func near(v, ref int64) bool { return ref >= 0 && abs(v-ref) <= echoMs }
 
 func abs(n int64) int64 {
 	if n < 0 {
