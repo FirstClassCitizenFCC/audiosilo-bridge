@@ -279,6 +279,13 @@ func (m Mapping) label(marketplace string) string {
 	return name + " (" + strings.ToUpper(marketplace) + ")"
 }
 
+// madeLabel reports whether label is the one the Bridge made for a (its person
+// and store, the forms send it back as it is): mapped again, such a name
+// follows the new person rather than keep the old one's.
+func madeLabel(label string, a store.AudibleAccount) bool {
+	return label != "" && label == (Mapping{UserName: a.UserName}).label(a.Marketplace)
+}
+
 // Finish is the end of a sign-in: the login Start answered, the redirect URL
 // the admin pasted back, and the account's mapping.
 type Finish struct {
@@ -292,7 +299,10 @@ type Finish struct {
 // sign-in and records the account. A second sign-in of the same Amazon account
 // in the same marketplace replaces the first (its id kept, its old device
 // deregistered after). Anything that fails after the device registered
-// deregisters it again, so a failed sign-in leaves no device behind.
+// deregisters it again, so a failed sign-in leaves no device behind, and puts
+// back what it changed: the account's earlier sign-in in the vault and the
+// server's record of it (a new account removed, an existing one's earlier
+// mapping recorded again).
 func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Finish) (store.AudibleAccount, error) {
 	if err := f.check(); err != nil {
 		return store.AudibleAccount{}, err
@@ -335,6 +345,9 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 		undo("lookup")
 		return store.AudibleAccount{}, perr
 	}
+	if prev.ID != "" && madeLabel(f.Label, prev) {
+		f.Label = ""
+	}
 	acct := store.AudibleAccount{ID: prev.ID, Marketplace: l.mp.Code, CustomerHash: hash, ServerID: serverID,
 		Label: f.label(l.mp.Code), UserID: f.UserID, UserName: f.UserName, LibraryID: f.LibraryID, Policy: f.Policy, Sync: f.Sync}
 	if acct.ID == "" {
@@ -343,38 +356,71 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 			return store.AudibleAccount{}, err
 		}
 	}
-	if _, err := srv.PutAudibleAccount(ctx, acct.ID, input(acct)); err != nil {
-		undo("server")
-		return store.AudibleAccount{}, err
-	}
+	name := secrets.AudibleName(acct.ID)
+	// The account's earlier sign-in, kept to put back ("" when there was none,
+	// or it can't be read) and to deregister its device once this one is kept.
+	var oldRaw string
 	var old *audible.Credentials
 	if prev.ID != "" {
-		if c, err := m.credentials(prev.ID); err == nil {
-			old = &c
+		if raw, gerr := m.o.Vault.Get(name); gerr == nil && raw != "" {
+			if c, cerr := audible.ParseCredentials(raw); cerr == nil {
+				oldRaw, old = raw, &c
+			}
 		}
+	}
+	sealedNew := false
+	// rollback undoes a sign-in that failed once the server was asked to record
+	// it, each step best effort: a failed call may have been applied before its
+	// answer was lost.
+	rollback := func(why string) {
+		undo(why)
+		bg := context.WithoutCancel(ctx)
+		if sealedNew {
+			verr := m.o.Vault.Delete(name)
+			if oldRaw != "" {
+				verr = m.o.Vault.Set(name, oldRaw)
+			}
+			if verr != nil {
+				m.o.Log.Warn("audible: putting the account's earlier sign-in back failed", "account", acct.ID, "err", verr)
+			}
+		}
+		switch {
+		case prev.ID == "":
+			if derr := srv.DeleteAudibleAccount(bg, acct.ID); derr != nil {
+				m.o.Log.Warn("audible: removing a failed sign-in's account from the server failed", "account", acct.ID, "err", derr)
+			}
+		case prev.ServerID == serverID:
+			if _, perr := srv.PutAudibleAccount(bg, prev.ID, input(prev)); perr != nil {
+				m.o.Log.Warn("audible: recording the account's earlier mapping on the server again failed", "account", acct.ID, "err", perr)
+			}
+		}
+	}
+	if _, err := srv.PutAudibleAccount(ctx, acct.ID, input(acct)); err != nil {
+		rollback("server")
+		return store.AudibleAccount{}, err
 	}
 	sealed, err := creds.Marshal()
 	if err == nil {
-		err = m.o.Vault.Set(secrets.AudibleName(acct.ID), sealed)
+		if err = m.o.Vault.Set(name, sealed); err == nil {
+			sealedNew = true
+		}
 	}
 	if err == nil {
 		err = m.o.DB.SignInAudibleAccount(ctx, acct, m.o.Now())
 	}
 	if err != nil {
-		undo("store")
-		if prev.ID == "" {
-			_ = m.o.Vault.Delete(secrets.AudibleName(acct.ID))
-			if derr := srv.DeleteAudibleAccount(context.WithoutCancel(ctx), acct.ID); derr != nil {
-				m.o.Log.Warn("audible: removing a failed sign-in's account from the server failed", "account", acct.ID, "err", derr)
-			}
-		}
+		rollback("store")
 		return store.AudibleAccount{}, fmt.Errorf("could not keep the sign-in: %w", err)
 	}
-	if old != nil && old.DeviceSerial != creds.DeviceSerial {
+	switch {
+	case old != nil && old.DeviceSerial != creds.DeviceSerial:
 		if derr := m.o.Service.Deregister(context.WithoutCancel(ctx), *old); derr != nil {
 			m.o.Log.Warn("audible: the account's earlier device could not be removed; remove it in the Amazon account's devices",
 				"account", acct.ID, "err", derr)
 		}
+	case old == nil && prev.ID != "":
+		m.o.Log.Warn("audible: the account's earlier sign-in couldn't be opened, so its device could not be removed; "+
+			"remove it in the Amazon account's devices", "account", acct.ID)
 	}
 	m.o.Log.Info("audible: account signed in", "account", acct.ID, "marketplace", acct.Marketplace, "again", prev.ID != "")
 	m.o.OnChange()
@@ -400,6 +446,9 @@ func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp M
 	if err != nil {
 		return store.AudibleAccount{}, err
 	}
+	if madeLabel(mp.Label, a) {
+		mp.Label = ""
+	}
 	a.Label, a.UserID, a.UserName, a.LibraryID, a.Policy, a.Sync, a.ServerID =
 		mp.label(a.Marketplace), mp.UserID, mp.UserName, mp.LibraryID, mp.Policy, mp.Sync, serverID
 	if _, err := srv.PutAudibleAccount(ctx, a.ID, input(a)); err != nil {
@@ -415,11 +464,14 @@ func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp M
 // Remove forgets account id here first (the sealed sign-in and the row, so the
 // Bridge stops using it whatever happens next), then removes it on the server
 // (srv; nil while unpaired) and deregisters its device at Amazon. warning
-// says what didn't happen ("" when all did); err is a local failure.
+// says what didn't happen ("" when all did); err is a local failure. Once it
+// starts forgetting it runs to its end even if the page goes away: the sealed
+// sign-in is the only way to deregister the device.
 func (m *Manager) Remove(ctx context.Context, srv Server, id string) (warning string, err error) {
 	if _, err := m.Account(ctx, id); err != nil {
 		return "", err
 	}
+	ctx = context.WithoutCancel(ctx)
 	creds, credErr := m.credentials(id)
 	if err := m.o.Vault.Delete(secrets.AudibleName(id)); err != nil {
 		return "", fmt.Errorf("could not forget the sign-in: %w", err)
@@ -485,6 +537,13 @@ func (m *Manager) Library(ctx context.Context, id string) ([]source.Record, erro
 		return nil, fmt.Errorf("the account's sign-in can't be opened: %w", err)
 	}
 	recs, err := m.o.Service.Library(ctx, creds)
+	if errors.Is(err, ErrRefused) {
+		// A sign-in that finished meanwhile deregistered the device this poll
+		// used: list again with the new one rather than mark it refused.
+		if fresh, ferr := m.credentials(id); ferr == nil && fresh.DeviceSerial != creds.DeviceSerial {
+			recs, err = m.o.Service.Library(ctx, fresh)
+		}
+	}
 	if errors.Is(err, ErrRefused) {
 		if rerr := m.o.DB.RefuseAudibleAccount(context.WithoutCancel(ctx), id, RefusedText, m.o.Now()); rerr != nil {
 			m.o.Log.Warn("audible: recording a refusal failed", "account", id, "err", rerr)

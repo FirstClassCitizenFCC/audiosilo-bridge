@@ -39,9 +39,13 @@ export function AudibleCard({ client }: { client: ApiClient }) {
     error: loadError,
   } = useLoad(() => client.audible(), null, { fallback: "Couldn't load the Audible accounts." });
   // adding: the sign-in form is open (again: for that account's marketplace).
-  const [adding, setAdding] = useState<{ marketplace: string; mapping?: AudibleMapping } | null>(
-    null,
-  );
+  // key names whose it is ("new", or the account's id), so the form starts
+  // afresh for another account rather than keep the last one's store.
+  const [adding, setAdding] = useState<{
+    key: string;
+    marketplace: string;
+    mapping?: AudibleMapping;
+  } | null>(null);
   const [notice, setNotice] = useState<{ kind: 'ok' | 'warn'; text: string } | null>(null);
 
   if (!data)
@@ -85,11 +89,14 @@ export function AudibleCard({ client }: { client: ApiClient }) {
             data={data}
             onChange={setData}
             onNotice={setNotice}
-            onSignInAgain={() => setAdding({ marketplace: a.marketplace, mapping: mappingOf(a) })}
+            onSignInAgain={() =>
+              setAdding({ key: a.id, marketplace: a.marketplace, mapping: mappingOf(a) })
+            }
           />
         ))}
         {adding ? (
           <SignInForm
+            key={adding.key}
             client={client}
             data={data}
             initial={adding}
@@ -109,6 +116,7 @@ export function AudibleCard({ client }: { client: ApiClient }) {
                 onClick={() => {
                   setNotice(null);
                   setAdding({
+                    key: 'new',
                     marketplace: data.marketplaces.includes('us')
                       ? 'us'
                       : (data.marketplaces[0] ?? ''),
@@ -282,16 +290,25 @@ function SignInForm({
 }) {
   const [marketplace, setMarketplace] = useState(initial.marketplace);
   const [started, setStarted] = useState<AudibleSignIn | null>(null);
+  // tried: a finish was sent, which spends the sign-in (whatever it answered).
+  const [tried, setTried] = useState(false);
   const [redirect, setRedirect] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function open() {
+    // The same sign-in while it can still be finished: a new one would make the
+    // page an Amazon tab opened earlier lands on useless.
+    if (started && !tried && minutesLeft(started.expires_at) > 0) {
+      window.open(started.url, '_blank', 'noopener,noreferrer');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const s = await client.startAudibleSignIn(marketplace);
       setStarted(s);
+      setTried(false);
       window.open(s.url, '_blank', 'noopener,noreferrer');
     } catch (err) {
       setError(errorText(err, "Couldn't start the Audible sign-in."));
@@ -371,6 +388,7 @@ function SignInForm({
             busyLabel="Signing in..."
             check={() => redirectProblem(redirect)}
             onSubmit={async (m) => {
+              setTried(true);
               onDone(await client.finishAudibleSignIn(started.login, redirect.trim(), m));
               setRedirect('');
             }}

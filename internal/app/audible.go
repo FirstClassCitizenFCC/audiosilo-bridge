@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/url"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/audible"
@@ -61,11 +63,16 @@ func (b *Bridge) Audible(ctx context.Context) api.AudibleAccounts {
 		b.log.Warn("audible: listing the accounts failed", "err", err)
 	}
 	for _, a := range accts {
+		other := a.OnOtherServer(serverID)
+		library := ""
+		if !other { // another server's library id names nothing here
+			library = names[a.LibraryID]
+		}
 		out.Accounts = append(out.Accounts, api.AudibleAccount{ID: a.ID, Label: a.Label, Marketplace: a.Marketplace,
-			UserID: a.UserID, UserName: a.UserName, LibraryID: a.LibraryID, LibraryName: names[a.LibraryID],
+			UserID: a.UserID, UserName: a.UserName, LibraryID: a.LibraryID, LibraryName: library,
 			Policy: a.Policy, Sync: a.Sync, CreatedAt: a.CreatedAt, LastOKAt: a.LastOKAt, LastPollAt: a.LastPollAt,
 			LastTitles: a.LastTitles, LastMatched: a.LastMatched, Refused: a.RefusedAt != "", RefusedAt: a.RefusedAt,
-			LastError: a.LastError, OtherServer: a.OnOtherServer(serverID)})
+			LastError: a.LastError, OtherServer: other})
 	}
 	cl := b.conn.Client()
 	out.Paired = cl != nil
@@ -151,9 +158,12 @@ func (b *Bridge) audibleMapping(ctx context.Context, m api.AudibleMapping) (audi
 
 // audibleError maps an account error to the page's kinds; its message is the
 // sentence the page shows (never a credential: audibleacct's errors carry
-// Amazon's or the server's answer only).
+// Amazon's or the server's answer only). A refusal is a 422 with that answer;
+// Amazon or the server failing or not answering is a 502 with a fixed sentence
+// (pairError's split), never the transport's own text.
 func audibleError(err error) error {
 	var apiErr *link.APIError
+	var urlErr *url.Error
 	switch {
 	case err == nil:
 		return nil
@@ -163,10 +173,17 @@ func audibleError(err error) error {
 		return api.Errorf(api.ErrNotFound, "%v", err)
 	case errors.Is(err, audibleacct.ErrNotPaired):
 		return api.Errorf(api.ErrConflict, "%v", err)
+	case errors.Is(err, audibleacct.ErrRegister) && (audible.HTTPStatus(err) >= http.StatusInternalServerError || errors.As(err, &urlErr)):
+		return api.Errorf(api.ErrUnreachable, "Amazon couldn't take the sign-in just now: open the Amazon sign-in again and retry")
 	case errors.Is(err, audibleacct.ErrRegister), errors.Is(err, link.ErrUnauthorized):
 		return api.Errorf(api.ErrRefused, "%v", err)
-	case errors.As(err, &apiErr):
+	case errors.As(err, &apiErr) && apiErr.Status < http.StatusInternalServerError:
 		return api.Errorf(api.ErrRefused, "the server refused the account: %s", apiErr.Message)
+	case errors.As(err, &apiErr):
+		return api.Errorf(api.ErrUnreachable, "the server answered with an error (HTTP %d): try again, and check the server's log if it keeps happening",
+			apiErr.Status)
+	case errors.As(err, &urlErr), errors.Is(err, context.DeadlineExceeded):
+		return api.Errorf(api.ErrUnreachable, "the server couldn't be reached: try again")
 	}
 	return err
 }

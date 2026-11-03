@@ -67,5 +67,13 @@ describe('audible', () => {
       policy: 'manual',
       sync: true,
     });
+    // Another server's person and library ids name nothing here: picked again.
+    expect(mappingOf({ ...a, other_server: true })).toEqual({
+      label: 'Chris (US)',
+      user_id: 0,
+      library_id: 0,
+      policy: 'manual',
+      sync: true,
+    });
   });
 });

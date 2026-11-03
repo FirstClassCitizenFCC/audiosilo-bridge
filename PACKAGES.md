@@ -2032,9 +2032,11 @@ internal/
             with a Range (206 from its end appended, anything else starts again, a
             416 at its size is done; partial bytes kept on failure for the next
             license's URL) and refuses past MaxBytes (default 4 GiB) keeping
-            nothing, its errors never naming the presigned URL; every call backs off
+            nothing, its errors never naming the presigned URL (a request that got
+            no answer names its URL without the query); every call backs off
             on 429/503 (Retry-After seconds or date, else 2 s doubling, 4 attempts,
-            a wait over 2 min fails at once), each attempt signed afresh;
+            a wait over 2 min fails at once, a huge value too), each attempt signed
+            afresh;
             HTTPStatus(err) and IsRefused(err) (401/403 on a signed call: the account
             must sign in again); Endpoints {Amazon, AmazonAPI, API} injectable through
             options (WithEndpoints, WithHTTPClient), EndpointsFor(marketplace) the
@@ -2075,17 +2077,25 @@ internal/
             the server (PUT account) BEFORE sealing anything, seals
             Credentials.Marshal() as audible_<id> and records the row; any step
             after the registration that fails deregisters the new device again
-            (and removes a new account from the server), so a failed sign-in leaves
-            no device. A sign-in of an Amazon account already here (customer_hash +
-            marketplace) replaces it: same id, the old device deregistered after.
+            and puts back what it changed (best effort, as the failed call may have
+            been applied): a new account DELETEd on the server, an existing one's
+            earlier sign-in back in the vault and its earlier mapping PUT again
+            (when it was mapped on this server), so a failed sign-in leaves no
+            device and the account as it was. A sign-in of an Amazon account already
+            here (customer_hash + marketplace) replaces it: same id, the old device
+            deregistered after (an earlier sign-in that can't be opened is logged:
+            its device stays). A name the Bridge made ("<person> (<STORE>)") follows
+            the person when Map or a sign-in again changes it; a typed one stays.
             Map records a new mapping on the server, then here. Remove forgets
             locally FIRST (vault, then row), then DELETEs on the server and
-            deregisters; either failing is a warning for the page, never the
-            account kept. Library opens the sign-in and lists the library through
-            Service (audibleacct.Audible(opts...): the audible package; a stub in
-            tests), which answers ErrRefused on a 401/403 signed call: Library
-            records the refusal (RefusedText) and runs OnChange (the heartbeat's
-            checklist). Errors carry Amazon's or the server's answer, never a token;
+            deregisters, run to the end even if the page goes away; either failing
+            is a warning for the page, never the account kept. Library opens the
+            sign-in and lists the library through Service (audibleacct.Audible(opts...):
+            the audible package; a stub in tests), which answers ErrRefused on a
+            401/403 signed call: Library lists again when a sign-in again replaced
+            the device meanwhile, else records the refusal (RefusedText) and runs
+            OnChange (the heartbeat's checklist). Errors carry Amazon's or the
+            server's answer, never a token;
             tests walk the data dir and the log for every stub secret, and the
             tagged tests run the whole life against the fake. Deps: audible, link,
             secrets, source, store.
@@ -2098,13 +2108,17 @@ internal/
             ASIN, states them (UnavailableReason "" available, "pre-order"
             preorder, else unavailable with the reason), matches with
             importjob.BookMatcher (how = asin when the book's ASIN is the title's,
-            else fuzzy), PUTs the titles in calls of 500 under ONE poll id (job,
-            attempt and a random suffix), the last final (an empty library sends
-            one empty final call, so the server marks every title gone), then
-            Enrich for each matched book without an ASIN that no second title
-            claimed (Contested); asin_set and a moved book are skipped, other
-            failures counted (enrich_failed). Polled/Failed record the account's
-            outcome. The result is counts only (no titles, no credential). Deps:
+            else fuzzy; a book at the library's root, ".", is never named: the
+            server takes clean paths only), cuts a title's authors to 20 (the
+            server refuses a whole call over more), PUTs the titles in calls of 500
+            under ONE poll id (job, attempt and a random suffix), the last final (an
+            empty library sends one empty final call, so the server marks every
+            title gone), then Enrich for each matched book without an ASIN that no
+            second title claimed (Contested) and no preorder matched (not out yet:
+            another edition); asin_set and a moved book are skipped, other failures
+            counted (enrich_failed). Polled/Failed record the account's outcome (a
+            poll stopped, cancelled or lost records nothing). The result is counts
+            only (no titles, no credential). Deps:
             audibleacct (types), importjob, jobs, link, source, store.
   importjob/ matching and placement against a library (the manager's, ported):
             BookMatcher over []link.LibraryBook (pkg/match.Best: ASIN exact first,

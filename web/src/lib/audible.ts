@@ -66,12 +66,16 @@ export function defaultMapping(data: Pick<AudibleAccounts, 'users' | 'libraries'
   };
 }
 
-// mappingOf is an account's mapping as the form edits it.
+// mappingOf is an account's mapping as the form edits it. An account mapped on
+// another server keeps its name, policy and sync, but its person and library
+// are that server's ids (here they name nothing, or someone else): they are
+// picked again.
 export function mappingOf(a: AudibleAccount): AudibleMapping {
+  const here = !a.other_server;
   return {
     label: a.label,
-    user_id: a.user_id,
-    library_id: a.library_id,
+    user_id: here ? a.user_id : 0,
+    library_id: here ? a.library_id : 0,
     policy: a.policy,
     sync: a.sync,
   };

@@ -251,6 +251,68 @@ func TestPollEmptyLibraryIsFinal(t *testing.T) {
 	}
 }
 
+// The poll keeps to what the server takes: an anthology's credits are cut to
+// maxAuthors, a book at the library's root (".") is never named in a match, and
+// a preorder's ASIN never goes onto a book (it isn't out, so that is another
+// edition).
+func TestPollKeepsToTheServersRules(t *testing.T) {
+	t.Parallel()
+	fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{
+		{Path: ".", Title: "The Whole Shelf", Authors: []string{"Ada Root"}},
+		{Path: "Quill/Canopy", Title: "The Golden Canopy", Authors: []string{"Mara Quill"}},
+	}}
+	many := make([]string, 0, 25)
+	for i := range 25 {
+		many = append(many, fmt.Sprintf("Author %d", i))
+	}
+	accts := &stubAccounts{acct: account(), recs: []source.Record{
+		{ASIN: "B0FAKE0040", Title: "Forty Voices", Author: "Author 0", Authors: many},
+		{ASIN: "B0FAKE0041", Title: "The Whole Shelf", Author: "Ada Root"},
+		{ASIN: "B0FAKE0005", Title: "The Golden Canopy", Author: "Mara Quill", UnavailableReason: "Not released yet (pre-order)",
+			Preorder: true, ReleaseDate: "2027-01-01"},
+	}}
+	res, err := run(t, setup(t, fs, accts), "acct0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs.calls) != 1 {
+		t.Fatalf("calls = %+v", fs.calls)
+	}
+	byASIN := map[string]link.AudibleTitle{}
+	for _, tt := range fs.calls[0].Titles {
+		byASIN[tt.ASIN] = tt
+	}
+	if a := byASIN["B0FAKE0040"].Authors; len(a) != maxAuthors || a[0] != "Author 0" || a[maxAuthors-1] != "Author 19" {
+		t.Fatalf("authors = %v", a)
+	}
+	if m := byASIN["B0FAKE0041"].Match; m != nil {
+		t.Fatalf("the library's root named in a match: %+v", m)
+	}
+	if p := byASIN["B0FAKE0005"]; p.State != link.AudiblePreorder || p.Match == nil || p.Match.How != link.MatchFuzzy {
+		t.Fatalf("preorder = %+v", p)
+	}
+	if len(fs.enriched) != 0 || res.Enriched != 0 || res.Matched != 1 {
+		t.Fatalf("enriched %v, result %+v", fs.enriched, res)
+	}
+}
+
+// A poll stopped, cancelled or lost mid-way records no failure on the account:
+// the job ends by its context's cause.
+func TestPollCancelledRecordsNoFailure(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	accts := &stubAccounts{acct: account(), libErr: context.Canceled}
+	h := setup(t, &fakeServer{pageSize: 500}, accts)
+	params, _ := json.Marshal(Params{Account: "acct0001"})
+	if _, err := h.Run(ctx, jobs.Job{ID: 7, Kind: Kind, Params: params, Attempt: 1}, jobs.LocalReporter()); err == nil {
+		t.Fatal("a cancelled poll succeeded")
+	}
+	if len(accts.failed) != 0 {
+		t.Fatalf("a cancelled poll recorded %v", accts.failed)
+	}
+}
+
 func TestPollRefusals(t *testing.T) {
 	t.Parallel()
 	// Audible refuses: nothing reported to the server, the refusal is the error.

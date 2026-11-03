@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -45,7 +46,7 @@ func sendWithBackoff(ctx context.Context, hc *http.Client, sleep func(context.Co
 		}
 		resp, err := hc.Do(req)
 		if err != nil {
-			return nil, err
+			return nil, withoutQuery(err)
 		}
 		if !retryable(resp.StatusCode) || attempt == maxAttempts {
 			return resp, nil
@@ -65,6 +66,23 @@ func sendWithBackoff(ctx context.Context, hc *http.Client, sleep func(context.Co
 	}
 }
 
+// withoutQuery drops the query (and any userinfo) from the URL a failed
+// request's error names: a download's is presigned (its Policy, Signature and
+// Key-Pair-Id are the right to fetch the file), and errors are logged and
+// reported.
+func withoutQuery(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	u, perr := url.Parse(ue.URL)
+	if perr != nil {
+		return &url.Error{Op: ue.Op, URL: "(the request's URL)", Err: ue.Err}
+	}
+	u.RawQuery, u.ForceQuery, u.Fragment, u.User = "", false, "", nil
+	return &url.Error{Op: ue.Op, URL: u.String(), Err: ue.Err}
+}
+
 // retryAfter reads a Retry-After value: delay seconds or an HTTP date. A date in
 // the past is no wait; anything unreadable is no answer.
 func retryAfter(v string, now time.Time) (time.Duration, bool) {
@@ -76,7 +94,9 @@ func retryAfter(v string, now time.Time) (time.Duration, bool) {
 		if n < 0 {
 			return 0, false
 		}
-		return time.Duration(n) * time.Second, true
+		// Past maxBackoff the call fails anyway; clamping first keeps a huge
+		// value from overflowing into a short (or negative) wait.
+		return time.Duration(min(n, int(maxBackoff/time.Second)+1)) * time.Second, true
 	}
 	if t, err := http.ParseTime(v); err == nil {
 		return max(t.Sub(now), 0), true

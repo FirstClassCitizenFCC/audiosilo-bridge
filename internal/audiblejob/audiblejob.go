@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,6 +42,11 @@ const maxBookPages = 2000
 
 // maxRuntime is the longest runtime the server takes (seconds).
 const maxRuntime = 1_000_000
+
+// maxAuthors is the most authors a title carries: the server refuses a whole
+// titles call over one title with more, so an anthology's long list of credits
+// is cut to its first ones.
+const maxAuthors = 20
 
 // asinPattern is an ASIN as the server takes one.
 var asinPattern = regexp.MustCompile(`^[A-Z0-9]{10}$`)
@@ -175,8 +181,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	res := Result{Account: acct.ID, PollID: pollID(job), Books: len(books)}
 	matcher := importjob.NewBookMatcher(books)
 	type matched struct {
-		rec  source.Record
-		book link.LibraryBook
+		rec      source.Record
+		book     link.LibraryBook
+		preorder bool
 	}
 	var hits []matched
 	titles := make([]link.AudibleTitle, 0, len(recs))
@@ -195,7 +202,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		default:
 			res.Unavailable++
 		}
-		if b, ok := matcher.Match(rec); ok {
+		// A book at the library's root (".") can't be named in a match: the
+		// server takes only a clean path below the root.
+		if b, ok := matcher.Match(rec); ok && matchable(b.Path) {
 			how := link.MatchFuzzy
 			if strings.EqualFold(b.ASIN, rec.ASIN) {
 				how = link.MatchASIN
@@ -204,7 +213,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 				res.MatchedFuzzy++
 			}
 			t.Match = &link.AudibleMatch{LibraryID: acct.LibraryID, Path: b.Path, How: how}
-			hits = append(hits, matched{rec: rec, book: b})
+			hits = append(hits, matched{rec: rec, book: b, preorder: t.State == link.AudiblePreorder})
 		}
 		titles = append(titles, t)
 	}
@@ -233,7 +242,9 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			contested[m.book.Path] = true
 			continue
 		}
-		if m.book.ASIN != "" {
+		// A preorder isn't out yet, so the book on disk is another edition: its
+		// ASIN would stay on that book for good.
+		if m.book.ASIN != "" || m.preorder {
 			continue
 		}
 		switch err := srv.Enrich(ctx, acct.LibraryID, m.book.Path, m.rec.ASIN); {
@@ -258,12 +269,24 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 }
 
 // fail records why the poll failed on the account and returns it as the job's
-// error.
+// error. A poll stopped, cancelled or lost meanwhile records nothing: that is
+// the job's end, not the account's failure (the runner ends the job by its
+// context's cause).
 func (h *Handler) fail(ctx context.Context, account, why string) error {
+	if ctx.Err() != nil {
+		return errors.New(why)
+	}
 	if err := h.o.Accounts.Failed(context.WithoutCancel(ctx), account, why); err != nil {
 		h.o.Log.Warn("audible: recording a failed poll failed", "account", account, "err", err)
 	}
 	return errors.New(why)
+}
+
+// matchable reports whether p is a book path the server takes in a match:
+// clean and below the library's root (a library that is one book lists it as
+// ".").
+func matchable(p string) bool {
+	return p != "" && strings.Trim(path.Clean("/"+p), "/") == p
 }
 
 // allBooks reads every page of the library's books.
@@ -289,7 +312,7 @@ func allBooks(ctx context.Context, srv Server, libraryID int64) ([]link.LibraryB
 
 // title is a record as the poll reports it.
 func title(rec source.Record) link.AudibleTitle {
-	t := link.AudibleTitle{ASIN: rec.ASIN, Title: rec.Title, Authors: rec.Authors, Series: []link.SeriesRef{},
+	t := link.AudibleTitle{ASIN: rec.ASIN, Title: rec.Title, Authors: rec.Authors[:min(len(rec.Authors), maxAuthors)], Series: []link.SeriesRef{},
 		ReleaseDate: rec.ReleaseDate, RuntimeS: min(max(int64(rec.RuntimeSec), 0), maxRuntime), State: link.AudibleAvailable}
 	if len(t.Authors) == 0 {
 		t.Authors = []string{}

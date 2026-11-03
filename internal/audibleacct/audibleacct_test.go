@@ -40,7 +40,8 @@ type stubService struct {
 	n            int
 	registerErr  error
 	libraryErr   error
-	deregistered []string // device serials
+	library      func(audible.Credentials) ([]source.Record, error) // replaces the library when set
+	deregistered []string                                           // device serials
 	deregErr     error
 	customer     string
 }
@@ -67,14 +68,20 @@ func (s *stubService) Register(_ context.Context, mp audible.Marketplace, code s
 		DeviceSerial: serial, CustomerID: cust, Marketplace: mp.Code, ExpiresAt: time.Now().Add(time.Hour).Unix()}, nil
 }
 
-func (s *stubService) Deregister(_ context.Context, creds audible.Credentials) error {
+func (s *stubService) Deregister(ctx context.Context, creds audible.Credentials) error {
+	if err := ctx.Err(); err != nil {
+		return err // as the HTTP call would
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deregistered = append(s.deregistered, creds.DeviceSerial)
 	return s.deregErr
 }
 
-func (s *stubService) Library(context.Context, audible.Credentials) ([]source.Record, error) {
+func (s *stubService) Library(_ context.Context, creds audible.Credentials) ([]source.Record, error) {
+	if s.library != nil {
+		return s.library(creds)
+	}
 	if s.libraryErr != nil {
 		return nil, s.libraryErr
 	}
@@ -88,11 +95,15 @@ type stubServer struct {
 	deleted []string
 	putErr  error
 	delErr  error
+	onPut   func() // runs as a PUT is applied
 }
 
 func (s *stubServer) PutAudibleAccount(_ context.Context, id string, in link.AudibleAccountInput) (*link.AudibleAccount, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.onPut != nil {
+		s.onPut()
+	}
 	if s.putErr != nil {
 		return nil, s.putErr
 	}
@@ -103,7 +114,10 @@ func (s *stubServer) PutAudibleAccount(_ context.Context, id string, in link.Aud
 	return &link.AudibleAccount{ID: id}, nil
 }
 
-func (s *stubServer) DeleteAudibleAccount(_ context.Context, id string) error {
+func (s *stubServer) DeleteAudibleAccount(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err // as the HTTP call would
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deleted = append(s.deleted, id)
@@ -267,6 +281,11 @@ func TestSignInRefusals(t *testing.T) {
 	if list, _ := e.m.Accounts(context.Background()); len(list) != 0 {
 		t.Fatalf("a refused sign-in kept an account: %+v", list)
 	}
+	// The PUT may have been applied before its answer was lost: the new
+	// account is removed on the server too.
+	if len(e.srv.deleted) != 1 || !IDPattern.MatchString(e.srv.deleted[0]) {
+		t.Fatalf("server deletes = %v", e.srv.deleted)
+	}
 
 	// Amazon refuses the code.
 	e.srv.putErr = nil
@@ -335,10 +354,64 @@ func TestSignInAgainReplacesTheDevice(t *testing.T) {
 	}
 }
 
+// A sign-in again that fails once the server recorded it puts the account back
+// as it was: its earlier sign-in in the vault (its device still works), its
+// earlier mapping on the server, only the new device deregistered.
+func TestSignInAgainThatFailsKeepsTheEarlierSignIn(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	first, _ := e.m.credentials(a.ID)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The page goes away just as the server answers: the store write fails.
+	e.srv.onPut = cancel
+	st, _ := e.m.Start("us")
+	_, err := e.m.Finish(ctx, e.srv, "srv-1", Finish{Login: st.Login,
+		RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode,
+		Mapping:     Mapping{UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "all"}})
+	if err == nil {
+		t.Fatal("the sign-in was kept")
+	}
+	if now, err := e.m.credentials(a.ID); err != nil || now.DeviceSerial != first.DeviceSerial {
+		t.Fatalf("the vault holds %+v, %v; want the first device %s", now.DeviceSerial, err, first.DeviceSerial)
+	}
+	if len(e.svc.deregistered) != 1 || e.svc.deregistered[0] == first.DeviceSerial {
+		t.Fatalf("deregistered = %v, want only the new device", e.svc.deregistered)
+	}
+	if in := e.srv.put[a.ID]; in.UserID != 3 || in.LibraryID != 1 || in.Label != "Chris (US)" {
+		t.Fatalf("the server keeps %+v", in)
+	}
+	if kept, _ := e.m.Account(context.Background(), a.ID); kept.UserID != 3 || kept.LibraryID != 1 {
+		t.Fatalf("the account = %+v", kept)
+	}
+
+	// An earlier sign-in that can't be opened can't be deregistered: the log
+	// says so.
+	e.srv.onPut = nil
+	if err := e.vault.Delete(secrets.AudibleName(a.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if b := e.signIn(t); b.ID != a.ID {
+		t.Fatalf("again = %+v", b)
+	}
+	if !strings.Contains(e.logs.String(), "earlier sign-in couldn't be opened") {
+		t.Fatalf("no warning: %s", e.logs)
+	}
+	e.noSecrets(t)
+}
+
 func TestMapRecordsOnTheServerThenHere(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	a := e.signIn(t)
+	// The name the Bridge made follows the person (the form sends it back as it
+	// is); a typed one stays.
+	made := Mapping{Label: a.Label, UserID: 4, UserName: "Sam", LibraryID: 1, Policy: "manual"}
+	if got, err := e.m.Map(context.Background(), e.srv, "srv-1", a.ID, made); err != nil || got.Label != "Sam (US)" ||
+		e.srv.put[a.ID].Label != "Sam (US)" {
+		t.Fatalf("mapped to Sam = %+v, %v", got, err)
+	}
 	mp := Mapping{Label: "  Kids'   shelf ", UserID: 4, UserName: "Sam", LibraryID: 2, Policy: "SERIES"}
 	got, err := e.m.Map(context.Background(), e.srv, "srv-2", a.ID, mp)
 	if err != nil || got.Label != "Kids' shelf" || got.UserID != 4 || got.LibraryID != 2 || got.Policy != "series" || got.Sync ||
@@ -404,6 +477,25 @@ func TestRemoveForgetsFirstThenDeregisters(t *testing.T) {
 	e.noSecrets(t)
 }
 
+// A page that goes away once Remove has forgotten the account doesn't stop it:
+// the server and Amazon are still told (the sealed sign-in is gone).
+func TestRemoveRunsToItsEnd(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	creds, _ := e.m.credentials(a.ID)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.m.o.OnChange = cancel // runs once the account is forgotten here
+	warning, err := e.m.Remove(ctx, e.srv, a.ID)
+	if err != nil || warning != "" {
+		t.Fatalf("remove = %q, %v", warning, err)
+	}
+	if len(e.srv.deleted) != 1 || len(e.svc.deregistered) != 1 || e.svc.deregistered[0] != creds.DeviceSerial {
+		t.Fatalf("server %v, deregistered %v", e.srv.deleted, e.svc.deregistered)
+	}
+}
+
 func TestLibraryMarksARefusal(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -441,4 +533,36 @@ func TestLibraryMarksARefusal(t *testing.T) {
 		t.Fatalf("a missing sign-in = %v", err)
 	}
 	e.noSecrets(t)
+}
+
+// A poll whose device a sign-in again replaced mid-way lists the library with
+// the new sign-in: the old device's refusal isn't the account's.
+func TestLibraryAfterASignInAgainIsNoRefusal(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	first, _ := e.m.credentials(a.ID)
+	e.svc.library = func(c audible.Credentials) ([]source.Record, error) {
+		if c.DeviceSerial != first.DeviceSerial {
+			return []source.Record{{ASIN: "B0FAKE0001", Title: "One"}}, nil
+		}
+		// The sign-in again lands while this device's call is out.
+		next := c
+		next.DeviceSerial = "SERIAL-NEW"
+		raw, err := next.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		if err := e.vault.Set(secrets.AudibleName(a.ID), raw); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w (HTTP 401)", ErrRefused)
+	}
+	recs, err := e.m.Library(context.Background(), a.ID)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("library = %v, %v", recs, err)
+	}
+	if got, _ := e.m.Account(context.Background(), a.ID); got.RefusedAt != "" || got.LastError != "" {
+		t.Fatalf("marked refused: %+v", got)
+	}
 }

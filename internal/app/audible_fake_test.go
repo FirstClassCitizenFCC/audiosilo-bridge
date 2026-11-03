@@ -156,6 +156,23 @@ func TestAudibleAccountThroughTheBridge(t *testing.T) {
 	if in := fs.puts[acct.ID]; in.UserID != 3 || in.LibraryID != 1 || in.Marketplace != "us" {
 		t.Fatalf("server mapping = %+v", in)
 	}
+	// Mapped on another server: its library id names nothing here.
+	row, err := b.db.GetAudibleAccount(ctx, acct.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	here := row.ServerID
+	row.ServerID = "another-server"
+	if err := b.db.MapAudibleAccount(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	if other := b.Audible(ctx).Accounts[0]; !other.OtherServer || other.LibraryName != "" {
+		t.Fatalf("on another server = %+v", other)
+	}
+	row.ServerID = here
+	if err := b.db.MapAudibleAccount(ctx, row); err != nil {
+		t.Fatal(err)
+	}
 	if item := setupItem(b.setup(ctx), setup.ItemAudible); !item.Done || item.Detail != "1 account signed in" {
 		t.Fatalf("setup item = %+v", item)
 	}

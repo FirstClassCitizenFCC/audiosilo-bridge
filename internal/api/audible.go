@@ -15,6 +15,18 @@ import (
 // holds a one-time authorization code; it is taken here and never answered
 // back or logged.
 
+// audibleWriteTimeout is how long a sign-in, a mapping or a removal may take to
+// answer: each calls Amazon or the server, whose 429/503 backoff may wait
+// minutes, and the page's own 60-second write timeout would drop the answer of
+// work that went through (a sign-in's code is spent by then).
+const audibleWriteTimeout = 15 * time.Minute
+
+// slowAnswer lets a handler that calls Amazon or the server answer after the
+// page's write timeout.
+func slowAnswer(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(audibleWriteTimeout))
+}
+
 // AudibleAccounts is GET /api/accounts/audible.
 type AudibleAccounts struct {
 	Accounts []AudibleAccount `json:"accounts"`
@@ -139,6 +151,7 @@ func (a *API) handleAudibleSignIn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAudibleFinish(w http.ResponseWriter, r *http.Request) {
+	slowAnswer(w)
 	var req AudibleFinish
 	if !decodeJSON(w, r, &req) {
 		return
@@ -151,6 +164,7 @@ func (a *API) handleAudibleFinish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAudibleMap(w http.ResponseWriter, r *http.Request) {
+	slowAnswer(w)
 	var req AudibleMapping
 	if !decodeJSON(w, r, &req) {
 		return
@@ -163,6 +177,7 @@ func (a *API) handleAudibleMap(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleAudibleRemove(w http.ResponseWriter, r *http.Request) {
+	slowAnswer(w)
 	warning, err := a.b.RemoveAudibleAccount(r.Context(), r.PathValue("id"))
 	if err != nil {
 		a.writeBackendError(w, err, "remove the Audible account")

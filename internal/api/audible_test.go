@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ type fakeAudible struct {
 	mapped   map[string]AudibleMapping
 	removed  []string
 	warning  string
+	delay    time.Duration // a sign-in's time at Amazon
 }
 
 func (b *backend) Audible(context.Context) AudibleAccounts {
@@ -33,6 +35,7 @@ func (b *backend) StartAudibleSignIn(_ context.Context, marketplace string) (Aud
 }
 
 func (b *backend) FinishAudibleSignIn(_ context.Context, f AudibleFinish) error {
+	time.Sleep(b.aud.delay)
 	if f.Login != "login0001" {
 		return Errorf(ErrNotFound, "the sign-in expired: open the Amazon sign-in again")
 	}
@@ -141,5 +144,33 @@ func TestAudibleRoutesNeedASession(t *testing.T) {
 	}
 	if len(e.b.aud.finished) != 0 || len(e.b.aud.removed) != 0 || e.b.aud.mapped != nil {
 		t.Fatalf("a refused request reached the backend: %+v", e.b.aud)
+	}
+}
+
+// A sign-in that takes longer than the page's write timeout (Amazon's backoff)
+// still answers: its code is spent, so a lost answer can't be tried again.
+func TestAudibleSignInOutlivesTheWriteTimeout(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.b.aud.delay = 300 * time.Millisecond
+	ts := httptest.NewUnstartedServer(e.h)
+	ts.Config.WriteTimeout = 100 * time.Millisecond
+	ts.Start()
+	defer ts.Close()
+	body := `{"login":"login0001","redirect_url":"https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=x",` +
+		`"label":"","user_id":3,"library_id":1,"policy":"manual","sync":true}`
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/accounts/audible", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+e.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("the answer was dropped: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("finish = %d", resp.StatusCode)
 	}
 }

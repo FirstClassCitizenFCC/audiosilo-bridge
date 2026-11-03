@@ -126,6 +126,75 @@ describe('AudibleCard', () => {
     });
   });
 
+  it('opens the same Amazon sign-in again until a finish spends it', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    let n = 0;
+    const { calls } = mockFetch({
+      'GET /api/accounts/audible': { body: audibleFixture() },
+      'POST /api/accounts/audible/sign-in': () => {
+        n++;
+        return {
+          body: {
+            login: `login000${n}`,
+            url: `https://www.amazon.com/ap/signin?n=${n}`,
+            marketplace: 'us',
+            expires_at: new Date(Date.now() + 15 * 60000).toISOString(),
+          },
+        };
+      },
+      'POST /api/accounts/audible': {
+        status: 422,
+        body: { error: "the Amazon sign-in wasn't accepted" },
+      },
+    });
+    render(<AudibleCard client={api()} />);
+    const card = await screen.findByRole('region', { name: 'Audible' });
+    await userEvent.click(within(card).getByRole('button', { name: 'Sign in to Audible' }));
+    await userEvent.click(within(card).getByRole('button', { name: 'Open Amazon sign-in' }));
+    await userEvent.click(
+      within(card).getByRole('button', { name: 'Open the Amazon sign-in again' }),
+    );
+    // One sign-in: the tab opened first can still finish it.
+    expect(calls.filter((c) => c.url.endsWith('/sign-in'))).toHaveLength(1);
+    expect(open).toHaveBeenLastCalledWith(
+      'https://www.amazon.com/ap/signin?n=1',
+      '_blank',
+      'noopener,noreferrer',
+    );
+    await userEvent.type(within(card).getByLabelText('The address Amazon showed'), REDIRECT);
+    await userEvent.click(within(card).getByRole('button', { name: 'Finish the sign-in' }));
+    expect(await within(card).findByText(/wasn't accepted/)).toBeInTheDocument();
+    // The finish spent it: a new one.
+    await userEvent.click(
+      within(card).getByRole('button', { name: 'Open the Amazon sign-in again' }),
+    );
+    expect(calls.filter((c) => c.url.endsWith('/sign-in'))).toHaveLength(2);
+    expect(open).toHaveBeenLastCalledWith(
+      'https://www.amazon.com/ap/signin?n=2',
+      '_blank',
+      'noopener,noreferrer',
+    );
+  });
+
+  it("signs another account in again in that account's store", async () => {
+    mockFetch({
+      'GET /api/accounts/audible': {
+        body: audibleFixture({
+          accounts: [audibleAccountFixture({ marketplace: 'uk', refused: true })],
+        }),
+      },
+    });
+    render(<AudibleCard client={api()} />);
+    const card = await screen.findByRole('region', { name: 'Audible' });
+    await userEvent.click(
+      within(card).getByRole('button', { name: 'Add another Audible account' }),
+    );
+    expect(within(card).getByLabelText('Audible store')).toHaveValue('us');
+    const row = within(card).getByRole('region', { name: 'Chris (US)' });
+    await userEvent.click(within(row).getByRole('button', { name: 'Sign in again' }));
+    expect(within(card).getByLabelText('Audible store')).toHaveValue('uk');
+  });
+
   it('maps an account again', async () => {
     const two = audibleFixture({
       accounts: [audibleAccountFixture({ other_server: true })],
@@ -147,6 +216,10 @@ describe('AudibleCard', () => {
     const row = await screen.findByRole('region', { name: 'Chris (US)' });
     expect(within(row).getByText('Mapped on another server')).toBeInTheDocument();
     await userEvent.click(within(row).getByRole('button', { name: 'Change' }));
+    // The other server's person and library ids name nothing here: picked again.
+    expect(within(row).getByLabelText('Belongs to')).toHaveValue('');
+    expect(within(row).getByLabelText('Library')).toHaveValue('');
+    await userEvent.selectOptions(within(row).getByLabelText('Belongs to'), '3');
     await userEvent.selectOptions(within(row).getByLabelText('Library'), '2');
     await userEvent.click(within(row).getByRole('button', { name: 'Save' }));
     expect(await within(row).findByText('Kids')).toBeInTheDocument();

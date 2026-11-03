@@ -119,6 +119,13 @@ func TestRetryAfter(t *testing.T) {
 			t.Errorf("retryAfter(%q) read as a wait", in)
 		}
 	}
+	// A huge value is longer than the Bridge waits, never an overflow into a
+	// short or negative wait.
+	for _, in := range []string{"9999999999", "18446744074", "9223372036854775807"} {
+		if got, ok := retryAfter(in, now); !ok || got <= maxBackoff {
+			t.Errorf("retryAfter(%q) = %v, %v; want more than %v", in, got, ok, maxBackoff)
+		}
+	}
 }
 
 func TestRefusedStatus(t *testing.T) {
@@ -306,6 +313,17 @@ func TestDownloadErrorHidesURL(t *testing.T) {
 	err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/f?X-Amz-Signature=SECRETSIG", filepath.Join(t.TempDir(), "x"), DownloadOptions{})
 	if err == nil || strings.Contains(err.Error(), "SECRETSIG") || HTTPStatus(err) != http.StatusForbidden {
 		t.Fatalf("err = %v", err)
+	}
+	// Nor does a request that got no answer (Go's error names the URL).
+	gone := httptest.NewServer(http.NotFoundHandler())
+	base := gone.URL
+	gone.Close()
+	err = testClient(t, base).Download(context.Background(), base+"/f.aaxc?Policy=POL&Signature=SECRETSIG&Key-Pair-Id=KP",
+		filepath.Join(t.TempDir(), "y"), DownloadOptions{})
+	var ue *url.Error
+	if err == nil || strings.Contains(err.Error(), "SECRETSIG") || strings.Contains(err.Error(), "Policy") ||
+		!errors.As(err, &ue) || !strings.HasSuffix(ue.URL, "/f.aaxc") {
+		t.Fatalf("a transport failure = %v", err)
 	}
 }
 
