@@ -37,6 +37,9 @@ type Record struct {
 	// sources leave it empty; importjob.Run fails such records with the reason
 	// instead of attempting them.
 	UnavailableReason string
+	// Preorder: the record is unavailable because it isn't released yet (its
+	// UnavailableReason says so in words).
+	Preorder bool
 }
 
 // Source discovers importable audiobooks.

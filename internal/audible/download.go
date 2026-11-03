@@ -88,6 +88,14 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// restart drops dest and downloads it again from the start, without a Range.
+	restart := func() error {
+		_ = resp.Body.Close()
+		if err := os.Remove(dest); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return c.Download(ctx, downloadURL, dest, opts)
+	}
 
 	var (
 		appendTo bool
@@ -97,12 +105,7 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 	case resp.StatusCode == http.StatusPartialContent && have > 0:
 		start, size, ok := parseContentRange(resp.Header.Get("Content-Range"))
 		if !ok || start != have {
-			// Not the rest of our file: start again, without a Range.
-			_ = resp.Body.Close()
-			if err := os.Remove(dest); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			return c.Download(ctx, downloadURL, dest, opts)
+			return restart() // not the rest of our file
 		}
 		appendTo, total = true, size
 	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && have > 0:
@@ -110,11 +113,7 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		if _, size, ok := parseContentRange(resp.Header.Get("Content-Range")); ok && size == have {
 			return nil
 		}
-		_ = resp.Body.Close()
-		if err := os.Remove(dest); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return c.Download(ctx, downloadURL, dest, opts)
+		return restart()
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		total = resp.ContentLength
 	default:

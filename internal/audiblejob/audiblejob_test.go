@@ -162,7 +162,7 @@ func TestPollMatchesReportsAndEnriches(t *testing.T) {
 		{ASIN: "B0FAKE0106", Title: "Lanterns Over Hollow Bay", Author: "Theo Marchetti"},
 		// The server says another ASIN arrived: skipped, not a failure.
 		{ASIN: "B0FAKE0024", Title: "The Lighthouse Ledger", Author: "Imogen Sato"},
-		{ASIN: "B0FAKE0005", Title: "The Golden Canopy", Author: "Mara Quill", UnavailableReason: "Not released yet (pre-order)", ReleaseDate: "2027-01-01"},
+		{ASIN: "B0FAKE0005", Title: "The Golden Canopy", Author: "Mara Quill", UnavailableReason: "Not released yet (pre-order)", Preorder: true, ReleaseDate: "2027-01-01"},
 		{ASIN: "B0FAKE0029", Title: "The Borrowed Summer", Author: "Lena Albright", UnavailableReason: "Audible reports no download rights"},
 		{ASIN: "", Title: "No ASIN"},
 	}}

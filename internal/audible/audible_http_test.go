@@ -121,8 +121,8 @@ func TestClientLibrary(t *testing.T) {
 	if got := recs[2].UnavailableReason; !strings.Contains(got, "download rights") {
 		t.Fatalf("no-rights reason = %q", got)
 	}
-	if got := recs[3].UnavailableReason; !strings.Contains(got, "pre-order") {
-		t.Fatalf("pre-order reason = %q", got)
+	if got := recs[3].UnavailableReason; !strings.Contains(got, "pre-order") || !recs[3].Preorder {
+		t.Fatalf("pre-order reason = %q, preorder %v", got, recs[3].Preorder)
 	}
 }
 

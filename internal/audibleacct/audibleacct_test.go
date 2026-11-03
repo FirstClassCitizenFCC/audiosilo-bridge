@@ -249,8 +249,8 @@ func TestSignInRefusals(t *testing.T) {
 	if _, err := e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: "nosuchlogin", RedirectURL: redirect, Mapping: mapping()}); !errors.Is(err, ErrLoginExpired) {
 		t.Fatalf("an unknown login = %v", err)
 	}
-	if _, err := e.m.Finish(context.Background(), nil, "", Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()}); err == nil {
-		t.Fatal("finishing while unpaired")
+	if _, err := e.m.Finish(context.Background(), nil, "", Finish{Login: st.Login, RedirectURL: redirect, Mapping: mapping()}); !errors.Is(err, ErrNotPaired) {
+		t.Fatalf("finishing while unpaired = %v", err)
 	}
 
 	// The server refuses the mapping: the new device is deregistered again and

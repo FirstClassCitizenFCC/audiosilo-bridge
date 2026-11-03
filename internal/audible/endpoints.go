@@ -71,18 +71,11 @@ type settings struct {
 
 // endpointsOf is the endpoints opts set, else mp's.
 func endpointsOf(mp Marketplace, opts []Option) Endpoints {
-	var s settings
-	for _, o := range opts {
-		o(&s)
-	}
-	if s.endpoints != nil {
-		return *s.endpoints
-	}
-	return EndpointsFor(mp)
+	return *applyOpts(mp, opts).endpoints
 }
 
-// resolve applies opts over the defaults for mp.
-func resolve(mp Marketplace, timeout time.Duration, opts []Option) settings {
+// applyOpts applies opts, with mp's endpoints when they set none.
+func applyOpts(mp Marketplace, opts []Option) settings {
 	var s settings
 	for _, o := range opts {
 		o(&s)
@@ -91,6 +84,12 @@ func resolve(mp Marketplace, timeout time.Duration, opts []Option) settings {
 		e := EndpointsFor(mp)
 		s.endpoints = &e
 	}
+	return s
+}
+
+// resolve applies opts over the defaults for mp.
+func resolve(mp Marketplace, timeout time.Duration, opts []Option) settings {
+	s := applyOpts(mp, opts)
 	if s.http == nil {
 		s.http = &http.Client{Timeout: timeout, Transport: wrapTransport(http.DefaultTransport)}
 	}

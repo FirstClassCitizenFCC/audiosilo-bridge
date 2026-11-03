@@ -133,6 +133,7 @@ func (it libItem) toRecord(now time.Time) source.Record {
 		}
 	}
 	date := firstNonEmptyStr(it.ReleaseDate, it.IssueDate)
+	rec.Preorder = ReleaseIsUpcoming(date, now)
 	rec.Year = yearFromDate(date)
 	rec.ReleaseDate = releaseDay(date)
 	return rec

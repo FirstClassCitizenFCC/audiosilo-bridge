@@ -65,7 +65,7 @@ func (b *Bridge) Audible(ctx context.Context) api.AudibleAccounts {
 			UserID: a.UserID, UserName: a.UserName, LibraryID: a.LibraryID, LibraryName: names[a.LibraryID],
 			Policy: a.Policy, Sync: a.Sync, CreatedAt: a.CreatedAt, LastOKAt: a.LastOKAt, LastPollAt: a.LastPollAt,
 			LastTitles: a.LastTitles, LastMatched: a.LastMatched, Refused: a.RefusedAt != "", RefusedAt: a.RefusedAt,
-			LastError: a.LastError, OtherServer: serverID != "" && a.ServerID != serverID})
+			LastError: a.LastError, OtherServer: a.OnOtherServer(serverID)})
 	}
 	cl := b.conn.Client()
 	out.Paired = cl != nil
@@ -95,29 +95,21 @@ func (b *Bridge) StartAudibleSignIn(_ context.Context, marketplace string) (api.
 
 // FinishAudibleSignIn ends a sign-in with the pasted page and the mapping.
 func (b *Bridge) FinishAudibleSignIn(ctx context.Context, f api.AudibleFinish) error {
-	srv := b.audibleServer()
-	if srv == nil {
-		return api.Errorf(api.ErrConflict, "pair the Bridge with a server first")
-	}
 	mp, err := b.audibleMapping(ctx, f.AudibleMapping)
 	if err != nil {
 		return err
 	}
-	_, err = b.audible.Finish(ctx, srv, b.conn.Pairing().ServerID, audibleacct.Finish{Login: f.Login, RedirectURL: f.RedirectURL, Mapping: mp})
+	_, err = b.audible.Finish(ctx, b.audibleServer(), b.conn.Pairing().ServerID, audibleacct.Finish{Login: f.Login, RedirectURL: f.RedirectURL, Mapping: mp})
 	return audibleError(err)
 }
 
 // MapAudibleAccount maps an account again.
 func (b *Bridge) MapAudibleAccount(ctx context.Context, id string, m api.AudibleMapping) error {
-	srv := b.audibleServer()
-	if srv == nil {
-		return api.Errorf(api.ErrConflict, "pair the Bridge with a server first")
-	}
 	mp, err := b.audibleMapping(ctx, m)
 	if err != nil {
 		return err
 	}
-	_, err = b.audible.Map(ctx, srv, b.conn.Pairing().ServerID, id, mp)
+	_, err = b.audible.Map(ctx, b.audibleServer(), b.conn.Pairing().ServerID, id, mp)
 	return audibleError(err)
 }
 
@@ -169,12 +161,12 @@ func audibleError(err error) error {
 		return api.Errorf(api.ErrInvalid, "%v", err)
 	case errors.Is(err, audibleacct.ErrLoginExpired), errors.Is(err, audibleacct.ErrNotFound):
 		return api.Errorf(api.ErrNotFound, "%v", err)
-	case errors.Is(err, audibleacct.ErrRegister):
+	case errors.Is(err, audibleacct.ErrNotPaired):
+		return api.Errorf(api.ErrConflict, "%v", err)
+	case errors.Is(err, audibleacct.ErrRegister), errors.Is(err, link.ErrUnauthorized):
 		return api.Errorf(api.ErrRefused, "%v", err)
 	case errors.As(err, &apiErr):
 		return api.Errorf(api.ErrRefused, "the server refused the account: %s", apiErr.Message)
-	case errors.Is(err, link.ErrUnauthorized):
-		return api.Errorf(api.ErrRefused, "%v", err)
 	}
 	return err
 }

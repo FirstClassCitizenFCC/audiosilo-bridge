@@ -32,6 +32,12 @@ type AudibleAccount struct {
 	LastError   string `json:"last_error"`
 }
 
+// OnOtherServer reports whether a is mapped on a server other than serverID
+// (the pairing's; "" while unpaired, which is never "other").
+func (a AudibleAccount) OnOtherServer(serverID string) bool {
+	return serverID != "" && a.ServerID != serverID
+}
+
 const audibleColumns = `id, label, marketplace, customer_hash, server_id, user_id, user_name, library_id, policy, sync,
 	created_at, last_ok_at, last_poll_at, last_titles, last_matched, refused_at, last_error`
 

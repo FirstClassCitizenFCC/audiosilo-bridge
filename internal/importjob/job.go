@@ -116,17 +116,62 @@ func ApplyDestinations(items []PlannedItem, dests map[string]string) {
 }
 
 // BookMatcher matches records against a fixed server-book list via the shared
-// pkg/match matcher. It converts the candidate slice once so matching many records
-// against the same library is O(library) instead of O(records x library) - the
-// poll matches the whole Audible library against it. A book in several series is
-// a candidate under each of them (any one may be the series Audible names). It
+// pkg/match matcher. It converts the candidate slice and normalises each
+// candidate's people once, and each match scores only the candidates whose
+// people pass pkg/match's person gate (match.Best skips the rest after its ASIN
+// step anyway), so a poll matching a whole Audible library doesn't normalise
+// every author of the library for every title. A book in several series is a
+// candidate under each of them (any one may be the series Audible names). It
 // also counts how many records have claimed each matched path (see Contested).
 // Not safe for concurrent use.
 type BookMatcher struct {
 	books  []link.LibraryBook
 	cands  []match.Book
+	people []people       // cands[i]'s normalised author and narrators
 	owner  []int          // cands[i] is a candidate for books[owner[i]]
 	claims map[string]int // matched path -> how many records claimed it
+	subset []match.Book   // reused per Match: the candidates past the person gate
+	subIdx []int          // subset[j] is cands[subIdx[j]]
+}
+
+// people is a candidate's (or a query's) author and narrators, normalised as
+// pkg/match's person gate compares them.
+type people struct {
+	author    string
+	narrators []string
+}
+
+func normalisedPeople(author string, narrators []string) people {
+	p := people{author: match.Normalize(author)}
+	for _, n := range narrators {
+		p.narrators = append(p.narrators, match.Normalize(n))
+	}
+	return p
+}
+
+// related is pkg/match's authorMatch over normalised names: equal, or one
+// contained in the other; an empty name never matches.
+func related(a, b string) bool {
+	return a != "" && b != "" && (a == b || strings.Contains(a, b) || strings.Contains(b, a))
+}
+
+// passes is pkg/match's personMatch(b, q) over normalised people: b's author or
+// a narrator of b is q's author, or b's author is one of q's narrators.
+func (b people) passes(q people) bool {
+	if related(b.author, q.author) {
+		return true
+	}
+	for _, n := range b.narrators {
+		if related(n, q.author) {
+			return true
+		}
+	}
+	for _, n := range q.narrators {
+		if related(b.author, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // NewBookMatcher builds a matcher over an already-fetched library book list.
@@ -134,8 +179,10 @@ func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
 	m := &BookMatcher{books: books, claims: map[string]int{}}
 	for i, b := range books {
 		base := match.Book{Title: b.Title, Author: Credit(b.Authors), ASIN: b.ASIN, Narrators: b.Narrators}
+		who := normalisedPeople(base.Author, base.Narrators)
 		if len(b.Series) == 0 {
 			m.cands = append(m.cands, base)
+			m.people = append(m.people, who)
 			m.owner = append(m.owner, i)
 			continue
 		}
@@ -144,6 +191,7 @@ func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
 			c.Series = s.Name
 			c.SeriesIndex, _ = parsePosition(s.Position)
 			m.cands = append(m.cands, c)
+			m.people = append(m.people, who)
 			m.owner = append(m.owner, i)
 		}
 	}
@@ -162,13 +210,39 @@ func (m *BookMatcher) Match(rec source.Record) (link.LibraryBook, bool) {
 	if rec.Narrator != "" {
 		q.Narrators = []string{rec.Narrator}
 	}
-	i, ok := match.Best(m.cands, q)
+	i, ok := m.best(q)
 	if !ok {
 		return link.LibraryBook{}, false
 	}
 	b := m.books[m.owner[i]]
 	m.claims[b.Path]++
 	return b, true
+}
+
+// best is match.Best(m.cands, q): its ASIN step over every candidate, then
+// match.Best over the candidates past the person gate only (in their order, so
+// ties break the same way), its index mapped back.
+func (m *BookMatcher) best(q match.Query) (int, bool) {
+	if q.ASIN != "" {
+		for i := range m.cands {
+			if m.cands[i].ASIN != "" && strings.EqualFold(q.ASIN, m.cands[i].ASIN) {
+				return i, true
+			}
+		}
+	}
+	qp := normalisedPeople(q.Author, q.Narrators)
+	m.subset, m.subIdx = m.subset[:0], m.subIdx[:0]
+	for i := range m.cands {
+		if m.people[i].passes(qp) {
+			m.subset = append(m.subset, m.cands[i])
+			m.subIdx = append(m.subIdx, i)
+		}
+	}
+	j, ok := match.Best(m.subset, q)
+	if !ok {
+		return -1, false
+	}
+	return m.subIdx[j], true
 }
 
 // Contested reports whether more than one record has matched path since the

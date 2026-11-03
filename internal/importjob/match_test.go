@@ -3,6 +3,8 @@ package importjob
 import (
 	"testing"
 
+	"github.com/kodestar/audiosilo-server/pkg/match"
+
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/placement"
 	"github.com/kodestar/audiosilo-bridge/internal/source"
@@ -128,5 +130,45 @@ func TestPlanUsesLocalBooksNoQueries(t *testing.T) {
 	}
 	if items[1].ExistsOnServer {
 		t.Error("book B5 should NOT be on the server")
+	}
+}
+
+// The person-gate prefilter must answer exactly what match.Best over every
+// candidate answers: the same candidate, or no match.
+func TestBookMatcherSameAsBest(t *testing.T) {
+	books := []link.LibraryBook{
+		{Path: "k/dwk05", Authors: []string{"Jeff Kinney"}, Series: []link.SeriesRef{{Name: "Diary of a Wimpy Kid"}}, Title: "Diary of a Wimpy Kid: The Ugly Truth (Book 5)"},
+		{Path: "k/dwk04", Authors: []string{"Jeff Kinney"}, Series: []link.SeriesRef{{Name: "Diary of a Wimpy Kid"}}, Title: "Diary Of A Wimpy Kid 4 - Dog Days"},
+		{Path: "a/rrp3", Authors: []string{"Actus"}, Series: []link.SeriesRef{{Name: "Return of the Runebound Professor", Position: "3"}}, Title: "Return of the Runebound Professor 3"},
+		{Path: "oster/sand", Authors: []string{"Aaron Oster", "Richard Sashigane"}, Series: []link.SeriesRef{{Name: "Rise to Omniscience"}, {Name: "Omniverse"}}, Title: "RO07 - Sandqueen"},
+		{Path: "n/narrated", Authors: []string{"Anon"}, Narrators: []string{"Travis Baldree"}, Title: "Legends & Lattes"},
+		{Path: "n/narrator-author", Authors: []string{"Travis Baldree"}, Title: "Bookshops & Bonedust"},
+		{Path: "w/unsouled", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Cradle", Position: "1"}}, Title: "Unsouled", ASIN: "B01"},
+		{Path: "x/noauthor", Title: "Unsouled"},
+	}
+	recs := []source.Record{
+		recWith("Diary of a Wimpy Kid: The Ugly Truth (Book 5)", "Jeff Kinney", "Diary of a Wimpy Kid", 5),
+		recWith("Dog Days", "jeff kinney", "Diary of a Wimpy Kid", 4),
+		recWith("Return of the Runebound Professor 3", "Actus", "", 0),
+		recWith("Sandqueen", "Aaron Oster", "Omniverse", 7),
+		{Title: "Legends & Lattes", Author: "Travis Baldree"},
+		{Title: "Bookshops & Bonedust", Author: "Someone", Narrator: "Travis Baldree"},
+		{Title: "Unsouled", Author: "Will Wight"},
+		{Title: "Unsouled", ASIN: "b01"},
+		{Title: "Unsouled"},
+		{Title: "Nothing", Author: "Nobody"},
+	}
+	for _, rec := range recs {
+		m := NewBookMatcher(books)
+		q := match.Query{Title: rec.Title, TitleShort: rec.TitleShort, Author: rec.Author, Series: rec.Series,
+			Sequence: rec.Sequence, HasSequence: rec.HasSequence, ASIN: rec.ASIN}
+		if rec.Narrator != "" {
+			q.Narrators = []string{rec.Narrator}
+		}
+		wantI, wantOK := match.Best(m.cands, q)
+		gotI, gotOK := m.best(q)
+		if gotI != wantI || gotOK != wantOK {
+			t.Errorf("%q by %q: best = %d %v, match.Best = %d %v", rec.Title, rec.Author, gotI, gotOK, wantI, wantOK)
+		}
 	}
 }

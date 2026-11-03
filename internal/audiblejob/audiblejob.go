@@ -145,7 +145,7 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	if err != nil {
 		return nil, err
 	}
-	if sid := h.o.ServerID(); sid != "" && acct.ServerID != sid {
+	if acct.OnOtherServer(h.o.ServerID()) {
 		return nil, h.fail(ctx, acct.ID, "the account is mapped on another server: map it again on the Bridge's Accounts tab")
 	}
 	var srv Server
@@ -203,13 +203,12 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			} else {
 				res.MatchedFuzzy++
 			}
-			res.Matched++
 			t.Match = &link.AudibleMatch{LibraryID: acct.LibraryID, Path: b.Path, How: how}
 			hits = append(hits, matched{rec: rec, book: b})
 		}
 		titles = append(titles, t)
 	}
-	res.Titles = len(titles)
+	res.Titles, res.Matched = len(titles), len(hits)
 
 	rep.Progress(jobs.Progress{Step: "reporting", Message: "Reporting the titles to the server", Total: len(titles)})
 	for start := 0; ; start += link.MaxAudibleTitles {
@@ -308,7 +307,7 @@ func title(rec source.Record) link.AudibleTitle {
 	if reason := strings.TrimSpace(rec.UnavailableReason); reason != "" {
 		t.Reason = reason
 		t.State = link.AudibleUnavailable
-		if strings.Contains(strings.ToLower(reason), "pre-order") {
+		if rec.Preorder {
 			t.State = link.AudiblePreorder
 		}
 	}

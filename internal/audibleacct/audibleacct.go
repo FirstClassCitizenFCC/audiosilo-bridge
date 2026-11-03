@@ -67,6 +67,9 @@ var (
 	// ErrRegister: Amazon didn't take the sign-in (the code was used or
 	// expired, or the registration failed); the wrapped error says how.
 	ErrRegister = errors.New("the Amazon sign-in wasn't accepted")
+	// ErrNotPaired: signing in or mapping needs the server, and the Bridge
+	// isn't paired with one.
+	ErrNotPaired = errors.New("pair the Bridge with a server first")
 )
 
 // RefusedText is an account's last_error after a refusal.
@@ -183,10 +186,10 @@ func New(o Options) *Manager {
 // Started is a sign-in waiting for the admin: open URL at Amazon, then paste
 // the page it lands on back (Finish) before ExpiresAt.
 type Started struct {
-	Login       string    `json:"login"`
-	URL         string    `json:"url"`
-	Marketplace string    `json:"marketplace"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	Login       string
+	URL         string
+	Marketplace string
+	ExpiresAt   time.Time
 }
 
 // Start begins a sign-in in marketplace (an audible marketplace code).
@@ -295,14 +298,7 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 		return store.AudibleAccount{}, err
 	}
 	if srv == nil {
-		return store.AudibleAccount{}, errors.New("the Bridge isn't paired with a server")
-	}
-	m.mu.Lock()
-	m.pruneLocked(m.o.Now())
-	l, ok := m.logins[f.Login]
-	m.mu.Unlock()
-	if !ok {
-		return store.AudibleAccount{}, ErrLoginExpired
+		return store.AudibleAccount{}, ErrNotPaired
 	}
 	code, err := audible.ParseAuthCode(f.RedirectURL)
 	if err != nil {
@@ -310,7 +306,8 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 		return store.AudibleAccount{}, fmt.Errorf("%w: paste the address of the page Amazon showed after the sign-in (it holds an authorization code)", ErrInvalid)
 	}
 	m.mu.Lock()
-	_, ok = m.logins[f.Login]
+	m.pruneLocked(m.o.Now())
+	l, ok := m.logins[f.Login]
 	delete(m.logins, f.Login) // the code is spent whatever happens next
 	m.mu.Unlock()
 	if !ok {
@@ -397,7 +394,7 @@ func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp M
 		return store.AudibleAccount{}, err
 	}
 	if srv == nil {
-		return store.AudibleAccount{}, errors.New("the Bridge isn't paired with a server")
+		return store.AudibleAccount{}, ErrNotPaired
 	}
 	a, err := m.Account(ctx, id)
 	if err != nil {
