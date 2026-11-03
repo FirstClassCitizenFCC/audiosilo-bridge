@@ -58,7 +58,9 @@ scripts/build-web.sh            # builds web/, syncs it into internal/web/dist, 
 docker build --target slim .    # slim | cuda | agent | full (the default target)
 
 # The Audible fake exists only behind its tag (never in a release build or image):
-go vet -tags audiblefake ./internal/audible/... ./cmd/audiblefake && go test -race -tags audiblefake ./internal/audible/...
+go vet -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob ./internal/app ./cmd/audiblefake
+go test -race -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob
+go test -race -tags audiblefake -run Audible ./internal/app
 ```
 
 **Before a change is done, run the gate of each side you touched**, plus an image
@@ -112,7 +114,7 @@ internal/
   store/      SQLite, append-only migrations (0001 the engine, 0002 server_jobs,
               0003 generate_books, contrib_mode, server_id, deleted_stage_spend,
               0004 workers, 0005 books.goal, 0006 accounts, 0007 podcast_shows,
-              0008 podcast_artwork_state)
+              0008 podcast_artwork_state, 0009 audible_accounts)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
   generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan;
@@ -143,6 +145,10 @@ internal/
               signed library + lastpositions, license, resumable capped download,
               429/503 backoff, injectable endpoints; audiblefake/ (-tags audiblefake
               only): the fake and the scrubbing Recorder
+  audibleacct/ the Audible accounts: paste-back sign-in (PKCE + serial in memory 15 min),
+              register, vault audible_<id>, mapping on the server first, deregister on remove
+  audiblejob/ audible.poll (light): library -> paged server books -> BookMatcher ->
+              titles in calls of 500 (poll_id, final) -> unambiguous ASIN backfill
   importjob/  BookMatcher (link.LibraryBook) + Plan + Run: match and place against a library
   placement/ source/ transfer/ (Local) progress/  (the manager's, imported as is)
 web/          the page: Vite + React 19 + TS + Tailwind v4; pure logic in src/lib
@@ -152,7 +158,7 @@ Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, 
 
 **Dependency direction:** `app -> {api, jobs, link, mapping, verify, generate,
 agentbox, workers, accounts, setup, correct, store, secrets, config, auth, logring,
-web, netguard, podcast, podcastjob}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
+web, netguard, podcast, podcastjob, audibleacct, audiblejob}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
 {contrib, jobs, metaops}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
 the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs,
@@ -161,7 +167,8 @@ through its own Engine/Server interfaces; `podcastjob -> {jobs, link, mapping, n
 `podcast -> {fsutil, gofeed, x/net/html, x/text}`; `logring -> podcast`;
 `audible -> {progress, source}` (its tagged build also `audiblefake`, which never
 imports `audible`); `importjob -> {link, placement, source, transfer,
-audiosilo-server/pkg/match}`; `transfer -> progress`;
+audiosilo-server/pkg/match}`; `audibleacct -> {audible, link, secrets, source, store}`;
+`audiblejob -> {audibleacct, importjob, jobs, link, source, store}` (app wires both); `transfer -> progress`;
 `jobs -> {link, store}`; `mapping -> {fsutil, link}`;
 `link`, `agentproto` and `workerproto` are leaves; `workers -> {asr, fsutil,
 scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`
@@ -209,6 +216,11 @@ in PACKAGES.md.
   private podcast feed URLs are sealed before a claim reaches server_jobs, as
   podcast_job_<job id>_<attempt> (each claim its own), then podcast_feed_<show_id>.
   The job secret survives a resumable stop and is deleted at any terminal end.
+  An Audible account's sign-in (tokens and the device key: full Amazon account
+  access) is sealed as audible_<id> and handed only to the audible client; the
+  store, job params and results, logs, the heartbeat and the agent staging dir
+  never hold it (tests walk them), and the pasted sign-in page's code is never
+  answered or logged.
   Private feed.json files omit feed, enclosure, chapters and transcript URLs. Both
   log sinks and the page API redact URLs, including userinfo, paths and queries.
 - **The page answers the local network only and always asks for its password**,
@@ -375,8 +387,19 @@ audio run beside it (`store.AudioRunKey`), which describe never reads.
 the vault and the server's columns replace it); the client's deregister, resumable
 capped download, `last_updated`, backoff and endpoints; `link.LibraryBook` for the
 server's paged listing; the Audible fake behind `-tags audiblefake`
-(`AUDIOSILO_BRIDGE_AUDIBLE_FAKE_URL`, `cmd/audiblefake`). Nothing is wired into
-`app` yet.
+(`AUDIOSILO_BRIDGE_AUDIBLE_FAKE_URL`, `cmd/audiblefake`).
+
+**Phase 4a (Audible), stage B:** the Accounts tab's Audible section (pick the
+store, open Amazon's sign-in, paste back the page it lands on, map the account to
+a person and a books library with a policy; sign in again, change, remove), the
+accounts (`audibleacct`, migration 0009, the vault's `audible_<id>`; the mapping
+recorded on the server first; a failed sign-in deregisters its device; removal
+forgets locally first, then the server, then Amazon), `audible.poll`
+(`audiblejob`, light lane: so the heartbeat's features gain `audible`), the link's
+Audible routes, and the optional `audible` setup item. The server's Audible routes
+are not behind the console's module toggle (the podcasts precedent): the page
+signs in either way and says the module must be on for the server to poll. Nothing
+downloads yet (4b), and places don't sync yet (4c).
 
 See BRIDGE-PLAN.md's Status table for what is next.
 

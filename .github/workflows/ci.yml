@@ -51,8 +51,9 @@ jobs:
       # (release builds never carry it), so the untagged steps skip them.
       - name: Audible fake (audiblefake tag)
         run: |
-          go vet -tags audiblefake ./internal/audible/... ./cmd/audiblefake
-          go test -race -tags audiblefake ./internal/audible/...
+          go vet -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob ./internal/app ./cmd/audiblefake
+          go test -race -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob
+          go test -race -tags audiblefake -run Audible ./internal/app
 
       # golangci-lint-action@v8 installs golangci-lint v2 (required for Go 1.25+),
       # matching audiosilo-server's CI; the v6 action rejects v2 version strings.
