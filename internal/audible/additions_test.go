@@ -363,3 +363,12 @@ func TestDeregisterRefused(t *testing.T) {
 		t.Fatal("a refresh with no refresh token should fail before any request")
 	}
 }
+
+func TestReleaseDay(t *testing.T) {
+	for in, want := range map[string]string{"2016-08-01": "2016-08-01", "2016-08-01T00:00:00Z": "2016-08-01",
+		"2016-08": "", "2016": "", "": "", "soon": ""} {
+		if got := releaseDay(in); got != want {
+			t.Errorf("releaseDay(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

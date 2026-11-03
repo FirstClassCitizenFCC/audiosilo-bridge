@@ -105,6 +105,12 @@ func TestClientLibrary(t *testing.T) {
 	if r.Year != "2016" || r.FileName != "Soulsmith.m4b" || r.SrcPath != "" {
 		t.Fatalf("record fields: year=%q file=%q src=%q", r.Year, r.FileName, r.SrcPath)
 	}
+	if r.ReleaseDate != "2016-08-01" || r.SeriesPosition != "2" || len(r.Authors) != 1 || r.Authors[0] != "Will Wight" {
+		t.Fatalf("record: release=%q position=%q authors=%q", r.ReleaseDate, r.SeriesPosition, r.Authors)
+	}
+	if recs[1].ReleaseDate != "" || recs[1].Authors != nil {
+		t.Fatalf("no date or authors: %+v", recs[1])
+	}
 	// A normal owned book is downloadable; the rest each carry their reason.
 	if r.UnavailableReason != "" {
 		t.Fatalf("owned book marked unavailable: %q", r.UnavailableReason)

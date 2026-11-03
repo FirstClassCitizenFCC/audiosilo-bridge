@@ -116,17 +116,25 @@ func (it libItem) toRecord(now time.Time) source.Record {
 	}
 	if len(it.Authors) > 0 {
 		rec.Author = it.Authors[0].Name
+		for _, a := range it.Authors {
+			if a.Name != "" {
+				rec.Authors = append(rec.Authors, a.Name)
+			}
+		}
 	}
 	if len(it.Narrators) > 0 {
 		rec.Narrator = it.Narrators[0].Name
 	}
 	if len(it.Series) > 0 {
 		rec.Series = it.Series[0].Title
+		rec.SeriesPosition = strings.TrimSpace(it.Series[0].Sequence)
 		if seq, ok := parseSeq(it.Series[0].Sequence); ok {
 			rec.Sequence, rec.HasSequence = seq, true
 		}
 	}
-	rec.Year = yearFromDate(firstNonEmptyStr(it.ReleaseDate, it.IssueDate))
+	date := firstNonEmptyStr(it.ReleaseDate, it.IssueDate)
+	rec.Year = yearFromDate(date)
+	rec.ReleaseDate = releaseDay(date)
 	return rec
 }
 
@@ -177,6 +185,19 @@ func parseAudibleDate(s string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// releaseDay is an Audible date as YYYY-MM-DD when it names a whole day ("" for
+// "2016-08", "2016" or anything unparseable).
+func releaseDay(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 10 {
+		s = s[:10]
+	}
+	if t, err := time.Parse(time.DateOnly, s); err == nil {
+		return t.Format(time.DateOnly)
+	}
+	return ""
 }
 
 // parseSeq parses the free-form Audible series sequence ("1", "0.5", "1-3", "").
