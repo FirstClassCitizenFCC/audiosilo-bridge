@@ -212,5 +212,6 @@ func (b *Bridge) setup(ctx context.Context) link.Setup {
 			in.GitHub.Login = b.github.Login(ctx)
 		}
 	}
+	in.Audible = b.audibleSetup(ctx)
 	return setup.Checklist(in)
 }

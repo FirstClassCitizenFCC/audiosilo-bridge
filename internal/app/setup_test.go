@@ -131,7 +131,7 @@ func TestHeartbeatSendsSetupOnlyWhenAccepted(t *testing.T) {
 	f.mu.Lock()
 	err := json.Unmarshal(f.beats[1]["setup"], &s)
 	f.mu.Unlock()
-	if err != nil || len(s.Items) != 6 || s.Items[0].ID != setup.ItemPaired || !s.Items[0].Done {
+	if err != nil || len(s.Items) != 7 || s.Items[0].ID != setup.ItemPaired || !s.Items[0].Done {
 		t.Fatalf("setup = %+v (%v)", s, err)
 	}
 

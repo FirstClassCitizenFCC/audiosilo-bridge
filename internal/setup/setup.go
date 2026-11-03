@@ -3,9 +3,10 @@
 // checked and writable (decision 13); speech recognition ready (the Bridge's
 // own, or a native worker); the agent's credential set; the monthly budget
 // reviewed (decision 7); GitHub signed in (optional, only for contributing,
-// decision 17). Checklist is pure: the app gathers the inputs, the heartbeat
-// carries the result to the server (link.Setup) and the Bridge's page leads its
-// Status tab with it until every required item is done.
+// decision 17); an Audible account signed in (optional, Phase 4a). Checklist
+// is pure: the app gathers the inputs, the heartbeat carries the result to the
+// server (link.Setup) and the Bridge's page leads its Status tab with it until
+// every required item is done.
 package setup
 
 import (
@@ -23,6 +24,9 @@ const (
 	ItemAgent     = "agent"
 	ItemBudget    = "budget"
 	ItemGitHub    = "github"
+	// ItemAudible (Phase 4a, optional): an Audible account signed in and
+	// working. An additive id: an older server or page leaves it out.
+	ItemAudible = "audible"
 )
 
 // DetailASRWaiting is the asr item's detail while the engine waits for an ASR
@@ -119,6 +123,13 @@ type GitHub struct {
 	From  string
 }
 
+// Audible is the Audible accounts: how many are signed in, how many Audible
+// refuses.
+type Audible struct {
+	Accounts int
+	Refused  int
+}
+
 // Inputs are what the checklist is made from.
 type Inputs struct {
 	Paired bool
@@ -131,6 +142,7 @@ type Inputs struct {
 	BudgetReviewed   bool
 	MonthlyBudgetUSD float64
 	GitHub           GitHub
+	Audible          Audible
 }
 
 // Checklist is the checklist for in, its items in order.
@@ -217,6 +229,15 @@ func Checklist(in Inputs) link.Setup {
 		gh = "the gh CLI's token"
 	}
 	add(ItemGitHub, in.GitHub.CanContribute, false, gh)
+
+	audible := ""
+	switch a := in.Audible; {
+	case a.Refused > 0:
+		audible = plural(a.Refused, "account needs", "accounts need") + " signing in again"
+	case a.Accounts > 0:
+		audible = plural(a.Accounts, "account", "accounts") + " signed in"
+	}
+	add(ItemAudible, in.Audible.Accounts > 0 && in.Audible.Refused == 0, false, audible)
 	return out
 }
 
@@ -228,6 +249,14 @@ func Complete(s link.Setup) bool {
 		}
 	}
 	return true
+}
+
+// plural is "1 <one>" or "n <many>".
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 func firstNonEmpty(a, b string) string {
