@@ -1,6 +1,10 @@
 package audible
 
-import "crypto/rand"
+import (
+	"crypto/rand"
+	"strconv"
+	"strings"
+)
 
 // The device profile: the Audible for iPhone app a device registers as, and
 // the app version its token refreshes and deregistration name. Since about
@@ -23,6 +27,37 @@ const (
 	// again to get licenses.
 	ProfileVersion = appVersion + "/" + osVersion + "/" + softwareVersion
 )
+
+// cfNetworkVersion is the CFNetwork of the iOS 26.2 the profile names (the
+// 3860 line of iOS and macOS 26), for userAgent.
+const cfNetworkVersion = "3860.300.31"
+
+// userAgent is the Audible for iPhone app's own user agent on the profile's
+// device (an app's URLSession sends "<app>/<build> CFNetwork/<v> Darwin/<v>"),
+// on every signed API call and download: some Audible and CDN endpoints reject
+// Go's default one. Built from the profile, so it never names an older app or
+// iOS than the registration does (it used to be audible-cli's "Audible/671
+// CFNetwork/1240.0.4 Darwin/20.6.0", iOS 14). The build is softwareVersion,
+// the app build Amazon registers; mkb79/Audible 0.13.1 sets no user agent of
+// its own on API calls (httpx's), and its sign-in web view's is the owner's
+// browser here.
+var userAgent = "Audible/" + softwareVersion + " CFNetwork/" + cfNetworkVersion + " Darwin/" + darwinVersion(osVersion)
+
+// darwinVersion is the Darwin kernel of an iOS 26 or later version
+// "major.minor": Darwin major is iOS major minus one (iOS 26.2 runs Darwin
+// 25.2.0). "" for anything else, so a profile change the rule doesn't fit
+// shows in its test rather than in a made-up user agent.
+func darwinVersion(ios string) string {
+	majorStr, minor, ok := strings.Cut(ios, ".")
+	major, err := strconv.Atoi(majorStr)
+	if !ok || err != nil || major < 26 {
+		return ""
+	}
+	if _, err := strconv.Atoi(minor); err != nil {
+		return ""
+	}
+	return strconv.Itoa(major-1) + "." + minor + ".0"
+}
 
 // serialLen and serialAlphabet are the official app's serial shape: 40 ASCII
 // letters and digits.
