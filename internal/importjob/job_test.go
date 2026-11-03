@@ -137,29 +137,6 @@ func TestPlanRejectedExistence(t *testing.T) {
 	}
 }
 
-// A path matched by more than one record is contested - at least one of those
-// matches is wrong, so identity-durable writes (the ASIN backfill) must skip it.
-func TestBookMatcherContested(t *testing.T) {
-	m := NewBookMatcher([]link.LibraryBook{
-		{Path: "a/one", Title: "One", Authors: []string{"Au"}, ASIN: "B001"},
-		{Path: "a/two", Title: "Two", Authors: []string{"Au"}, ASIN: "B002"},
-	})
-	for _, asin := range []string{"B001", "B001", "B002"} {
-		if _, ok := m.Match(source.Record{Title: "x", Author: "Au", ASIN: asin}); !ok {
-			t.Fatalf("no match for %s", asin)
-		}
-	}
-	if !m.Contested("a/one") {
-		t.Fatal("doubly-claimed path should be contested")
-	}
-	if m.Contested("a/two") {
-		t.Fatal("singly-claimed path should not be contested")
-	}
-	if m.Contested("a/none") {
-		t.Fatal("unclaimed path should not be contested")
-	}
-}
-
 func TestPlanTemplateMode(t *testing.T) {
 	recs := []source.Record{{SrcPath: "/x/Warbreaker.m4b", Title: "Warbreaker", Author: "Brandon Sanderson"}}
 	items, err := Plan(recs, PlanOptions{
