@@ -36,7 +36,7 @@ func runFFmpeg(ctx context.Context, ffmpeg string, args []string) error {
 	if ffmpeg == "" {
 		ffmpeg = "ffmpeg"
 	}
-	cmd := exec.CommandContext(ctx, ffmpeg, args...)
+	cmd := exec.CommandContext(ctx, ffmpeg, args...) //nolint:gosec // G204: the configured ffmpeg with typed arguments, never a shell
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

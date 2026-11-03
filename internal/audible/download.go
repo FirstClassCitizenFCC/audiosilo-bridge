@@ -89,7 +89,10 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	appendTo, total := false, int64(-1)
+	var (
+		appendTo bool
+		total    int64
+	)
 	switch {
 	case resp.StatusCode == http.StatusPartialContent && have > 0:
 		start, size, ok := parseContentRange(resp.Header.Get("Content-Range"))
@@ -132,7 +135,7 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		return err
 	}
 	// Read at most one byte past the cap, to tell a file at the cap from one over it.
-	var src io.Reader = io.LimitReader(resp.Body, maxBytes-held+1)
+	src := io.LimitReader(resp.Body, maxBytes-held+1)
 	if opts.OnProgress != nil {
 		cb := opts.OnProgress
 		src = &progress.Reader{R: src, Total: total, CB: func(copied, t int64) { cb(held+copied, t) }}

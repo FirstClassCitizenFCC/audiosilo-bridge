@@ -120,7 +120,7 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 	// library: it runs as the local user writing to a local/mounted path, so new
 	// content is already owned by that user (the umask handles the mode). The SFTP
 	// case needs matching because it can land content as the SSH login user (root).
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: library folders the server (another user) must read
 		return PlaceResult{}, err
 	}
 	if err := copyVerified(ctx, req.SrcPath, dst, srcInfo.Size(), req.Progress); err != nil {
@@ -136,7 +136,7 @@ func (*Local) Close() error { return nil }
 // onto dst, and confirms the final size matches the source. ctx cancellation is
 // honored between read chunks; progress (if set) is reported as bytes are written.
 func copyVerified(ctx context.Context, src, dst string, wantSize int64, onProgress func(int64, int64)) error {
-	in, err := os.Open(src)
+	in, err := os.Open(src) //nolint:gosec // G304: the caller's own acquired file
 	if err != nil {
 		return err
 	}

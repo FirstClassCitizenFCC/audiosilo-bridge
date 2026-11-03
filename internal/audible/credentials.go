@@ -26,7 +26,7 @@ type Credentials struct {
 
 // Marshal/ParseCredentials round-trip the credentials for the vault.
 func (c Credentials) Marshal() (string, error) {
-	b, err := json.Marshal(c)
+	b, err := json.Marshal(c) //nolint:gosec // G117: sealed into the vault, the one place the credentials are kept
 	return string(b), err
 }
 
