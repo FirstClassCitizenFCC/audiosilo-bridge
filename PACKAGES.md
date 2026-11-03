@@ -2129,8 +2129,10 @@ internal/
             Credentials.Redact also remove the account's own customer id and serial
             BY VALUE (a license's denial detail; audibleacct's Service wraps every
             error it answers with creds.Redact); audiblejob's job
-            errors, Failure messages and recorded poll failures pass it again
-            (RedactedError keeps errors.Is). The per-book key/iv are
+            errors and recorded poll failures pass it again, and a Failure
+            message the errors it quotes (and an unavailable reason), never its
+            library paths or titles, which the shapes would cut words out of
+            ("Basic Economics") (RedactedError keeps errors.Is). The per-book key/iv are
             in ffmpeg's argv (visible in the container's process table): accepted.
             Deps: stdlib + progress + source.
             Build tag audiblefake (never in a release build or image; fake_off.go /
@@ -2284,9 +2286,10 @@ internal/
             not_released, no rights / not in the library no_rights, a refusal
             audible_refused; a license denied as audible.ErrThrottled, the device on
             an older profile, is audible_refused with ThrottledText: "Audible
-            refused this device. Sign in to Audible again on the Bridge (Accounts),
-            then remove the old AudioSilo device at Amazon's Manage Content and
-            Devices.", never no_rights) and the destination (Destination, a wrapper over
+            refused this device. Sign in to Audible again on the Bridge (Accounts):
+            that registers a new AudioSilo device Audible allows downloads to, and
+            removes this one." (never "remove it at Amazon": the new device has the
+            same name), never no_rights) and the destination (Destination, a wrapper over
             destination(), which also returns the plan's kind and siblings and
             which the poll's plans share: dest_path FIRST, the
             template not consulted, else the template, else Auto from the paged

@@ -442,6 +442,23 @@ func TestImportEnrichRefusedIsNotAFailure(t *testing.T) {
 	}
 }
 
+// A failure's library path and title stay whole (the redactor's shapes would
+// read "Basic Economics" as a Basic credential, "Password: A Novel" as a
+// password), while an error it quotes is still redacted of Amazon's ids.
+func TestFailRedactsOnlyQuotedErrors(t *testing.T) {
+	t.Parallel()
+	const rel = "Thomas Sowell/Basic Economics/Basic Economics.m4b"
+	if f := fail(CodeExists, "A file is already at %s: %q", rel, "Password: A Novel"); f.Message !=
+		`A file is already at `+rel+`: "Password: A Novel"` {
+		t.Fatalf("message = %s", f.Message)
+	}
+	f := fail(CodeNoRights, "At %s: %v", rel, errors.New(amazonRefusal))
+	if strings.Contains(f.Message, "A1B2C3D4E5F6G7") || !strings.Contains(f.Message, rel) ||
+		!strings.Contains(f.Message, "being throttled") {
+		t.Fatalf("message = %s", f.Message)
+	}
+}
+
 // Denied: Amazon's text reaching the import unredacted (belt and braces: the
 // client redacts it first) leaves the customer id out of the job's error,
 // result, progress and logs, as a coded failure and as a plain error; the ASIN

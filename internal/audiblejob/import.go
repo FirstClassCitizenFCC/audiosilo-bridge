@@ -76,7 +76,8 @@ const mappingPoll = time.Second
 
 // Failure is a failed import's result and error: a code from the list above
 // and a sentence for the console. It never holds a key, an iv or a URL, nor an
-// Amazon account identifier (fail redacts its message).
+// Amazon account identifier (fail redacts the errors it quotes; Amazon's other
+// text, an unavailable reason, is redacted where it is quoted).
 type Failure struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -84,15 +85,29 @@ type Failure struct {
 
 func (f *Failure) Error() string { return f.Message }
 
+// fail is a coded failure. An error among args (where Amazon's answer reaches
+// a message: a license's denial, an HTTP error) passes audible.RedactedError;
+// the rest (library paths, book titles, names, counts) are the Bridge's own
+// and stay whole, since the redactor's shapes would cut words out of a title
+// ("Basic Economics" reads as a Basic credential).
 func fail(code, format string, args ...any) *Failure {
-	return &Failure{Code: code, Message: audible.RedactAccountIDs(fmt.Sprintf(format, args...))}
+	quoted := make([]any, len(args))
+	for i, a := range args {
+		if err, ok := a.(error); ok {
+			a = audible.RedactedError(err)
+		}
+		quoted[i] = a
+	}
+	return &Failure{Code: code, Message: fmt.Sprintf(format, quoted...)}
 }
 
 // ThrottledText is an import's message (code audible_refused) when Audible
 // denies the license to the account's device (audible.ErrThrottled), as it
-// does a device registered with an older profile.
-const ThrottledText = "Audible refused this device. Sign in to Audible again on the Bridge (Accounts), " +
-	"then remove the old AudioSilo device at Amazon's Manage Content and Devices."
+// does a device registered with an older profile. Signing in again removes the
+// old device itself (audibleacct.Finish), and the new one carries the same
+// name, so the message never asks for one to be removed at Amazon by hand.
+const ThrottledText = "Audible refused this device. Sign in to Audible again on the Bridge (Accounts): " +
+	"that registers a new AudioSilo device Audible allows downloads to, and removes this one."
 
 // refusedSignIn is the failure when Audible refuses the account's sign-in.
 func refusedSignIn() *Failure {
@@ -359,9 +374,9 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	case err != nil:
 		return nil, fmt.Errorf("reading the title from Audible: %w", err)
 	case rec.Preorder:
-		return nil, fail(CodeNotReleased, "The title isn't released yet (%s).", rec.UnavailableReason)
+		return nil, fail(CodeNotReleased, "The title isn't released yet (%s).", audible.RedactAccountIDs(rec.UnavailableReason))
 	case strings.TrimSpace(rec.UnavailableReason) != "":
-		return nil, fail(CodeNoRights, "Audible won't let the account download the title: %s.", rec.UnavailableReason)
+		return nil, fail(CodeNoRights, "Audible won't let the account download the title: %s.", audible.RedactAccountIDs(rec.UnavailableReason))
 	}
 	rec.ASIN = p.ASIN
 

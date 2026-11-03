@@ -66,6 +66,12 @@ func TestRedactAccountIDs(t *testing.T) {
 			kept: []string{"refresh", "access_token="},
 		},
 		{
+			name: "adp token, whole",
+			in:   `x-adp-token: {enc:FAKEenc}{key:FAKEkey}{iv:FAKEiv}{name:FAKEname}{serial:Mg==} refused`,
+			gone: []string{"FAKEenc", "FAKEkey", "FAKEiv", "FAKEname", "Mg=="},
+			kept: []string{"x-adp-token: [redacted] refused"},
+		},
+		{
 			name: "40-character serial",
 			in:   "device aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dF3hJ5kL7n is throttled",
 			gone: []string{"aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dF3hJ5kL7n"},

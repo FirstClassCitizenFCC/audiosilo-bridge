@@ -31,6 +31,9 @@ var (
 	amazonID = regexp.MustCompile(`amzn1\.[A-Za-z0-9._-]+`)
 	// Amazon's own tokens (access Atna|, refresh Atzr|, Atnr|, Atza|).
 	amazonToken = regexp.MustCompile(`\bAt(?:na|nr|zr|za)\|[A-Za-z0-9._~+/=|-]+`)
+	// A device's ADP token, whole: "{enc:...}{key:...}{iv:...}{name:...}{serial:...}"
+	// (labelledSecret's value would stop at its first "}").
+	adpToken = regexp.MustCompile(`\{enc:[^\s"]*`)
 	// A bearer or basic credential in a quoted header.
 	bearer = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+`)
 	email  = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`)
@@ -53,6 +56,7 @@ func RedactAccountIDs(s string) string {
 		return s
 	}
 	s = amazonToken.ReplaceAllLiteralString(s, Redacted)
+	s = adpToken.ReplaceAllLiteralString(s, Redacted)
 	s = bearer.ReplaceAllString(s, "${1} "+Redacted)
 	s = redactValues(labelledID, s)
 	s = redactValues(labelledSecret, s)

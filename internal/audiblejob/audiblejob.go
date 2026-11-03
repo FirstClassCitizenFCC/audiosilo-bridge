@@ -284,15 +284,9 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	}
 	res.Titles, res.Matched = len(titles), res.MatchedASIN+res.MatchedFuzzy
 
-	// Where a backup of each unmatched title would go, as the import would
-	// place it now (the console shows it on the title's row).
-	planner := newTitlePlanner(acct.LibraryID, p.Template, books, h.mappedMount(acct.LibraryID))
-	for i := range titles {
-		if titles[i].Match == nil {
-			titles[i].Planned = planner.plan(used[i])
-		}
+	if err := h.planUnmatched(ctx, acct.LibraryID, p.Template, books, titles, used); err != nil {
+		return nil, err
 	}
-	planner.close()
 
 	rep.Progress(jobs.Progress{Step: "reporting", Message: "Reporting the titles to the server", Total: len(titles)})
 	for start := 0; ; start += link.MaxAudibleTitles {
@@ -320,6 +314,34 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	h.o.Log.Info("audible: polled", "account", acct.ID, "titles", res.Titles, "matched", res.Matched, "contested", res.Contested,
 		"enriched", res.Enriched, "enrich_failed", res.EnrichFailed, "enrich_deferred", res.EnrichDeferred)
 	return res, nil
+}
+
+// planUnmatched sets each unmatched title's Planned: where a backup of it
+// would go, as the import would place it now (the console shows it on the
+// title's row; used[i] is titles[i]'s record). The planner (and the library's
+// mount) is opened only when a title needs a plan, and the disk reads stop
+// with the poll.
+func (h *Handler) planUnmatched(ctx context.Context, libraryID int64, template string, books []link.LibraryBook,
+	titles []link.AudibleTitle, used []source.Record) error {
+	var planner *titlePlanner
+	defer func() {
+		if planner != nil {
+			planner.close()
+		}
+	}()
+	for i := range titles {
+		if titles[i].Match != nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if planner == nil {
+			planner = newTitlePlanner(libraryID, template, books, h.mappedMount(libraryID))
+		}
+		titles[i].Planned = planner.plan(used[i])
+	}
+	return nil
 }
 
 // mappedMount is where the Bridge sees the books library id when it is mapped
