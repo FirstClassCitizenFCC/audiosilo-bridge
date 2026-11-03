@@ -61,6 +61,9 @@ func TestAccountAgainstTheFake(t *testing.T) {
 	if calls := fake.Calls(); len(calls.Registered) != 1 || !strings.HasSuffix(calls.Registered[0].DeviceName, audible.DeviceName) {
 		t.Fatalf("registered = %+v", calls.Registered)
 	}
+	if a.DeviceProfile != audible.ProfileVersion || OldProfile(a) {
+		t.Fatalf("the sign-in's profile = %q", a.DeviceProfile)
+	}
 	recs, err := m.Library(context.Background(), a.ID)
 	if err != nil || len(recs) != len(audiblefake.Fixtures) {
 		t.Fatalf("library = %d, %v", len(recs), err)

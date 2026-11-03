@@ -503,6 +503,10 @@ func TestImportCodes(t *testing.T) {
 			e.accts.licErr = []error{fmt.Errorf("%w: B0FAKE0002 (Throttled)", audible.ErrDenied)}
 		}, code: CodeRefused},
 		{name: "license: refused", setup: func(e *importEnv) { e.accts.licErr = []error{audibleacct.ErrRefused} }, code: CodeRefused},
+		// A device on an older profile: the account's to fix, not the title's.
+		{name: "license: throttled device", setup: func(e *importEnv) {
+			e.accts.licErr = []error{fmt.Errorf("%w: B0FAKE0002 (%s)", audible.ErrThrottled, amazonRefusal)}
+		}, code: CodeRefused},
 		{name: "exists", setup: func(e *importEnv) {
 			p := filepath.Join(e.root, filepath.FromSlash(copperGrove))
 			_ = os.MkdirAll(filepath.Dir(p), 0o755)

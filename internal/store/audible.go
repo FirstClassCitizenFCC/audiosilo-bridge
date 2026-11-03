@@ -30,6 +30,9 @@ type AudibleAccount struct {
 	LastMatched int    `json:"last_matched"`
 	RefusedAt   string `json:"refused_at"`
 	LastError   string `json:"last_error"`
+	// DeviceProfile is the device profile the sign-in registered with
+	// (audible.ProfileVersion then, migration 0010; "" before it was kept).
+	DeviceProfile string `json:"device_profile"`
 }
 
 // OnOtherServer reports whether a is mapped on a server other than serverID
@@ -39,12 +42,12 @@ func (a AudibleAccount) OnOtherServer(serverID string) bool {
 }
 
 const audibleColumns = `id, label, marketplace, customer_hash, server_id, user_id, user_name, library_id, policy, sync,
-	created_at, last_ok_at, last_poll_at, last_titles, last_matched, refused_at, last_error`
+	created_at, last_ok_at, last_poll_at, last_titles, last_matched, refused_at, last_error, device_profile`
 
 func scanAudibleAccount(row interface{ Scan(...any) error }) (AudibleAccount, error) {
 	var a AudibleAccount
 	err := row.Scan(&a.ID, &a.Label, &a.Marketplace, &a.CustomerHash, &a.ServerID, &a.UserID, &a.UserName, &a.LibraryID,
-		&a.Policy, &a.Sync, &a.CreatedAt, &a.LastOKAt, &a.LastPollAt, &a.LastTitles, &a.LastMatched, &a.RefusedAt, &a.LastError)
+		&a.Policy, &a.Sync, &a.CreatedAt, &a.LastOKAt, &a.LastPollAt, &a.LastTitles, &a.LastMatched, &a.RefusedAt, &a.LastError, &a.DeviceProfile)
 	return a, err
 }
 
@@ -91,19 +94,21 @@ func (db *DB) AudibleAccountByCustomer(ctx context.Context, hash, marketplace st
 }
 
 // SignInAudibleAccount records a new sign-in of a (insert, or a known id's
-// sign-in replaced): its label, marketplace, customer hash and mapping are a's,
-// it works as of at, and any refusal or error is forgotten. A known account
-// keeps its created_at and poll counts.
+// sign-in replaced): its label, marketplace, customer hash, mapping and device
+// profile are a's, it works as of at, and any refusal or error is forgotten. A
+// known account keeps its created_at and poll counts.
 func (db *DB) SignInAudibleAccount(ctx context.Context, a AudibleAccount, at time.Time) error {
 	ts := timestamp(at)
 	_, err := db.sql.ExecContext(ctx, `INSERT INTO audible_accounts (id, label, marketplace, customer_hash, server_id, user_id,
-			user_name, library_id, policy, sync, created_at, last_ok_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			user_name, library_id, policy, sync, created_at, last_ok_at, device_profile)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET label = excluded.label, marketplace = excluded.marketplace,
 			customer_hash = excluded.customer_hash, server_id = excluded.server_id, user_id = excluded.user_id,
 			user_name = excluded.user_name, library_id = excluded.library_id, policy = excluded.policy,
-			sync = excluded.sync, last_ok_at = excluded.last_ok_at, refused_at = '', last_error = ''`,
-		a.ID, a.Label, a.Marketplace, a.CustomerHash, a.ServerID, a.UserID, a.UserName, a.LibraryID, a.Policy, a.Sync, ts, ts)
+			sync = excluded.sync, last_ok_at = excluded.last_ok_at, device_profile = excluded.device_profile,
+			refused_at = '', last_error = ''`,
+		a.ID, a.Label, a.Marketplace, a.CustomerHash, a.ServerID, a.UserID, a.UserName, a.LibraryID, a.Policy, a.Sync, ts, ts,
+		a.DeviceProfile)
 	return err
 }
 

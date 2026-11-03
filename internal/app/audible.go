@@ -96,7 +96,7 @@ func (b *Bridge) Audible(ctx context.Context) api.AudibleAccounts {
 			UserID: a.UserID, UserName: a.UserName, LibraryID: a.LibraryID, LibraryName: library,
 			Policy: a.Policy, Sync: a.Sync, CreatedAt: a.CreatedAt, LastOKAt: a.LastOKAt, LastPollAt: a.LastPollAt,
 			LastTitles: a.LastTitles, LastMatched: a.LastMatched, Refused: a.RefusedAt != "", RefusedAt: a.RefusedAt,
-			LastError: a.LastError, OtherServer: other})
+			LastError: a.LastError, OtherServer: other, OldProfile: audibleacct.OldProfile(a)})
 	}
 	cl := b.conn.Client()
 	out.Paired = cl != nil
@@ -220,8 +220,11 @@ func (b *Bridge) audibleSetup(ctx context.Context) setup.Audible {
 	}
 	out := setup.Audible{Accounts: len(accts)}
 	for _, a := range accts {
-		if a.RefusedAt != "" {
+		switch {
+		case a.RefusedAt != "":
 			out.Refused++
+		case audibleacct.OldProfile(a):
+			out.OldProfile++
 		}
 	}
 	return out
