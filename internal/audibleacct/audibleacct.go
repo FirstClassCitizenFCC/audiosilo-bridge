@@ -155,6 +155,10 @@ type Manager struct {
 
 	mu     sync.Mutex
 	logins map[string]login
+	// finishMu serialises the part of Finish after the registration: two
+	// sign-ins of the same Amazon account finishing at once would both find no
+	// account and make two. Held across network calls; sign-ins are rare.
+	finishMu sync.Mutex
 }
 
 // login is a sign-in in progress: what Register needs once the admin pastes
@@ -335,6 +339,12 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 				"step", why, "err", derr)
 		}
 	}
+	// One sign-in at a time from the lookup on: the later of two of the same
+	// Amazon account finds the earlier's account and replaces it (its device
+	// deregistered), as any sign-in again does. The store's unique index on
+	// (customer_hash, marketplace) refuses a second row should anything else race.
+	m.finishMu.Lock()
+	defer m.finishMu.Unlock()
 	hash := customerHash(creds.CustomerID)
 	prev, perr := m.o.DB.AudibleAccountByCustomer(ctx, hash, l.mp.Code)
 	switch {

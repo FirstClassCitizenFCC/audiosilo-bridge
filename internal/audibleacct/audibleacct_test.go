@@ -44,6 +44,7 @@ type stubService struct {
 	deregistered []string                                           // device serials
 	deregErr     error
 	customer     string
+	barrier      *sync.WaitGroup // when set, each Register waits on it after its Done
 }
 
 func (s *stubService) AuthorizeURL(mp audible.Marketplace, pkce audible.PKCE, serial string) string {
@@ -51,6 +52,10 @@ func (s *stubService) AuthorizeURL(mp audible.Marketplace, pkce audible.PKCE, se
 }
 
 func (s *stubService) Register(_ context.Context, mp audible.Marketplace, code string, _ audible.PKCE, serial string) (audible.Credentials, error) {
+	if s.barrier != nil {
+		s.barrier.Done()
+		s.barrier.Wait()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.registerErr != nil {
@@ -352,6 +357,59 @@ func TestSignInAgainReplacesTheDevice(t *testing.T) {
 	if list, _ := e.m.Accounts(context.Background()); len(list) != 2 {
 		t.Fatalf("accounts = %+v", list)
 	}
+}
+
+// Two sign-ins of one Amazon account finishing at once (both past Amazon's
+// registration before either looks for the account) make one account: the
+// later replaces the earlier, whose device is deregistered.
+func TestConcurrentSignInsOfOneAmazonAccount(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	logins := make([]string, 2)
+	for i := range logins {
+		st, err := e.m.Start("us")
+		if err != nil {
+			t.Fatal(err)
+		}
+		logins[i] = st.Login
+	}
+	var barrier sync.WaitGroup
+	barrier.Add(len(logins))
+	e.svc.barrier = &barrier
+	got := make([]store.AudibleAccount, len(logins))
+	errs := make([]error, len(logins))
+	var wg sync.WaitGroup
+	for i, login := range logins {
+		wg.Go(func() {
+			got[i], errs[i] = e.m.Finish(context.Background(), e.srv, "srv-1", Finish{Login: login,
+				RedirectURL: "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=" + stubCode, Mapping: mapping()})
+		})
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("sign-in %d: %v", i, err)
+		}
+	}
+	if got[0].ID != got[1].ID {
+		t.Fatalf("two accounts: %s and %s", got[0].ID, got[1].ID)
+	}
+	if list, _ := e.m.Accounts(context.Background()); len(list) != 1 {
+		t.Fatalf("accounts = %+v", list)
+	}
+	kept, err := e.m.credentials(got[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.svc.mu.Lock()
+	defer e.svc.mu.Unlock()
+	if e.svc.n != 2 || len(e.svc.deregistered) != 1 || e.svc.deregistered[0] == kept.DeviceSerial {
+		t.Fatalf("registered %d, deregistered %v, the vault keeps %s", e.svc.n, e.svc.deregistered, kept.DeviceSerial)
+	}
+	if len(e.srv.deleted) != 0 {
+		t.Fatalf("the server lost the account: %v", e.srv.deleted)
+	}
+	e.noSecrets(t)
 }
 
 // A sign-in again that fails once the server recorded it puts the account back

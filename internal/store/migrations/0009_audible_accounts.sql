@@ -29,4 +29,8 @@ CREATE TABLE audible_accounts (
     refused_at    TEXT NOT NULL DEFAULT '',
     last_error    TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX audible_accounts_customer ON audible_accounts(customer_hash);
+-- One account per Amazon account and store: a second sign-in replaces the
+-- first (audibleacct.Finish, which also serialises sign-ins). An account whose
+-- customer id Amazon didn't send ('') is never matched, so it is left out.
+CREATE UNIQUE INDEX audible_accounts_customer ON audible_accounts(customer_hash, marketplace)
+    WHERE customer_hash <> '';

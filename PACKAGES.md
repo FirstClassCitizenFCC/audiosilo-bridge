@@ -1312,6 +1312,7 @@ internal/
             mapping was last recorded on), user_id/user_name, library_id, policy,
             sync, created_at, last_ok_at, last_poll_at, last_titles, last_matched,
             refused_at, last_error; NO credential (the vault's audible_<id>).
+            Unique on (customer_hash, marketplace) where the hash isn't empty.
             SignInAudibleAccount upserts (a sign-in again keeps created_at and the
             counts, clears a refusal); AudiblePolled clears refusal and error. 0007 adds podcast_shows, a credential-free cache keyed by
             (server_id, show_id), indexed by server/library/feed hash. An empty
@@ -2030,8 +2031,9 @@ internal/
             only this device; refreshes an access token within 2 min of expiry
             first; the caller forgets locally FIRST); Download resumes a partial file
             with a Range (206 from its end appended, anything else starts again, a
-            416 at its size is done; partial bytes kept on failure for the next
-            license's URL) and refuses past MaxBytes (default 4 GiB) keeping
+            416 at its size is done; a failure leaves the partial in place but
+            nothing reuses it in 4a: 4b must check If-Range or the size before
+            resuming one under a new license's URL) and refuses past MaxBytes (default 4 GiB) keeping
             nothing, its errors never naming the presigned URL (a request that got
             no answer names its URL without the query); every call backs off
             on 429/503 (Retry-After seconds or date, else 2 s doubling, 4 attempts,
@@ -2084,7 +2086,9 @@ internal/
             device and the account as it was. A sign-in of an Amazon account already
             here (customer_hash + marketplace) replaces it: same id, the old device
             deregistered after (an earlier sign-in that can't be opened is logged:
-            its device stays). A name the Bridge made ("<person> (<STORE>)") follows
+            its device stays). Finish runs one at a time from the lookup on
+            (finishMu), so two sign-ins of one Amazon account finishing together
+            end as a sign-in again, not two accounts (the unique index backs it). A name the Bridge made ("<person> (<STORE>)") follows
             the person when Map or a sign-in again changes it; a typed one stays.
             Map records a new mapping on the server, then here. Remove forgets
             locally FIRST (vault, then row), then DELETEs on the server and

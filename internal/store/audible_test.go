@@ -73,3 +73,32 @@ func TestAudibleAccounts(t *testing.T) {
 		t.Fatalf("after delete = %+v", list)
 	}
 }
+
+// One account per Amazon account and marketplace: a second row for the same
+// pair is refused, another marketplace or an empty customer hash is not.
+func TestAudibleAccountsUniquePerCustomer(t *testing.T) {
+	ctx := context.Background()
+	db := open(t)
+	at := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	a := AudibleAccount{ID: "abcd1234", Label: "Chris", Marketplace: "us", CustomerHash: "h1", ServerID: "srv-1",
+		UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}
+	if err := db.SignInAudibleAccount(ctx, a, at); err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	b.ID = "efgh5678"
+	if err := db.SignInAudibleAccount(ctx, b, at); err == nil {
+		t.Fatal("a second account for one Amazon account and marketplace was stored")
+	}
+	b.Marketplace = "uk"
+	if err := db.SignInAudibleAccount(ctx, b, at); err != nil {
+		t.Fatalf("another marketplace: %v", err)
+	}
+	for _, id := range []string{"none0001", "none0002"} {
+		c := a
+		c.ID, c.CustomerHash = id, ""
+		if err := db.SignInAudibleAccount(ctx, c, at); err != nil {
+			t.Fatalf("an unknown customer: %v", err)
+		}
+	}
+}
