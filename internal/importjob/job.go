@@ -128,17 +128,15 @@ func ApplyDestinations(items []PlannedItem, dests map[string]string) {
 // series is a candidate under each of them (any one may be the series Audible
 // names). A book whose position is a range ("5-6": a pack or an omnibus, the
 // listing's reading of a folder code like LAM05-06) is matched by a range title
-// only (see MatchScored). It also counts how many records have claimed each
-// matched path (see Contested). Not safe for concurrent use.
+// only (see MatchScored). Not safe for concurrent use.
 type BookMatcher struct {
 	books  []link.LibraryBook
 	cands  []match.Book
-	people []people       // cands[i]'s normalised author and narrators
-	owner  []int          // cands[i] is a candidate for books[owner[i]]
-	span   []bool         // cands[i]'s book spans books: a range position in any series
-	claims map[string]int // matched path -> how many records claimed it
-	subset []match.Book   // reused per Match: the candidates past the person gate
-	subIdx []int          // subset[j] is cands[subIdx[j]]
+	people []people     // cands[i]'s normalised author and narrators
+	owner  []int        // cands[i] is a candidate for books[owner[i]]
+	span   []bool       // cands[i]'s book spans books: a range position in any series
+	subset []match.Book // reused per Match: the candidates past the person gate
+	subIdx []int        // subset[j] is cands[subIdx[j]]
 	opts   match.Options
 }
 
@@ -178,24 +176,24 @@ func (b people) passes(q people) bool {
 
 // NewBookMatcher builds a matcher over an already-fetched library book list.
 func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
-	m := &BookMatcher{books: books, claims: map[string]int{}, opts: match.ImportOptions()}
+	m := &BookMatcher{books: books, opts: match.ImportOptions()}
 	for i, b := range books {
 		base := match.Book{Title: b.Title, Author: Credit(b.Authors), ASIN: b.ASIN, Narrators: b.Narrators}
 		who := normalisedPeople(base.Author, base.Narrators)
-		add := func(c match.Book) {
-			m.cands = append(m.cands, c)
-			m.people = append(m.people, who)
-			m.owner = append(m.owner, i)
-		}
-		if len(b.Series) == 0 {
-			add(base)
-			m.span = append(m.span, false)
-			continue
-		}
 		spans := slices.ContainsFunc(b.Series, func(s link.SeriesRef) bool {
 			_, ok := rangeStart(s.Position)
 			return ok
 		})
+		add := func(c match.Book) {
+			m.cands = append(m.cands, c)
+			m.people = append(m.people, who)
+			m.owner = append(m.owner, i)
+			m.span = append(m.span, spans)
+		}
+		if len(b.Series) == 0 {
+			add(base)
+			continue
+		}
 		for _, s := range b.Series {
 			c := base
 			c.Series = s.Name
@@ -205,7 +203,6 @@ func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
 				c.SeriesIndex, _ = rangeStart(s.Position)
 			}
 			add(c)
-			m.span = append(m.span, spans)
 		}
 	}
 	return m
@@ -242,9 +239,7 @@ func (m *BookMatcher) MatchScored(rec source.Record) (link.LibraryBook, float64,
 	if !ok {
 		return link.LibraryBook{}, 0, false
 	}
-	b := m.books[m.owner[i]]
-	m.claims[b.Path]++
-	return b, score, true
+	return m.books[m.owner[i]], score, true
 }
 
 // rangePosition is a series position spanning books: "5-6", "0.5-4", "1 - 3".
@@ -292,21 +287,12 @@ func (m *BookMatcher) best(q match.Query, isRange bool) (int, float64, bool) {
 		}
 		return m.subIdx[j], score, true
 	}
-	single := func(i int) bool { return !m.span[i] }
-	if !isRange {
-		return pass(single)
+	if isRange {
+		if i, score, ok := pass(func(i int) bool { return m.span[i] && m.cands[i].SeriesIndex == q.Sequence }); ok {
+			return i, score, true
+		}
 	}
-	if i, score, ok := pass(func(i int) bool { return m.span[i] && m.cands[i].SeriesIndex == q.Sequence }); ok {
-		return i, score, true
-	}
-	return pass(single)
-}
-
-// Contested reports whether more than one record has matched path since the
-// matcher was built - meaning at least one of those matches is wrong, so nothing
-// identity-durable (like an ASIN backfill) should be derived from any of them.
-func (m *BookMatcher) Contested(path string) bool {
-	return m.claims[path] > 1
+	return pass(func(i int) bool { return !m.span[i] })
 }
 
 // Claim is one record's match: the book's path, the match's score and the

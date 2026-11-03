@@ -220,14 +220,19 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	// contested, so the console shows them as not here and a backup of
 	// everything can skip them.
 	keep := importjob.KeepBest(claims)
-	var hits []hit
-	contested := map[string]bool{}
-	for i, c := range claims {
+	claimed := map[string]int{} // path -> how many titles claimed it
+	for _, c := range claims {
 		if c.Path == "" {
 			continue
 		}
-		if matcher.Contested(c.Path) {
-			contested[c.Path] = true
+		if claimed[c.Path]++; claimed[c.Path] == 2 {
+			res.Contested++
+		}
+	}
+	var hits []hit
+	for i, c := range claims {
+		if c.Path == "" {
+			continue
 		}
 		if !keep[i] {
 			if titles[i].Reason == "" {
@@ -247,11 +252,11 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		// A book two titles claimed gets no ASIN: at least one of the claims
 		// was wrong. A preorder isn't out yet, so the book on disk is another
 		// edition: its ASIN would stay on that book for good.
-		if !contested[c.Path] && b.ASIN == "" && titles[i].State != link.AudiblePreorder {
+		if claimed[c.Path] == 1 && b.ASIN == "" && titles[i].State != link.AudiblePreorder {
 			hits = append(hits, hit{path: b.Path, asin: rec.ASIN})
 		}
 	}
-	res.Titles, res.Matched, res.Contested = len(titles), res.MatchedASIN+res.MatchedFuzzy, len(contested)
+	res.Titles, res.Matched = len(titles), res.MatchedASIN+res.MatchedFuzzy
 
 	rep.Progress(jobs.Progress{Step: "reporting", Message: "Reporting the titles to the server", Total: len(titles)})
 	for start := 0; ; start += link.MaxAudibleTitles {

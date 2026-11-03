@@ -136,7 +136,7 @@ func (it libItem) toRecord(now time.Time) source.Record {
 			rec.Sequence, rec.HasSequence = seq, true
 		}
 	}
-	date := it.releaseDate(now)
+	date, _ := it.dates(now)
 	rec.Year = yearFromDate(date)
 	rec.ReleaseDate = releaseDay(date)
 	return rec
@@ -162,33 +162,28 @@ func plausibleDate(s string, now time.Time) bool {
 	return now.IsZero() || !d.After(now.AddDate(maxAheadYears, 0, 0))
 }
 
-// releaseDate is the item's release date: release_date when it is plausible,
-// else issue_date when that is, else "" (unknown, which reads as released:
-// never withhold a real title on a placeholder date).
-func (it libItem) releaseDate(now time.Time) string {
+// dates is the item's release date and whether a date Audible sent was set
+// aside: release_date when it is plausible, else issue_date when that is, else
+// "" (unknown, which reads as released: never withhold a real title on a
+// placeholder date). odd is true when either non-blank field is implausible.
+func (it libItem) dates(now time.Time) (date string, odd bool) {
 	for _, d := range []string{it.ReleaseDate, it.IssueDate} {
-		if strings.TrimSpace(d) != "" && plausibleDate(d, now) {
-			return d
+		switch {
+		case strings.TrimSpace(d) == "":
+		case !plausibleDate(d, now):
+			odd = true
+		case date == "":
+			date = d
 		}
 	}
-	return ""
-}
-
-// oddDate reports whether a date Audible sent was set aside as implausible.
-func (it libItem) oddDate(now time.Time) bool {
-	for _, d := range []string{it.ReleaseDate, it.IssueDate} {
-		if strings.TrimSpace(d) != "" && !plausibleDate(d, now) {
-			return true
-		}
-	}
-	return false
+	return date, odd
 }
 
 // logOddDate logs, once per title a listing returns, the raw fields behind a
 // date it set aside, so a title stored oddly can be explained from the log.
 // Only library fields: never a token, the customer id or a request.
 func (it libItem) logOddDate(log *slog.Logger, now time.Time) {
-	if log == nil || !it.oddDate(now) {
+	if _, odd := it.dates(now); log == nil || !odd {
 		return
 	}
 	rights := "absent"
@@ -218,7 +213,7 @@ func (it libItem) unavailableReason(now time.Time) (reason string, preorder bool
 	if it.CustomerRights != nil && !it.CustomerRights.IsConsumableOffline {
 		return "Audible reports no download rights for this title (often a Plus/included title that left the catalog)", false
 	}
-	if ReleaseIsUpcoming(it.releaseDate(now), now) {
+	if date, _ := it.dates(now); ReleaseIsUpcoming(date, now) {
 		return "Not released yet (pre-order)", true
 	}
 	return "", false

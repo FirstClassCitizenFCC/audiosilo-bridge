@@ -2129,7 +2129,7 @@ internal/
             under ONE poll id (job, attempt and a random suffix), the last final (an
             empty library sends one empty final call, so the server marks every
             title gone), then Enrich (enrich.go) for each matched book without an
-            ASIN that no second title claimed (Contested) and no preorder matched
+            ASIN that no second title claimed (counted from the claims: contested) and no preorder matched
             (not out yet: another edition), PACED: one PUT per 200 ms, a 429 waits
             its Retry-After (else 2 s doubling) and halves the pace (to 2 s at the
             slowest), and a wait over 1 min, 5 429s in a row or 10 min of
@@ -2150,8 +2150,7 @@ internal/
             by a range title starting where it does, tried before the single
             volumes, never by a single volume, so it never takes a volume's ASIN
             by enrichment), MatchScored (the match's
-            score, match.ScoreASIN for an ASIN), Contested(path) (a path claimed by
-            two records: derive nothing durable, like an ASIN backfill), KeepBest
+            score, match.ScoreASIN for an ASIN), KeepBest
             (of the claims on one path the single best score keeps it; a tie keeps
             none, unless every tied claim is one WorkKey: folded title, folded
             author set and position, the same book owned twice), Plan(records, {Mode, Template, Books, Rejected}) (siblings by
