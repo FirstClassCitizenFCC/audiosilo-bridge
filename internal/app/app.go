@@ -23,6 +23,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/audibleacct"
 	"github.com/kodestar/audiosilo-bridge/internal/audiblejob"
+	"github.com/kodestar/audiosilo-bridge/internal/audiblesync"
 	"github.com/kodestar/audiosilo-bridge/internal/auth"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
@@ -93,8 +94,10 @@ type Bridge struct {
 	tokens     *contrib.TokenSource
 	github     *accounts.GitHub
 	agentCreds *accounts.Agent
-	// audible is the Audible accounts (Phase 4a): sign-ins sealed in the vault.
-	audible *audibleacct.Manager
+	// audible is the Audible accounts (Phase 4a): sign-ins sealed in the vault;
+	// audiblePush the position sync's push loop (Phase 4c).
+	audible     *audibleacct.Manager
+	audiblePush *audiblesync.Pusher
 	// est caches the heartbeat's estimates (estimates.go of the engine wiring).
 	est estimatesCache
 
@@ -218,9 +221,11 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	var audiblePoll *audiblejob.Handler
 	var audibleImport *audiblejob.Importer
 	b.audible, audiblePoll, audibleImport = b.newAudible(vault, db, opts.Logger, b.conn.Client, serverID)
+	var audibleSync *audiblesync.Handler
+	audibleSync, b.audiblePush = b.newAudibleSync(db, opts.Logger, serverID)
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
 		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ReadalongJob(), b.gen.ContributeJob(), corrector, podcasts, podcasts.PollJob(), podcasts.FetchJob(), podcasts.RetainJob(),
-		audiblePoll, audibleImport)
+		audiblePoll, audibleImport, audibleSync)
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }
@@ -322,10 +327,11 @@ func (b *Bridge) Run(ctx context.Context) error {
 		"key_source", string(b.keySrc), "paired", b.conn.Client() != nil)
 
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go func() { defer wg.Done(); b.runEngine(ctx) }()
 	go func() { defer wg.Done(); b.heartbeatLoop(ctx) }()
 	go func() { defer wg.Done(); b.runner.Run(ctx) }()
+	go func() { defer wg.Done(); b.audiblePush.Run(ctx) }()
 	serveErr := make(chan error, 1)
 	go func() {
 		defer wg.Done()

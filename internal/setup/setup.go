@@ -124,12 +124,17 @@ type GitHub struct {
 }
 
 // Audible is the Audible accounts: how many are signed in, how many Audible
-// refuses, and how many more have a device on an older profile (signed in, but
-// Amazon denies their licenses until they sign in again).
+// refuses (their backups and places wait for a sign-in again), and how many
+// more have a device on an older profile (signed in, but Amazon denies their
+// licenses until they sign in again). Phase 4c: SyncFailing counts the
+// accounts (not refused) whose last position sync failed, SyncError the first
+// one's reason; a sync failure never makes the item not done.
 type Audible struct {
-	Accounts   int
-	Refused    int
-	OldProfile int
+	Accounts    int
+	Refused     int
+	OldProfile  int
+	SyncFailing int
+	SyncError   string
 }
 
 // Inputs are what the checklist is made from.
@@ -240,8 +245,17 @@ func Checklist(in Inputs) link.Setup {
 		if a.OldProfile > 0 {
 			audible += " to keep backups working"
 		}
+		if a.Refused > 0 {
+			audible += "; places don't sync until then"
+		}
 	case a.Accounts > 0:
 		audible = plural(a.Accounts, "account", "accounts") + " signed in"
+	}
+	if a.SyncFailing > 0 {
+		audible += "; places not syncing for " + plural(a.SyncFailing, "account", "accounts")
+		if a.SyncError != "" {
+			audible += ": " + a.SyncError
+		}
 	}
 	add(ItemAudible, a.Accounts > 0 && a.Refused == 0 && a.OldProfile == 0, false, audible)
 	return out
