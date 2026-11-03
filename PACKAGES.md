@@ -1798,7 +1798,11 @@ internal/
             PutAudibleAccount / DeleteAudibleAccount (PUT/DELETE
             /bridge/audible/accounts/{account}; the delete is 204 known or not),
             PutAudibleTitles (<= MaxAudibleTitles 500 per call, poll_id + final; a
-            nil list sent as []; 404 unknown_account -> ErrUnknownAccount),
+            nil list sent as []; 404 unknown_account -> ErrUnknownAccount; each
+            AudibleTitle also carries contested_path (omitempty) and planned
+            (AudiblePlan {library_id, path, file, kind, siblings, state, conflict,
+            template}, null when matched; the Plan*/Conflict* constants), 4b owner
+            fixes, unreleased on both sides so no capability gate),
             LibraryBooks (limit <= MaxLibraryBooks 500) and Enrich (PUT
             .../enrichment?path= {"asin"}: 409 asin_set -> ErrASINSet, any 404 ->
             ErrNoBook). The server decodes titles and accounts strictly: send only
@@ -2176,8 +2180,10 @@ internal/
             tests walk the data dir and the log for every stub secret, and the
             tagged tests run the whole life against the fake. Deps: audible, link,
             secrets, source, store.
-  audiblejob/ Phase 4a: audible.poll (light lane; params exactly {"account"}, strict;
-            the server claims it with no library). Checks the account is this
+  audiblejob/ Phase 4a: audible.poll (light lane; params {"account", "template"}
+            strict (template, the account's path template, optional, <= 1024
+            bytes; an unknown field is refused); the server claims it with no
+            library). Checks the account is this
             Bridge's and was mapped on the paired server (else fails asking to map
             it again), lists the Audible library (a refusal is the account's, the
             job just fails), reads the account's books library on the server page
@@ -2187,11 +2193,30 @@ internal/
             importjob.BookMatcher (how = asin when the book's ASIN is the title's,
             else fuzzy; a book path goes out only as "." (a library that is one
             book) or a clean path below the root, as the server takes); a book
-            several titles claimed keeps the match on the best score only
-            (importjob.KeepBest: a tie keeps none unless it is one work owned
-            twice, which all keep: dropping it would download it again), the
-            others go out unmatched with Reason link.ReasonContested ("contested",
-            on an available title; 4b's back-up-everything skips them); cuts a title's authors to 20 (the
+            several titles claimed keeps the match on the one whose series number
+            is the book's, else the best score (importjob.KeepBest, each claim's
+            Agrees/Disagrees from importjob.PositionAgrees: a tie keeps none unless
+            it is one work owned twice, which all keep: dropping it would download
+            it again), the others go out unmatched, with Reason
+            link.ReasonContested ("contested", on an available title; 4b's
+            back-up-everything skips them) and ContestedPath (the book's path,
+            contested_path, omitted otherwise), except a title whose number
+            DISAGREES with the book's (another volume: plainly not here, no
+            reason). Each unmatched title (contested included; never a matched
+            one) carries Planned (plan.go, titlePlanner): where a backup would go,
+            the import's own destination() for the same record, books and the
+            params' template (no dest_path: the console's override is checked
+            when the backup starts), {library_id, path (after spelled), file, kind
+            series_existing|series_new|standalone (the placement's), siblings
+            (the series' books listed), state new|joins|exists|error, conflict
+            (exists: file|book|audio, vacant's refusal; error: the message, path
+            and file ""), template (as the params gave it)}; joins = siblings, or
+            the path's top folder is a listed book's or (mapped) a folder at the
+            mount. Disk checks (spelled, vacant) run only when Options.Libraries
+            reports the library mapped (writable or not) at Options.Mount's path,
+            through a per-poll dirCache (each folder listed once, a folder that
+            doesn't exist never read); otherwise the books listing alone (a
+            listed book's folder is exists/book). No Amazon request. Cuts a title's authors to 20 (the
             server refuses a whole call over more), PUTs the titles in calls of 500
             under ONE poll id (job, attempt and a random suffix), the last final (an
             empty library sends one empty final call, so the server marks every
@@ -2221,7 +2246,9 @@ internal/
             not_writable (progress.park.code, Reporter.Park) and waits for it to
             come back, then runs on unparked. Then the title (preorder
             not_released, no rights / not in the library no_rights, a refusal
-            audible_refused) and the destination (Destination: dest_path FIRST, the
+            audible_refused) and the destination (Destination, a wrapper over
+            destination(), which also returns the plan's kind and siblings and
+            which the poll's plans share: dest_path FIRST, the
             template not consulted, else the template, else Auto from the paged
             books listing's siblings, an empty author folder dropped; a last
             segment ending .m4b, .m4a or .mp4 names the file, another audio
@@ -2235,7 +2262,10 @@ internal/
             destination exists, and so is a destination inside a book the
             library already has (its folder is a listed book's, or already
             holds audio: a backup is a book of its own, and the server refuses a
-            done import whose book isn't the title's). License (denials mapped as the title's; a title
+            done import whose book isn't the title's). spelled and vacant are free
+            functions over a transfer.LibraryFS (the import's methods open the
+            mount's os.Root and call them; vacant also returns the conflict:
+            link.ConflictFile|Book|Audio; listedBook is its books-listing part). License (denials mapped as the title's; a title
             only offered as a DRM-free MP3 fails without a code: not backed up
             yet), download to <data>/audible/tmp/<acct>-<asin>.aaxc.part (free
             space: the tmp folder 2.2x the size less what the partial holds, the
@@ -2297,9 +2327,23 @@ internal/
             none, unless every tied claim is one WorkKey: folded title, folded
             author set and position, the same book owned twice, and a claim of the
             keeper's work keeps it at any score; a title that folds to nothing has
-            no key), SpanMismatch (a range record on a book with no
+            no key; 4b owner fixes: when the best is no ASIN match and some claims'
+            position agrees with the book's (Claim.Agrees), only those compete, so
+            the volume whose number is the book's keeps it even over a higher
+            score; KeepBest also returns contested: every losing claim but one
+            whose position disagrees (Claim.Disagrees)), PositionAgrees(rec, b)
+            (agrees/disagrees: rec's SeriesPosition as one number against b's
+            position in rec's series, else b's main series' (the listing puts a
+            folder code's number there, whatever that series is called); a range
+            or no number on either side is neither; MatchScored is not gated by
+            it), SpanMismatch (a range record on a book with no
             range: no enrichment), Plan(records, {Mode, Template, Books}) (destinations
-            only, each item's RelPath: siblings by tolerant author + series, AuthorFolders reusing an
+            only, each item's RelPath, Kind (placement.Kind) and Siblings (the
+            series' books listed); Planner (NewPlanner(books), Plan(rec, mode,
+            template)) is Plan for many records over one library: AuthorFolders
+            once and the books indexed by normalized series, the same siblings in
+            the same order as SiblingsFromBooks; a template error keeps the
+            item's Kind and Siblings: siblings by tolerant author + series, AuthorFolders reusing an
             existing author folder spelling; the name is match.CleanTitle with
             the series as the title opens it, article included (seriesAsTitled:
             "The Orchard Cycle: Books 1-3" is "Books 1-3", not "The  - Books 1-3"); no per-record server query; whether
@@ -2320,7 +2364,9 @@ internal/
             imported).
   transfer/ Local only (SFTP and Index were not kept): CleanRel (mapping.SafeJoin's
             rules, no empty path, no hidden (dot) segment anywhere: the server
-            never indexes one), OnDisk(root, rel) (rel as the disk spells the
+            never indexes one), OnDisk(root, rel) = OnDiskFS(root.FS(), rel) over
+            a LibraryFS (fs.ReadLinkFS + fs.ReadDirFS: os.Root.FS(), or the poll's
+            caching view) (rel as the disk spells the
             folders of it that exist, by an exact name or os.SameFile in a listing,
             the rest as given; an Lstat error other than not-exist is an error) and
             Place (Phase 4b, hardened before it writes a library): the mapping's

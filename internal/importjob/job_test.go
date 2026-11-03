@@ -1,6 +1,7 @@
 package importjob
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
@@ -148,5 +149,53 @@ func TestPlanSeriesNumberTitle(t *testing.T) {
 		if items[0].RelPath != c.want {
 			t.Errorf("%s (%q): got %q, want %q", c.name, c.title, items[0].RelPath, c.want)
 		}
+	}
+}
+
+// TestPlannerKindAndSiblings: each item says how it was placed and how many of
+// its series' books the library has; the index finds the same siblings, in the
+// same order, as SiblingsFromBooks; a template that can't place a record still
+// says its kind.
+func TestPlannerKindAndSiblings(t *testing.T) {
+	books := []link.LibraryBook{
+		{Path: "Will Wight/Cradle/C01 - Unsouled", Title: "Unsouled", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Cradle", Position: "1"}}},
+		{Path: "Other/Cradle/X01", Title: "Other Cradle", Authors: []string{"Someone Else"}, Series: []link.SeriesRef{{Name: "Cradle", Position: "1"}}},
+		{Path: "Will Wight/Cradle/C03 - Blackflame", Title: "Blackflame", Authors: []string{"Will Wight"},
+			Series: []link.SeriesRef{{Name: "The Cradle", Position: "3"}, {Name: "cradle", Position: "3"}}},
+		{Path: "Will Wight/Elder Empire/EE01", Title: "Of Sea and Shadow", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Elder Empire", Position: "1"}}},
+	}
+	recs := []source.Record{
+		{FileName: "Soulsmith.m4b", Title: "Soulsmith", Author: "Will Wight", Series: "Cradle", Sequence: 2, HasSequence: true},
+		{FileName: "Traveler.m4b", Title: "The Traveler's Gate", Author: "Will Wight", Series: "Traveler's Gate", Sequence: 1, HasSequence: true},
+		{FileName: "Lost.m4b", Title: "Lost", Author: "Will Wight"},
+	}
+	p := NewPlanner(books)
+	for i, want := range []struct {
+		kind     placement.Kind
+		siblings int
+	}{{placement.SeriesExisting, 2}, {placement.SeriesNew, 0}, {placement.Standalone, 0}} {
+		item, err := p.Plan(recs[i], placement.ModeAuto, "")
+		if err != nil || item.Kind != want.kind || item.Siblings != want.siblings {
+			t.Errorf("%s: %+v, %v; want %v with %d siblings", recs[i].Title, item, err, want.kind, want.siblings)
+		}
+		var viaList []string
+		for _, b := range SiblingsFromBooks(books, recs[i].Author, recs[i].Series) {
+			viaList = append(viaList, b.Path)
+		}
+		var viaIndex []string
+		for _, b := range p.siblings(recs[i].Author, recs[i].Series) {
+			viaIndex = append(viaIndex, b.Path)
+		}
+		if strings.Join(viaList, "|") != strings.Join(viaIndex, "|") {
+			t.Errorf("%s: siblings %v, want %v", recs[i].Title, viaIndex, viaList)
+		}
+		items, err := Plan(recs[i:i+1], PlanOptions{Mode: placement.ModeAuto, Books: books})
+		if err != nil || items[0] != item {
+			t.Errorf("%s: Plan = %+v, %v; the planner %+v", recs[i].Title, items, err, item)
+		}
+	}
+	item, err := p.Plan(recs[0], placement.ModeTemplate, "{Author}/{Nope}")
+	if err == nil || item.RelPath != "" || item.Kind != placement.SeriesExisting || item.Siblings != 2 {
+		t.Errorf("a bad template = %+v, %v", item, err)
 	}
 }

@@ -192,61 +192,74 @@ func TestEnrichCancelled(t *testing.T) {
 }
 
 // TestPollContestedKeepsTheBest: titles claiming one book keep the match on
-// the best score only; a tie between two works keeps none; the same work
-// owned twice keeps both; the losers go out with the reason contested; a
-// contested book is never enriched.
+// the one whose series number is the book's, else the best score; a tie
+// between two works nothing tells apart keeps none; the same work owned twice
+// keeps both; the losers go out with the reason contested and the book's path,
+// unless their number says they are another volume (no reason: plainly not
+// here); a contested book is never enriched. The Lanterns book has no number
+// ("") or its folder code's ("2", on a main series Audible doesn't name).
 func TestPollContestedKeepsTheBest(t *testing.T) {
 	t.Parallel()
-	fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{
-		{Path: "Val/Road to Craft/RC03", Title: "Road to Craft 3", Authors: []string{"Val Erio"},
-			Series: []link.SeriesRef{{Name: "Road to Craft", Position: "3"}}},
-		{Path: "Aar/Lantern Street/LS02 - Moon over Tidewater", Title: "Moon over Tidewater: Lanterns of London, Book 2",
-			Authors: []string{"Ben Aar"}, Series: []link.SeriesRef{{Name: "Lantern Street", Position: ""}}},
-		{Path: "Prat/Discs/D03 - Equal Measures", Title: "Equal Measures", Authors: []string{"Tess Prat"},
-			Series: []link.SeriesRef{{Name: "Discs", Position: "3"}}},
-	}}
-	accts := &stubAccounts{acct: account(), recs: []source.Record{
-		{ASIN: "B0CONT0001", Title: "Road to Craft", Author: "Val Erio", Series: "Road to Craft", SeriesPosition: "1", Sequence: 1, HasSequence: true},
-		{ASIN: "B0CONT0003", Title: "Road to Craft 3", Author: "Val Erio", Series: "Road to Craft", SeriesPosition: "3", Sequence: 3, HasSequence: true},
-		{ASIN: "B0CONT0011", Title: "Lanterns of London", Author: "Ben Aar", Series: "Lanterns of London", SeriesPosition: "1", Sequence: 1, HasSequence: true},
-		{ASIN: "B0CONT0012", Title: "Moon over Tidewater", Author: "Ben Aar", Series: "Lanterns of London", SeriesPosition: "2", Sequence: 2, HasSequence: true},
-		{ASIN: "B0CONT0021", Title: "Equal Measures", Author: "Tess Prat", Series: "Discs", SeriesPosition: "3", Sequence: 3, HasSequence: true},
-		{ASIN: "B0CONT0022", Title: "Equal Measures", Author: "Tess Prat", Series: "Discs", SeriesPosition: "3", Sequence: 3, HasSequence: true},
-		{ASIN: "B0CONT0031", Title: "A Title Nowhere", Author: "Tess Prat"},
-	}}
-	h := setup(t, fs, accts)
-	res, err := run(t, h, "acct0001")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[string]string{}
-	for _, tt := range fs.calls[0].Titles {
-		if tt.Match != nil {
-			got[tt.ASIN] = tt.Match.Path
-		}
-	}
-	want := map[string]string{
-		"B0CONT0003": "Val/Road to Craft/RC03",
-		"B0CONT0021": "Prat/Discs/D03 - Equal Measures",
-		"B0CONT0022": "Prat/Discs/D03 - Equal Measures",
-	}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("matches = %v, want %v", got, want)
-	}
-	// The titles that lost a contested book say so; a title that matched
-	// nothing, or kept its match, carries no reason.
-	for _, tt := range fs.calls[0].Titles {
-		wantReason := ""
-		switch tt.ASIN {
-		case "B0CONT0001", "B0CONT0011", "B0CONT0012":
-			wantReason = link.ReasonContested
-		}
-		if tt.Reason != wantReason || tt.State != link.AudibleAvailable {
-			t.Errorf("%s: state %q reason %q, want available %q", tt.ASIN, tt.State, tt.Reason, wantReason)
-		}
-	}
-	if res.Matched != 3 || res.Contested != 3 || res.Enriched != 0 || len(fs.enriched) != 0 {
-		t.Fatalf("result = %+v, enriched %v", res, fs.enriched)
+	for _, lt := range []string{"", "2"} {
+		t.Run("lanterns "+lt, func(t *testing.T) {
+			t.Parallel()
+			const ls02 = "Aar/Lantern Street/LS02 - Moon over Tidewater"
+			fs := &fakeServer{pageSize: 500, books: []link.LibraryBook{
+				{Path: "Val/Road to Craft/RC03", Title: "Road to Craft 3", Authors: []string{"Val Erio"},
+					Series: []link.SeriesRef{{Name: "Road to Craft", Position: "3"}}},
+				{Path: ls02, Title: "Moon over Tidewater: Lanterns of London, Book 2",
+					Authors: []string{"Ben Aar"}, Series: []link.SeriesRef{{Name: "Lantern Street", Position: lt}}},
+				{Path: "Prat/Discs/D03 - Equal Measures", Title: "Equal Measures", Authors: []string{"Tess Prat"},
+					Series: []link.SeriesRef{{Name: "Discs", Position: "3"}}},
+			}}
+			accts := &stubAccounts{acct: account(), recs: []source.Record{
+				{ASIN: "B0CONT0001", Title: "Road to Craft", Author: "Val Erio", Series: "Road to Craft", SeriesPosition: "1", Sequence: 1, HasSequence: true},
+				{ASIN: "B0CONT0003", Title: "Road to Craft 3", Author: "Val Erio", Series: "Road to Craft", SeriesPosition: "3", Sequence: 3, HasSequence: true},
+				{ASIN: "B0CONT0011", Title: "Lanterns of London", Author: "Ben Aar", Series: "Lanterns of London", SeriesPosition: "1", Sequence: 1, HasSequence: true},
+				{ASIN: "B0CONT0012", Title: "Moon over Tidewater", Author: "Ben Aar", Series: "Lanterns of London", SeriesPosition: "2", Sequence: 2, HasSequence: true},
+				{ASIN: "B0CONT0021", Title: "Equal Measures", Author: "Tess Prat", Series: "Discs", SeriesPosition: "3", Sequence: 3, HasSequence: true},
+				{ASIN: "B0CONT0022", Title: "Equal Measures", Author: "Tess Prat", Series: "Discs", SeriesPosition: "3", Sequence: 3, HasSequence: true},
+				{ASIN: "B0CONT0031", Title: "A Title Nowhere", Author: "Tess Prat"},
+			}}
+			h := setup(t, fs, accts)
+			res, err := run(t, h, "acct0001")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]string{}
+			for _, tt := range fs.calls[0].Titles {
+				if tt.Match != nil {
+					got[tt.ASIN] = tt.Match.Path
+				}
+			}
+			want := map[string]string{
+				"B0CONT0003": "Val/Road to Craft/RC03",
+				"B0CONT0021": "Prat/Discs/D03 - Equal Measures",
+				"B0CONT0022": "Prat/Discs/D03 - Equal Measures",
+			}
+			contested := map[string]string{"B0CONT0011": ls02, "B0CONT0012": ls02} // nothing tells them apart
+			if lt == "2" {
+				want["B0CONT0012"], contested = ls02, map[string]string{} // book 2 by its number; book 1 is another volume
+			}
+			if fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("matches = %v, want %v", got, want)
+			}
+			// The titles that lost a book they may be say so and name it; a
+			// title of another volume, one that matched nothing, or one that
+			// kept its match carries no reason.
+			for _, tt := range fs.calls[0].Titles {
+				wantReason, wantPath := "", contested[tt.ASIN]
+				if wantPath != "" {
+					wantReason = link.ReasonContested
+				}
+				if tt.Reason != wantReason || tt.ContestedPath != wantPath || tt.State != link.AudibleAvailable {
+					t.Errorf("%s: state %q reason %q contested_path %q, want available %q %q", tt.ASIN, tt.State, tt.Reason, tt.ContestedPath, wantReason, wantPath)
+				}
+			}
+			if res.Matched != len(want) || res.Contested != 3 || res.Enriched != 0 || len(fs.enriched) != 0 {
+				t.Fatalf("result = %+v, enriched %v", res, fs.enriched)
+			}
+		})
 	}
 }
 

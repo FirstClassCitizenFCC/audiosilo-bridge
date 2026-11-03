@@ -109,17 +109,29 @@ func CleanRel(rel string) (string, error) {
 // takes the name its folder lists, since the server indexes a path only as it
 // is spelled on disk. What doesn't exist yet keeps rel's spelling.
 func OnDisk(root *os.Root, rel string) (string, error) {
+	return OnDiskFS(root.FS().(LibraryFS), rel)
+}
+
+// LibraryFS is a library's mount as OnDiskFS reads it: os.Root.FS(), or a
+// view over it (one that lists each folder once, say).
+type LibraryFS interface {
+	fs.ReadLinkFS
+	fs.ReadDirFS
+}
+
+// OnDiskFS is OnDisk over fsys.
+func OnDiskFS(fsys LibraryFS, rel string) (string, error) {
 	segs := strings.Split(rel, "/")
 	dir := "."
 	for i, seg := range segs {
-		st, err := root.Lstat(path.Join(dir, seg))
+		st, err := fsys.Lstat(path.Join(dir, seg))
 		if errors.Is(err, fs.ErrNotExist) {
 			return path.Join(append([]string{dir}, segs[i:]...)...), nil
 		}
 		if err != nil {
 			return "", err
 		}
-		name, err := listedName(root, dir, seg, st)
+		name, err := listedName(fsys, dir, seg, st)
 		if err != nil {
 			return "", err
 		}
@@ -130,8 +142,8 @@ func OnDisk(root *os.Root, rel string) (string, error) {
 
 // listedName is the name dir lists for the entry found as seg (st): seg when
 // it is listed as is, else the listed entry that is the same file.
-func listedName(root *os.Root, dir, seg string, st fs.FileInfo) (string, error) {
-	entries, err := fs.ReadDir(root.FS(), dir)
+func listedName(fsys LibraryFS, dir, seg string, st fs.FileInfo) (string, error) {
+	entries, err := fsys.ReadDir(dir)
 	if err != nil {
 		return "", err
 	}

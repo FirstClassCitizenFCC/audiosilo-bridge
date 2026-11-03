@@ -32,6 +32,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/importjob"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/source"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -76,7 +77,12 @@ type Options struct {
 	// Server is the link (nil while unpaired); ServerID the pairing's server.
 	Server   func() Server
 	ServerID func() string
-	Log      *slog.Logger
+	// Libraries and Mount say whether the account's library is mapped at the
+	// Bridge and where, for the unmatched titles' planned destinations (nil:
+	// the books listing only).
+	Libraries Libraries
+	Mount     mapping.MountFunc
+	Log       *slog.Logger
 }
 
 // Handler runs audible.poll.
@@ -104,9 +110,11 @@ func (h *Handler) Kind() string { return Kind }
 // backfill (up to enrichBudget, the rest deferred to the next poll).
 func (h *Handler) Lane() string { return jobs.LaneLight }
 
-// Params are audible.poll's params.
+// Params are audible.poll's params: the account, and its path template ("" or
+// absent for Auto), which the unmatched titles' planned destinations use.
 type Params struct {
-	Account string `json:"account"`
+	Account  string `json:"account"`
+	Template string `json:"template,omitempty"`
 }
 
 // ParseParams reads the params strictly (an unknown field is refused).
@@ -119,6 +127,9 @@ func ParseParams(raw json.RawMessage) (Params, error) {
 	}
 	if !audibleacct.IDPattern.MatchString(p.Account) {
 		return Params{}, errors.New("bad params: account must be an Audible account id")
+	}
+	if len(p.Template) > maxTemplate {
+		return Params{}, errors.New("bad params: the template is too long")
 	}
 	return p, nil
 }
@@ -221,16 +232,19 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		}
 		c := importjob.Claim{}
 		if b, score, ok := matcher.MatchScored(rec); ok && matchable(b.Path) {
-			c = importjob.Claim{Path: b.Path, Score: score, Work: importjob.WorkKey(rec)}
+			agrees, disagrees := importjob.PositionAgrees(rec, b)
+			c = importjob.Claim{Path: b.Path, Score: score, Work: importjob.WorkKey(rec), Agrees: agrees, Disagrees: disagrees}
 			matchedBook[b.Path] = b
 		}
 		titles, used, claims = append(titles, t), append(used, rec), append(claims, c)
 	}
-	// A book several titles claimed keeps the best one only (a tie between two
-	// works, none): the others are reported unmatched with the reason
-	// contested, so the console shows them as not here and a backup of
-	// everything can skip them.
-	keep := importjob.KeepBest(claims)
+	// A book several titles claimed keeps the best one only (the one whose
+	// series number is the book's, else the best score; a tie between two
+	// works, none): the others are reported unmatched, with the reason
+	// contested and the book's path unless their number says they are another
+	// volume, so the console shows them as not here and a backup of everything
+	// can skip them.
+	keep, contested := importjob.KeepBest(claims)
 	claimed := map[string]int{} // path -> how many titles claimed it
 	for _, c := range claims {
 		if c.Path == "" {
@@ -246,8 +260,8 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 			continue
 		}
 		if !keep[i] {
-			if titles[i].Reason == "" {
-				titles[i].Reason = link.ReasonContested
+			if contested[i] && titles[i].Reason == "" {
+				titles[i].Reason, titles[i].ContestedPath = link.ReasonContested, c.Path
 			}
 			continue
 		}
@@ -269,6 +283,16 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		}
 	}
 	res.Titles, res.Matched = len(titles), res.MatchedASIN+res.MatchedFuzzy
+
+	// Where a backup of each unmatched title would go, as the import would
+	// place it now (the console shows it on the title's row).
+	planner := newTitlePlanner(acct.LibraryID, p.Template, books, h.mappedMount(acct.LibraryID))
+	for i := range titles {
+		if titles[i].Match == nil {
+			titles[i].Planned = planner.plan(used[i])
+		}
+	}
+	planner.close()
 
 	rep.Progress(jobs.Progress{Step: "reporting", Message: "Reporting the titles to the server", Total: len(titles)})
 	for start := 0; ; start += link.MaxAudibleTitles {
@@ -296,6 +320,24 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	h.o.Log.Info("audible: polled", "account", acct.ID, "titles", res.Titles, "matched", res.Matched, "contested", res.Contested,
 		"enriched", res.Enriched, "enrich_failed", res.EnrichFailed, "enrich_deferred", res.EnrichDeferred)
 	return res, nil
+}
+
+// mappedMount is where the Bridge sees the books library id when it is mapped
+// there (checked at the mount in use; writable or not, since a plan only
+// reads), else "".
+func (h *Handler) mappedMount(id int64) string {
+	if h.o.Libraries == nil || h.o.Mount == nil {
+		return ""
+	}
+	lib, ok := h.o.Libraries.Library(id)
+	if !ok || lib.LibraryKind() != "books" {
+		return ""
+	}
+	mount, _ := h.o.Mount(lib.ID, lib.Root)
+	if st, checked := h.o.Libraries.Status(lib.ID); !checked || st.MountPath != mount || !st.Mapped || mount == "" {
+		return ""
+	}
+	return mount
 }
 
 // fail records why the poll failed on the account and returns it as the job's

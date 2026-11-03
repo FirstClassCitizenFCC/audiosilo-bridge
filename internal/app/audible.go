@@ -31,12 +31,13 @@ import (
 func (b *Bridge) newAudible(vault secrets.Store, db *store.DB, log *slog.Logger, server func() *link.Client,
 	serverID func() string) (*audibleacct.Manager, *audiblejob.Handler, *audiblejob.Importer) {
 	m := audibleacct.New(audibleacct.Options{Vault: vault, DB: db, Log: log, OnChange: b.Kick})
-	h := audiblejob.New(audiblejob.Options{Accounts: m, ServerID: serverID, Log: log, Server: func() audiblejob.Server {
-		if cl := server(); cl != nil {
-			return cl
-		}
-		return nil
-	}})
+	h := audiblejob.New(audiblejob.Options{Accounts: m, ServerID: serverID, Log: log, Libraries: b.libs, Mount: b.mount,
+		Server: func() audiblejob.Server {
+			if cl := server(); cl != nil {
+				return cl
+			}
+			return nil
+		}})
 	tmp := filepath.Join(b.dataDir, "audible", "tmp")
 	if err := audiblejob.SweepTmp(tmp, time.Now()); err != nil {
 		log.Warn("audible: sweeping the import's temp folder failed", "err", err)
