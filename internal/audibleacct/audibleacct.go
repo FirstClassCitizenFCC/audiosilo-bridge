@@ -160,7 +160,8 @@ type Manager struct {
 	// otherwise both find no account and make two (the later now replaces the
 	// earlier, as any sign-in again does; the store's unique index on
 	// (customer_hash, marketplace) backs it). Held across the server call;
-	// sign-ins are rare.
+	// sign-ins are rare. Remove takes it while it forgets locally, so a sign-in
+	// again finishing meanwhile never stores the account back after it.
 	finishMu sync.Mutex
 }
 
@@ -482,6 +483,10 @@ func (m *Manager) Map(ctx context.Context, srv Server, serverID, id string, mp M
 // starts forgetting it runs to its end even if the page goes away: the sealed
 // sign-in is the only way to deregister the device.
 func (m *Manager) Remove(ctx context.Context, srv Server, id string) (warning string, err error) {
+	// See finishMu: held until the account is forgotten here.
+	m.finishMu.Lock()
+	unlock := sync.OnceFunc(m.finishMu.Unlock)
+	defer unlock()
 	if _, err := m.Account(ctx, id); err != nil {
 		return "", err
 	}
@@ -493,6 +498,7 @@ func (m *Manager) Remove(ctx context.Context, srv Server, id string) (warning st
 	if err := m.o.DB.DeleteAudibleAccount(ctx, id); err != nil {
 		return "", err
 	}
+	unlock()
 	m.o.OnChange()
 	var warnings []string
 	if srv == nil {
