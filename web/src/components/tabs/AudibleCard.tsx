@@ -206,7 +206,7 @@ function AccountRow({
         <Row label="Audible store">{marketplaceName(a.marketplace)}</Row>
         <Row label="Belongs to">{a.user_name || `Person ${a.user_id}`}</Row>
         <Row label="Library">{a.library_name || `Library ${a.library_id}`}</Row>
-        <Row label="Back up">{POLICY_LABELS[a.policy] ?? a.policy}</Row>
+        <Row label="Back up">{POLICY_IN_CONSOLE}</Row>
         <Row label="Last checked">
           {a.last_poll_at ? (
             <>
@@ -222,6 +222,7 @@ function AccountRow({
         <MappingForm
           data={data}
           initial={mappingOf(a)}
+          policyHere={false}
           submitLabel="Save"
           busyLabel="Saving..."
           onSubmit={async (m) => {
@@ -384,6 +385,7 @@ function SignInForm({
           <MappingForm
             data={data}
             initial={initial.mapping ?? defaultMapping(data)}
+            policyHere={!initial.mapping}
             submitLabel="Finish the sign-in"
             busyLabel="Signing in..."
             check={() => redirectProblem(redirect)}
@@ -399,9 +401,15 @@ function SignInForm({
   );
 }
 
+// POLICY_IN_CONSOLE: an account's backup policy is the server's once the
+// account exists (the console's Audible account card edits it); the page picks
+// it only for a new account, and the server keeps its own after that.
+const POLICY_IN_CONSOLE = "Chosen in the server's console (the Audible account card)";
+
 function MappingForm({
   data,
   initial,
+  policyHere,
   submitLabel,
   busyLabel,
   check,
@@ -410,6 +418,8 @@ function MappingForm({
 }: {
   data: AudibleAccounts;
   initial: AudibleMapping;
+  // policyHere: the form picks the backup policy (a new account only).
+  policyHere: boolean;
   submitLabel: string;
   busyLabel: string;
   check?: () => string | null;
@@ -474,24 +484,31 @@ function MappingForm({
           ))}
         </select>
       </Field>
-      <Field
-        label="Back up"
-        htmlFor="audible-policy"
-        note="Kept with the account for the backups; this version of the Bridge downloads nothing yet."
-      >
-        <select
-          id="audible-policy"
-          value={m.policy}
-          onChange={(e) => setM({ ...m, policy: e.target.value as AudiblePolicy })}
-          className={inputClass}
+      {policyHere ? (
+        <Field
+          label="Back up"
+          htmlFor="audible-policy"
+          note="Which new purchases the Bridge backs up on its own after each check (titles first seen after you choose it); any title can still be backed up from the console, which changes this later."
         >
-          {data.policies.map((p) => (
-            <option key={p} value={p}>
-              {POLICY_LABELS[p] ?? p}
-            </option>
-          ))}
-        </select>
-      </Field>
+          <select
+            id="audible-policy"
+            value={m.policy}
+            onChange={(e) => setM({ ...m, policy: e.target.value as AudiblePolicy })}
+            className={inputClass}
+          >
+            {data.policies.map((p) => (
+              <option key={p} value={p}>
+                {POLICY_LABELS[p] ?? p}
+              </option>
+            ))}
+          </select>
+        </Field>
+      ) : (
+        <p className="text-sm text-dim">
+          Which new purchases are backed up on their own is changed in the server&apos;s console, on
+          the Audible account card.
+        </p>
+      )}
       <label className="flex items-center gap-2 text-sm text-body">
         <input
           type="checkbox"

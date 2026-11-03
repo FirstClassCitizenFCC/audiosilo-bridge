@@ -309,8 +309,13 @@ func matchable(p string) bool {
 	return fs.ValidPath(p)
 }
 
+// bookLister reads a library's books page by page (Server and ImportServer).
+type bookLister interface {
+	LibraryBooks(ctx context.Context, libraryID int64, after string, limit int) (*link.LibraryBooks, error)
+}
+
 // allBooks reads every page of the library's books.
-func allBooks(ctx context.Context, srv Server, libraryID int64) ([]link.LibraryBook, error) {
+func allBooks(ctx context.Context, srv bookLister, libraryID int64) ([]link.LibraryBook, error) {
 	if libraryID <= 0 {
 		return nil, errors.New("the account has no library: map it again on the Bridge's Accounts tab")
 	}

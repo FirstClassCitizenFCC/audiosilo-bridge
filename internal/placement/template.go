@@ -3,6 +3,7 @@ package placement
 import (
 	"fmt"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -22,13 +23,23 @@ const (
 // (ModeAuto, or an empty template) or by rendering a user template (ModeTemplate).
 // Template mode still resolves {SHORTCODE} and the padding width from the siblings,
 // so "match the existing convention" is available as values a template can consume.
+// Auto mode, and a template that renders the position ({Seq} or {PaddedSeq}),
+// drop the book's own position from the front of its titles first
+// (dropLeadingSequence); a template without it keeps the number in the title.
 func SuggestWith(mode Mode, tmpl string, in Input) (Suggestion, error) {
+	dropSeq := func() {
+		in.Title, in.TitleShort = dropLeadingSequence(in.Title, in), dropLeadingSequence(in.TitleShort, in)
+	}
 	if mode == ModeAuto || strings.TrimSpace(tmpl) == "" {
+		dropSeq()
 		return Suggest(in), nil
 	}
 	t, err := Parse(tmpl)
 	if err != nil {
 		return Suggestion{}, err
+	}
+	if t.uses("Seq", "PaddedSeq") {
+		dropSeq()
 	}
 	rel, err := t.Render(varsFromInput(in))
 	if err != nil {
@@ -177,6 +188,27 @@ func Parse(src string) (*Template, error) {
 		return nil, err
 	}
 	return &Template{nodes: nodes}, nil
+}
+
+// uses reports whether the template renders any of the named variables.
+func (t *Template) uses(names ...string) bool {
+	var walk func([]node) bool
+	walk = func(nodes []node) bool {
+		for _, n := range nodes {
+			switch n := n.(type) {
+			case varNode:
+				if slices.Contains(names, n.name) {
+					return true
+				}
+			case groupNode:
+				if walk(n.children) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(t.nodes)
 }
 
 // Render produces the destination path (folder + filename), sanitizing each path

@@ -147,7 +147,7 @@ func (c *contestAccounts) Library(ctx context.Context, id string) ([]source.Reco
 	}
 	for _, r := range recs {
 		if r.ASIN == c.extraOf {
-			r.ASIN, r.Key = c.extraASIN, c.extraASIN
+			r.ASIN = c.extraASIN
 			recs = append(recs, r)
 			break
 		}

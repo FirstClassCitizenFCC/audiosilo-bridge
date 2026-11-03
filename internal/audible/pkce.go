@@ -2,9 +2,8 @@
 // owns: it logs in (OAuth + PKCE, via a browser), registers a virtual device,
 // lists the library, requests per-book decryption vouchers, downloads the AAXC,
 // and strips DRM with ffmpeg into a plain .m4b - the same capability as the
-// open-source Libation / OpenAudible / audible-cli. It plugs into the import
-// pipeline as a source.Acquirer (download-on-demand), so placement, transfer, and
-// the skip-if-already-on-server check are shared with any other import source.
+// open-source Libation / OpenAudible / audible-cli. The Bridge's audible.import
+// job (internal/audiblejob) drives it: License, Download (resumable), Decrypt.
 //
 // Credentials (full Amazon account tokens + the device RSA key) are stored only in
 // the Bridge vault and are never logged. The decryption key for a book is never

@@ -12,7 +12,11 @@
 // issued, the bearer token on deregister. It records what the Bridge does that
 // the owner would see on Amazon (registrations, deregistrations, places written
 // back) for tests and for its /_fake/calls page. Its data is synthetic
-// (fixtures.go); the license request and the download arrive in Phase 4b.
+// (fixtures.go). Phase 4b: a license request answers a voucher built from the
+// device and customer ids, and the download is an UNENCRYPTED fixture .m4b
+// served as the "AAXC" (ffmpeg passes it through with the key set), with
+// Range and If-Range, and controls to cut a download, expire the URLs and
+// release a preorder (content.go).
 //
 // This package must never import internal/audible: audible's audiblefake build
 // imports it (for the Recorder).
@@ -52,6 +56,10 @@ type Options struct {
 	CustomerID string
 	// KeyBits is the RSA size of each issued device key (default 2048).
 	KeyBits int
+	// FFmpeg tags each title's download with its own title and authors (the
+	// fixture's audio and chapters, copied); "" finds ffmpeg on PATH, "-" never
+	// tags (every title is the fixture as it is).
+	FFmpeg string
 }
 
 // Registration is one device registration the fake accepted.
@@ -75,6 +83,25 @@ type Calls struct {
 	// LastPositionsSizes is the ASIN count of every lastpositions request,
 	// refused ones included.
 	LastPositionsSizes []int `json:"lastpositions_sizes"`
+	// Licenses are the license requests, Downloads the content GETs (with
+	// their Range, "" for a whole file).
+	Licenses  []LicenseCall  `json:"licenses"`
+	Downloads []DownloadCall `json:"downloads"`
+}
+
+// LicenseCall is one license request and how the fake answered it.
+type LicenseCall struct {
+	ASIN   string `json:"asin"`
+	Status string `json:"status"` // Granted | Denied
+}
+
+// DownloadCall is one content GET.
+type DownloadCall struct {
+	ASIN    string `json:"asin"`
+	Range   string `json:"range"`
+	IfRange string `json:"if_range"`
+	// Expired: the URL's license had expired (403).
+	Expired bool `json:"expired,omitempty"`
 }
 
 // Fake is the fake service. Its zero value is not usable: call New.
@@ -89,6 +116,12 @@ type Fake struct {
 	positions map[string]position
 	refused   bool
 	calls     Calls
+	// released are preorders released early (Release); urls the download URLs
+	// issued (token -> ASIN; ExpireURLs empties it); content the files served.
+	released map[string]bool
+	urls     map[string]string
+	content  map[string][]byte
+	cutNext  int64
 }
 
 type pendingCode struct {
@@ -98,6 +131,7 @@ type pendingCode struct {
 
 type device struct {
 	serial  string
+	devType string
 	adp     string
 	access  string
 	refresh string
@@ -125,6 +159,9 @@ func New(opts Options) *Fake {
 		byAccess:  map[string]*device{},
 		byRefresh: map[string]*device{},
 		positions: map[string]position{},
+		released:  map[string]bool{},
+		urls:      map[string]string{},
+		content:   map[string][]byte{},
 	}
 	now := opts.Now()
 	for asin, p := range fixturePositions {
@@ -142,6 +179,8 @@ func (f *Fake) Calls() Calls {
 		Deregistered:       append([]string(nil), f.calls.Deregistered...),
 		PutPositions:       append([]PutPosition(nil), f.calls.PutPositions...),
 		LastPositionsSizes: append([]int(nil), f.calls.LastPositionsSizes...),
+		Licenses:           append([]LicenseCall(nil), f.calls.Licenses...),
+		Downloads:          append([]DownloadCall(nil), f.calls.Downloads...),
 	}
 }
 
@@ -165,14 +204,32 @@ func (f *Fake) Handler() http.Handler {
 	mux.HandleFunc("GET /1.0/library", f.signed(f.library))
 	mux.HandleFunc("GET /1.0/annotations/lastpositions", f.signed(f.lastPositions))
 	mux.HandleFunc("PUT /1.0/lastpositions/{asin}", f.signed(f.putPosition))
-	// Phase 4b: the license request (a voucher built from the device and
-	// customer ids) and an unencrypted fixture download go here.
-	mux.HandleFunc("POST /1.0/content/{asin}/licenserequest", f.signed(func(w http.ResponseWriter, _ *http.Request, _ []byte) {
-		writeJSON(w, http.StatusNotImplemented, map[string]string{"message": "the fake has no license requests before Phase 4b"})
-	}))
+	mux.HandleFunc("GET /1.0/library/{asin}", f.signed(f.libraryTitle))
+	mux.HandleFunc("POST /1.0/content/{asin}/licenserequest", f.signed(f.license))
+	mux.HandleFunc("GET /_fake/content/{file}", f.signed(f.download))
 	mux.HandleFunc("GET /_fake/calls", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, f.Calls()) })
 	mux.HandleFunc("POST /_fake/refuse", func(w http.ResponseWriter, _ *http.Request) {
 		f.Refuse()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /_fake/cut", func(w http.ResponseWriter, r *http.Request) {
+		n, err := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+		if err != nil || n < 1 {
+			http.Error(w, "after must be a byte count", http.StatusBadRequest)
+			return
+		}
+		f.CutNextDownload(n)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /_fake/expire", func(w http.ResponseWriter, _ *http.Request) {
+		f.ExpireURLs()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /_fake/release", func(w http.ResponseWriter, r *http.Request) {
+		if !f.Release(r.URL.Query().Get("asin")) {
+			http.Error(w, "no such preorder", http.StatusNotFound)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("GET /_fake/titles", func(w http.ResponseWriter, _ *http.Request) {
@@ -180,8 +237,9 @@ func (f *Fake) Handler() http.Handler {
 			Title
 			State string `json:"state"`
 		}
-		rows := make([]row, len(Fixtures))
-		for i, t := range Fixtures {
+		titles := f.titles()
+		rows := make([]row, len(titles))
+		for i, t := range titles {
 			rows[i] = row{t, t.State()}
 		}
 		writeJSON(w, http.StatusOK, rows)
@@ -264,6 +322,7 @@ func (f *Fake) register(w http.ResponseWriter, r *http.Request) {
 	}
 	d := &device{
 		serial:  serial,
+		devType: body.RegistrationData["device_type"],
 		adp:     "{enc:FAKE" + randHex(24) + "}",
 		access:  "Atna|FAKE" + randHex(24),
 		refresh: "Atnr|FAKE" + randHex(24),
@@ -408,9 +467,10 @@ func (f *Fake) library(w http.ResponseWriter, r *http.Request, _ []byte) {
 		page = 1
 	}
 	now := f.opts.Now()
+	titles := f.titles()
 	items := []map[string]any{}
-	for i := (page - 1) * size; i < len(Fixtures) && i < page*size; i++ {
-		items = append(items, libraryItem(Fixtures[i], now))
+	for i := (page - 1) * size; i < len(titles) && i < page*size; i++ {
+		items = append(items, libraryItem(titles[i], now))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "response_groups": strings.Split(r.URL.Query().Get("response_groups"), ",")})
 }

@@ -1,4 +1,4 @@
-package podcast
+package fsutil
 
 import (
 	"errors"
@@ -8,10 +8,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// renameNoReplace uses renameat2(RENAME_NOREPLACE), which the kernel makes
+// RenameNoReplace uses renameat2(RENAME_NOREPLACE), which the kernel makes
 // atomic. A filesystem that lacks it (EINVAL, ENOSYS, EOPNOTSUPP) gets the
-// absence check under the locks instead.
-func renameNoReplace(root *os.Root, oldname, newname string) error {
+// absence check (RenameIfAbsent) instead.
+func RenameNoReplace(root *os.Root, oldname, newname string) error {
 	if dir := path.Dir(oldname); dir == path.Dir(newname) {
 		if d, err := root.Open(dir); err == nil {
 			fd := int(d.Fd())
@@ -21,11 +21,11 @@ func renameNoReplace(root *os.Root, oldname, newname string) error {
 			case err == nil:
 				return nil
 			case errors.Is(err, unix.EEXIST):
-				return ErrInvalidFile
+				return ErrExists
 			case !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOSYS) && !errors.Is(err, unix.EOPNOTSUPP):
 				return &os.LinkError{Op: "rename", Old: oldname, New: newname, Err: err}
 			}
 		}
 	}
-	return renameIfAbsent(root, oldname, newname)
+	return RenameIfAbsent(root, oldname, newname)
 }

@@ -69,12 +69,18 @@ func withSleep(f func(context.Context, time.Duration) error) Option {
 	return func(s *settings) { s.sleep = f }
 }
 
+// withStall replaces how long a download waits for its next byte (tests).
+func withStall(d time.Duration) Option {
+	return func(s *settings) { s.stall = d }
+}
+
 // settings is what the options set, resolved against a marketplace.
 type settings struct {
 	endpoints *Endpoints
 	http      *http.Client
 	sleep     func(context.Context, time.Duration) error
-	log       *slog.Logger // nil: no log
+	stall     time.Duration // 0: downloadStall
+	log       *slog.Logger  // nil: no log
 }
 
 // endpointsOf is the endpoints opts set, else mp's.
@@ -103,6 +109,9 @@ func resolve(mp Marketplace, timeout time.Duration, opts []Option) settings {
 	}
 	if s.sleep == nil {
 		s.sleep = sleepCtx
+	}
+	if s.stall <= 0 {
+		s.stall = downloadStall
 	}
 	return s
 }

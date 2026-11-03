@@ -42,7 +42,7 @@ func sendWithBackoff(ctx context.Context, hc *http.Client, sleep func(context.Co
 	for attempt := 1; ; attempt++ {
 		req, err := newReq()
 		if err != nil {
-			return nil, err
+			return nil, withoutQuery(err) // a URL that doesn't parse is named in the error
 		}
 		resp, err := hc.Do(req)
 		if err != nil {
@@ -69,19 +69,27 @@ func sendWithBackoff(ctx context.Context, hc *http.Client, sleep func(context.Co
 // withoutQuery drops the query (and any userinfo) from the URL a failed
 // request's error names: a download's is presigned (its Policy, Signature and
 // Key-Pair-Id are the right to fetch the file), and errors are logged and
-// reported.
+// reported. A cause that quotes a URL itself (a redirect's Location that
+// doesn't parse) is left out whole.
 func withoutQuery(err error) error {
 	var ue *url.Error
 	if !errors.As(err, &ue) {
 		return err
 	}
+	inner := ue.Err
+	if inner != nil && (strings.Contains(inner.Error(), "://") || strings.Contains(inner.Error(), "?")) {
+		inner = errURLInCause
+	}
 	u, perr := url.Parse(ue.URL)
 	if perr != nil {
-		return &url.Error{Op: ue.Op, URL: "(the request's URL)", Err: ue.Err}
+		return &url.Error{Op: ue.Op, URL: "(the request's URL)", Err: inner}
 	}
 	u.RawQuery, u.ForceQuery, u.Fragment, u.User = "", false, "", nil
-	return &url.Error{Op: ue.Op, URL: u.String(), Err: ue.Err}
+	return &url.Error{Op: ue.Op, URL: u.String(), Err: inner}
 }
+
+// errURLInCause stands in for a request error's cause that quoted a URL.
+var errURLInCause = errors.New("the request failed (its error quoted a URL, left out)")
 
 // retryAfter reads a Retry-After value: delay seconds or an HTTP date. A date in
 // the past is no wait; anything unreadable is no answer.

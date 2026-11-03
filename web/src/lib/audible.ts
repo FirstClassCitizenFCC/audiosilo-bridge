@@ -19,8 +19,8 @@ export function marketplaceName(code: string): string {
   return MARKETPLACE_NAMES[code] ?? code.toUpperCase();
 }
 
-// What each policy keeps. The Bridge records it now and acts on it once it
-// downloads books (a later version), so the words say what it is for.
+// What each policy backs up on its own: the server queues a new purchase's
+// backup after a check when the account's policy covers it.
 export const POLICY_LABELS: Record<AudiblePolicy, string> = {
   all: 'Every new title',
   series: 'New titles in a series they already have',

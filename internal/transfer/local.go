@@ -1,185 +1,377 @@
+// Package transfer installs one audiobook file into a library the Bridge has a
+// checked, writable mapping of (Local: this host or a mounted share). It never
+// replaces a file: the copy is staged in a temp file beside the destination and
+// installed with fsutil.InstallNoReplace (an exclusive hard link, else a rename
+// that refuses an existing target), the podcast episode install's primitive.
+// Every destination goes through mapping.SafeJoin against the mapping's root and
+// every filesystem call through an os.Root there, so neither a "..", an
+// absolute path nor a symlink in the library reaches outside it.
 package transfer
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
+	"github.com/kodestar/audiosilo-bridge/internal/mapping"
 	"github.com/kodestar/audiosilo-bridge/internal/progress"
 )
 
-// SafeJoin resolves rel under root and guarantees the result cannot escape root
-// (e.g. via ".." segments), since rel ultimately comes from a user-editable
-// template. Security-critical: keep allowed and denied regression tests.
-func SafeJoin(root, rel string) (string, error) {
-	rootAbs, err := filepath.Abs(root)
+// Errors Place answers (wrapped; test with errors.Is).
+var (
+	// ErrExists: a different file (or a folder, or a link) is already at the
+	// destination. Nothing was written there.
+	ErrExists = errors.New("a different file is already at the destination")
+	// ErrDiskFull: the destination's filesystem has too little free space (or
+	// ran out during the copy). Nothing was left behind.
+	ErrDiskFull = errors.New("not enough free space in the library")
+	// ErrInvalidPath: the destination isn't a usable library-relative file path
+	// (outside the library, empty, a folder, a hidden name).
+	ErrInvalidPath = errors.New("the destination isn't a valid path in the library")
+)
+
+// DefaultHeadroom is the free space Place wants at the destination, as a factor
+// of the file's size: the staged copy plus a margin for the filesystem.
+const DefaultHeadroom = 1.1
+
+// tempPrefix names Place's staged copies (a dotfile the server's scan skips).
+const tempPrefix = ".audiosilo-import-"
+
+// PlaceRequest is one file to install.
+type PlaceRequest struct {
+	// Root is the library's mount on the Bridge (a checked, writable mapping).
+	Root string
+	// RelPath is the destination file, library-relative and "/"-separated.
+	RelPath string
+	// SrcPath is the file to copy (on this machine).
+	SrcPath string
+	// Progress (may be nil) reports bytes copied, throttled.
+	Progress func(copied, total int64)
+}
+
+// PlaceResult is the outcome of a Place.
+type PlaceResult struct {
+	// RelPath is the destination as installed (clean, "/"-separated).
+	RelPath string
+	// Size is the file's size.
+	Size int64
+	// AlreadyPresent: the destination already held these exact bytes (an earlier
+	// run installed them), so nothing was copied.
+	AlreadyPresent bool
+}
+
+// Local installs into a directory on this machine (a local path or a mounted
+// SMB/NFS share).
+type Local struct {
+	// Seams for tests: the free-space reader, the hard link, and a hook run
+	// just before the install (a racing writer).
+	free          func(dir string) (int64, error)
+	link          fsutil.LinkFunc
+	beforeInstall func()
+}
+
+// NewLocal returns a Local transfer.
+func NewLocal() *Local { return &Local{} }
+
+// CleanRel checks a library-relative destination file path and returns it
+// clean: through mapping.SafeJoin's rules (no absolute path, no "..", no NUL),
+// not the library root itself, and no hidden (dot) segment, folder or file:
+// the server's scan never indexes a path with one.
+func CleanRel(rel string) (string, error) {
+	if _, err := mapping.SafeJoin("/", rel); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidPath, err)
+	}
+	clean := strings.TrimPrefix(path.Clean("/"+rel), "/")
+	if clean == "" {
+		return "", ErrInvalidPath
+	}
+	for _, seg := range strings.Split(clean, "/") {
+		if strings.HasPrefix(seg, ".") {
+			return "", fmt.Errorf("%w: %q is a hidden name", ErrInvalidPath, seg)
+		}
+	}
+	return clean, nil
+}
+
+// OnDisk is rel (clean) spelled as the library spells what exists of it: a
+// folder (or the file) already there under another spelling, which a case- or
+// normalization-insensitive filesystem (APFS, SMB, NTFS) finds under rel's,
+// takes the name its folder lists, since the server indexes a path only as it
+// is spelled on disk. What doesn't exist yet keeps rel's spelling.
+func OnDisk(root *os.Root, rel string) (string, error) {
+	segs := strings.Split(rel, "/")
+	dir := "."
+	for i, seg := range segs {
+		st, err := root.Lstat(path.Join(dir, seg))
+		if errors.Is(err, fs.ErrNotExist) {
+			return path.Join(append([]string{dir}, segs[i:]...)...), nil
+		}
+		if err != nil {
+			return "", err
+		}
+		name, err := listedName(root, dir, seg, st)
+		if err != nil {
+			return "", err
+		}
+		dir = path.Join(dir, name)
+	}
+	return dir, nil
+}
+
+// listedName is the name dir lists for the entry found as seg (st): seg when
+// it is listed as is, else the listed entry that is the same file.
+func listedName(root *os.Root, dir, seg string, st fs.FileInfo) (string, error) {
+	entries, err := fs.ReadDir(root.FS(), dir)
 	if err != nil {
 		return "", err
 	}
-	clean := filepath.Clean(string(filepath.Separator) + rel) // neutralize leading ".."
-	abs := filepath.Join(rootAbs, clean)
-	relCheck, err := filepath.Rel(rootAbs, abs)
-	if err != nil || relCheck == ".." || strings.HasPrefix(relCheck, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path %q escapes the library root", rel)
+	for _, e := range entries {
+		if e.Name() == seg {
+			return seg, nil
+		}
 	}
-	return abs, nil
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil && os.SameFile(info, st) {
+			return e.Name(), nil
+		}
+	}
+	return seg, nil
 }
 
-// Local writes into a directory on this machine (a local path, or a mounted
-// SMB/NFS share). It is the default transfer backend.
-type Local struct{}
-
-// NewLocal returns a Local transfer backend.
-func NewLocal() *Local { return &Local{} }
-
-// EnsureRoot verifies the root exists and is a directory, failing fast before any
-// copy - this catches an unmounted network share instead of silently creating a
-// local stub tree.
-func (*Local) EnsureRoot(_ context.Context, root string) error {
-	info, err := os.Stat(root)
-	if err != nil {
-		return fmt.Errorf("library root unavailable: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("library root %q is not a directory", root)
-	}
-	return nil
-}
-
-// Index walks root and records every audio file by name (paths relative to root).
-// A missing root yields an empty index. The walk lists directories only - sizes
-// are read lazily for same-name candidates - so it stays cheap on a large tree.
-// ".part" temp files and dotfiles are ignored.
-func (*Local) Index(_ context.Context, root string) (*Index, error) {
-	idx := newIndex(func(rel string) (int64, error) {
-		info, err := os.Stat(filepath.Join(root, rel))
-		if err != nil {
-			return 0, err
-		}
-		return info.Size(), nil
-	})
-	if _, err := os.Stat(root); os.IsNotExist(err) {
-		return idx, nil
-	}
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		name := d.Name()
-		if d.IsDir() || strings.HasPrefix(name, ".") || !isAudio(name) {
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, p)
-		if relErr != nil {
-			rel = p
-		}
-		idx.add(name, rel)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return idx, nil
-}
-
-// Place copies SrcPath into <Root>/<RelDir>/<Filename>, creating missing
-// directories. It is idempotent: a destination that already exists at the source's
-// size is reported AlreadyPresent without copying; a same-name file of a different
-// size is left untouched unless Overwrite is set.
+// Place copies SrcPath to RelPath under Root and never replaces anything:
+//   - the destination holding the same bytes already is AlreadyPresent (an
+//     earlier run installed it), anything else there is ErrExists;
+//   - less free space than DefaultHeadroom x the size at the destination is
+//     ErrDiskFull, as is running out during the copy;
+//   - the copy is staged beside the destination, size-checked and installed
+//     with fsutil.InstallNoReplace; a file that appears meanwhile wins and is
+//     ErrExists (or AlreadyPresent when it is these bytes). A failure or a
+//     cancel (ctx) leaves no staged copy behind.
+//
+// Missing folders are created (0755 under the umask). The caller checks the
+// mapping is still writable before calling.
 func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error) {
-	if err := l.EnsureRoot(ctx, req.Root); err != nil {
-		return PlaceResult{}, err
-	}
-	dir, err := SafeJoin(req.Root, req.RelDir)
+	rel, err := CleanRel(req.RelPath)
 	if err != nil {
 		return PlaceResult{}, err
 	}
-	dst := filepath.Join(dir, req.Filename)
+	// A root that is missing or not a folder (an unmounted share) fails here,
+	// before any copy, rather than getting a stub tree.
+	root, err := os.OpenRoot(req.Root)
+	if err != nil {
+		return PlaceResult{}, fmt.Errorf("library root unavailable: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	src, err := os.Open(req.SrcPath)
+	if err != nil {
+		return PlaceResult{}, err
+	}
+	defer func() { _ = src.Close() }()
+	info, err := src.Stat()
+	if err != nil {
+		return PlaceResult{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return PlaceResult{}, fmt.Errorf("%s is not a regular file", req.SrcPath)
+	}
+	size := info.Size()
+	res := PlaceResult{RelPath: rel, Size: size}
 
-	srcInfo, err := os.Stat(req.SrcPath)
+	if same, err := l.sameAt(ctx, root, rel, src, size); err != nil {
+		return PlaceResult{}, err
+	} else if same {
+		res.AlreadyPresent = true
+		return res, nil
+	}
+	if err := l.checkFree(req.Root, rel, size); err != nil {
+		return PlaceResult{}, err
+	}
+	dir := path.Dir(rel)
+	if dir != "." {
+		if err := root.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: library folders the server (another user) must read
+			return PlaceResult{}, noSpace(fmt.Errorf("creating the book's folder: %w", err))
+		}
+	}
+	temp, err := l.stage(ctx, root, dir, src, size, req.Progress)
 	if err != nil {
 		return PlaceResult{}, err
 	}
-	if !req.Overwrite {
-		if dstInfo, err := os.Stat(dst); err == nil {
-			if dstInfo.Size() == srcInfo.Size() {
-				return PlaceResult{DestPath: dst, AlreadyPresent: true}, nil
-			}
-			return PlaceResult{}, fmt.Errorf(
-				"destination already exists with a different size (%d vs source %d): %s",
-				dstInfo.Size(), srcInfo.Size(), dst)
-		} else if !os.IsNotExist(err) {
+	defer func() { _ = root.Remove(temp) }() // gone already when the install renamed it
+	if l.beforeInstall != nil {
+		l.beforeInstall()
+	}
+	if err := ctx.Err(); err != nil {
+		return PlaceResult{}, err
+	}
+	if _, err := fsutil.InstallNoReplace(root, temp, rel, l.link); err != nil {
+		if !errors.Is(err, fs.ErrExist) {
 			return PlaceResult{}, err
 		}
+		// Something arrived at the destination meanwhile: these bytes are fine,
+		// anything else stays as it is.
+		same, serr := l.sameAt(ctx, root, rel, src, size)
+		if serr != nil {
+			return PlaceResult{}, serr
+		}
+		if !same {
+			return PlaceResult{}, fmt.Errorf("%w: %s", ErrExists, rel)
+		}
+		res.AlreadyPresent = true
 	}
-	// Unlike the SFTP backend, Local doesn't align ownership/mode to the existing
-	// library: it runs as the local user writing to a local/mounted path, so new
-	// content is already owned by that user (the umask handles the mode). The SFTP
-	// case needs matching because it can land content as the SSH login user (root).
-	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: library folders the server (another user) must read
-		return PlaceResult{}, err
-	}
-	if err := copyVerified(ctx, req.SrcPath, dst, srcInfo.Size(), req.Progress); err != nil {
-		return PlaceResult{}, err
-	}
-	return PlaceResult{DestPath: dst}, nil
+	return res, nil
 }
 
-// Close is a no-op for Local.
-func (*Local) Close() error { return nil }
-
-// copyVerified streams src to a temp file in the destination directory, renames it
-// onto dst, and confirms the final size matches the source. ctx cancellation is
-// honored between read chunks; progress (if set) is reported as bytes are written.
-func copyVerified(ctx context.Context, src, dst string, wantSize int64, onProgress func(int64, int64)) error {
-	in, err := os.Open(src) //nolint:gosec // G304: the caller's own acquired file
+// sameAt reports whether rel holds exactly src's bytes. Nothing there is false;
+// a folder, a link, a special file or a different file is ErrExists.
+func (l *Local) sameAt(ctx context.Context, root *os.Root, rel string, src *os.File, size int64) (bool, error) {
+	st, err := root.Lstat(rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	defer func() { _ = in.Close() }()
-
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".audiosilo-import-*.part")
+	if !st.Mode().IsRegular() || st.Size() != size {
+		return false, fmt.Errorf("%w: %s", ErrExists, rel)
+	}
+	dst, err := root.Open(rel)
 	if err != nil {
-		return err
+		return false, err
 	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
+	defer func() { _ = dst.Close() }()
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	equal, err := sameBytes(ctx, src, dst)
+	if err != nil {
+		return false, err
+	}
+	if !equal {
+		return false, fmt.Errorf("%w: %s", ErrExists, rel)
+	}
+	return true, nil
+}
 
-	var w io.Writer = tmp
-	if onProgress != nil {
-		w = &progress.Writer{W: tmp, Total: wantSize, CB: onProgress}
+// sameBytes compares two readers to their ends.
+func sameBytes(ctx context.Context, a, b io.Reader) (bool, error) {
+	const chunk = 1 << 20
+	ba, bb := make([]byte, chunk), make([]byte, chunk)
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		na, ea := io.ReadFull(a, ba)
+		nb, eb := io.ReadFull(b, bb)
+		if na != nb || !bytes.Equal(ba[:na], bb[:nb]) {
+			return false, nil
+		}
+		endA := errors.Is(ea, io.EOF) || errors.Is(ea, io.ErrUnexpectedEOF)
+		endB := errors.Is(eb, io.EOF) || errors.Is(eb, io.ErrUnexpectedEOF)
+		switch {
+		case ea != nil && !endA:
+			return false, ea
+		case eb != nil && !endB:
+			return false, eb
+		case endA || endB:
+			return endA && endB, nil
+		}
 	}
-	if _, err := io.Copy(w, &ctxReader{ctx: ctx, r: in}); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return err
+}
+
+// checkFree wants DefaultHeadroom x size free on the filesystem that will
+// hold rel (its nearest existing folder).
+func (l *Local) checkFree(rootDir, rel string, size int64) error {
+	free := l.free
+	if free == nil {
+		free = fsutil.FreeBytes
 	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return err
+	n, err := free(NearestDir(rootDir, rel))
+	if err != nil {
+		// The free space can't be read there (a share that doesn't answer
+		// statfs): the copy goes ahead, and running out during it is still
+		// ErrDiskFull.
+		return nil
 	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return err
-	}
-	if info, err := os.Stat(tmpName); err != nil || info.Size() != wantSize {
-		cleanup()
-		return fmt.Errorf("copy size mismatch: wrote %d, expected %d", sizeOrNeg(tmpName), wantSize)
-	}
-	if err := os.Rename(tmpName, dst); err != nil {
-		cleanup()
-		return err
+	if need := int64(float64(size) * DefaultHeadroom); n < need {
+		return fmt.Errorf("%w: %d bytes free, %d needed", ErrDiskFull, n, need)
 	}
 	return nil
+}
+
+// NearestDir is the nearest existing folder of rel's (a clean library-relative
+// file path) under rootDir, rootDir itself at the latest: where the free space
+// for a file at rel is read.
+func NearestDir(rootDir, rel string) string {
+	for dir := path.Dir(rel); dir != "." && dir != "/"; dir = path.Dir(dir) {
+		full := filepath.Join(rootDir, filepath.FromSlash(dir))
+		if st, err := os.Stat(full); err == nil && st.IsDir() {
+			return full
+		}
+	}
+	return rootDir
+}
+
+// stage copies src into a new temp file in dir, synced and size-checked, and
+// returns its root-relative name. A failure removes it.
+func (l *Local) stage(ctx context.Context, root *os.Root, dir string, src *os.File, size int64, onProgress func(int64, int64)) (string, error) {
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	temp := path.Join(dir, tempPrefix+hex.EncodeToString(b)+".part")
+	f, err := root.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return "", noSpace(err)
+	}
+	fail := func(err error) (string, error) {
+		_ = f.Close()
+		_ = root.Remove(temp)
+		return "", noSpace(err)
+	}
+	var w io.Writer = f
+	if onProgress != nil {
+		w = &progress.Writer{W: f, Total: size, CB: onProgress}
+	}
+	n, err := io.Copy(w, &ctxReader{ctx: ctx, r: src})
+	if err != nil {
+		return fail(err)
+	}
+	if n != size {
+		return fail(fmt.Errorf("copy size mismatch: wrote %d, expected %d", n, size))
+	}
+	if err := f.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := f.Close(); err != nil {
+		_ = root.Remove(temp)
+		return "", noSpace(err)
+	}
+	return temp, nil
+}
+
+// noSpace marks a filesystem-full error as ErrDiskFull (keeping the cause).
+func noSpace(err error) error {
+	if fsutil.IsNoSpace(err) {
+		return fmt.Errorf("%w: %v", ErrDiskFull, err)
+	}
+	return err
 }
 
 type ctxReader struct {
-	ctx context.Context
+	ctx context.Context //nolint:containedctx // a reader that stops with its copy's context
 	r   io.Reader
 }
 
@@ -188,11 +380,4 @@ func (c *ctxReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	return c.r.Read(p)
-}
-
-func sizeOrNeg(path string) int64 {
-	if info, err := os.Stat(path); err == nil {
-		return info.Size()
-	}
-	return -1
 }

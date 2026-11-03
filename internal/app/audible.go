@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/audible"
@@ -17,23 +19,45 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
-// The Accounts tab's Audible section (Phase 4a): the accounts (audibleacct)
-// and the audible.poll job (audiblejob). The server's Audible routes are not
+// The Accounts tab's Audible section (Phase 4a): the accounts (audibleacct),
+// the audible.poll job and (Phase 4b) the audible.import job (audiblejob). The server's Audible routes are not
 // behind the console's module toggle (the podcasts precedent): signing in and
 // mapping work whether or not the module is on, and the server queues polls
 // only while it is.
 
-// newAudible builds the Audible accounts over the vault and the poll handler.
-func newAudible(vault secrets.Store, db *store.DB, log *slog.Logger, onChange func(), server func() *link.Client,
-	serverID func() string) (*audibleacct.Manager, *audiblejob.Handler) {
-	m := audibleacct.New(audibleacct.Options{Vault: vault, DB: db, Log: log, OnChange: onChange})
+// newAudible builds the Audible accounts over the vault, the poll handler and
+// the import handler (Phase 4b). It sweeps the import's temp folder first
+// (decision 6: a partial download a job may resume stays, for 7 days).
+func (b *Bridge) newAudible(vault secrets.Store, db *store.DB, log *slog.Logger, server func() *link.Client,
+	serverID func() string) (*audibleacct.Manager, *audiblejob.Handler, *audiblejob.Importer) {
+	m := audibleacct.New(audibleacct.Options{Vault: vault, DB: db, Log: log, OnChange: b.Kick})
 	h := audiblejob.New(audiblejob.Options{Accounts: m, ServerID: serverID, Log: log, Server: func() audiblejob.Server {
 		if cl := server(); cl != nil {
 			return cl
 		}
 		return nil
 	}})
-	return m, h
+	tmp := filepath.Join(b.dataDir, "audible", "tmp")
+	if err := audiblejob.SweepTmp(tmp, time.Now()); err != nil {
+		log.Warn("audible: sweeping the import's temp folder failed", "err", err)
+	}
+	imp := audiblejob.NewImport(audiblejob.ImportOptions{Accounts: m, ServerID: serverID, Libraries: b.libs, Mount: b.mount,
+		TmpDir: tmp, FFmpeg: b.ffmpeg, Log: log, Server: func() audiblejob.ImportServer {
+			if cl := server(); cl != nil {
+				return cl
+			}
+			return nil
+		}})
+	return m, h, imp
+}
+
+// ffmpeg is the ffmpeg the engine resolved at its start (toolfetch), else the
+// configured one, else "" (ffmpeg on PATH).
+func (b *Bridge) ffmpeg() string {
+	if e := b.engine.get(); e != nil && e.ffmpeg != "" {
+		return e.ffmpeg
+	}
+	return b.config().Tools.FFmpegPath
 }
 
 // audibleServer is the link for the accounts (nil while unpaired or refused).

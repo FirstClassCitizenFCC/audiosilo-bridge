@@ -8,6 +8,7 @@ package placement
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -178,6 +179,34 @@ func buildLeaf(prefix string, width int, in Input) string {
 // LitRPG Adventure" once the series name and genre subtitle are stripped.
 func bareTitle(t string) bool {
 	return !strings.ContainsFunc(t, unicode.IsLetter)
+}
+
+// leadingSequence is a title that opens with a number and a separator ("2.5:
+// Margins", "3 - The Coast"), the shape CleanTitle leaves of "<Series> N:
+// Subtitle" once it strips the series name. A dash or comma needs a space on
+// one side, so a range ("1-3: Box Set") or a thousands separator ("1,000
+// Ships") is not read as a separator.
+var leadingSequence = regexp.MustCompile(`^(\d+(?:\.\d+)?)(?:\s*:|\s*,\s|\s*[-\x{2013}\x{2014}]\s|\s+[-\x{2013}\x{2014}])\s*(.+)$`)
+
+// dropLeadingSequence removes the book's own series position from the front of
+// a cleaned title: "Mapmakers 2.5: Margins" cleans to "2.5: Margins", which
+// buildLeaf would name "2.5 - 2.5 - Margins" since the folder code carries the
+// number already. Only the book's sequence is dropped, only before an explicit
+// separator and only when letters follow, so a bare "13" (bareTitle names that
+// by its series or siblings) and a title of its own ("3 Days of Rain", or a
+// number that is not this book's position) stay as they are.
+func dropLeadingSequence(t string, in Input) string {
+	if !in.HasSequence {
+		return t
+	}
+	m := leadingSequence.FindStringSubmatch(t)
+	if m == nil || bareTitle(m[2]) {
+		return t
+	}
+	if n, err := strconv.ParseFloat(m[1], 64); err != nil || n != in.Sequence {
+		return t
+	}
+	return m[2]
 }
 
 // seriesTitle names a bare-titled book by its series: "He Who Fights with Monsters
@@ -389,11 +418,13 @@ var stopwords = map[string]bool{
 
 // sanitize makes a path segment safe to create on disk without mangling the
 // punctuation that real library folders use (apostrophes, commas, periods).
+// A leading dot goes too ("...And Ladies of the Club", ".hack"): a hidden
+// name is never indexed by the server's scan.
 func sanitize(s string) string {
 	s = strings.TrimSpace(s)
 	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", " -", "\x00", "")
 	s = replacer.Replace(s)
-	return strings.TrimRight(s, " .")
+	return strings.Trim(s, " .")
 }
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }

@@ -3,7 +3,9 @@ package audible
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,6 +15,7 @@ type licenseResp struct {
 	ContentLicense struct {
 		LicenseResponse string `json:"license_response"` // base64 encrypted voucher
 		StatusCode      string `json:"status_code"`      // "Granted" / "Denied"
+		DrmType         string `json:"drm_type"`         // "Adrm" (AAXC), "Mpeg" (a DRM-free MP3)
 		// DenialReasons explain a Denied license (mixed-case keys are Audible's).
 		DenialReasons []struct {
 			Message         string `json:"message"`
@@ -23,8 +26,74 @@ type licenseResp struct {
 			ContentURL struct {
 				OfflineURL string `json:"offline_url"` // presigned download URL
 			} `json:"content_url"`
+			ContentReference struct {
+				// ContentSizeInBytes is the file's size, when Audible sends it.
+				ContentSizeInBytes int64 `json:"content_size_in_bytes"`
+			} `json:"content_reference"`
 		} `json:"content_metadata"`
 	} `json:"content_license"`
+}
+
+// License is one book's download license: the (presigned) download URL, the
+// file's size when Audible gave it (0 unknown) and the per-book key and iv
+// ffmpeg decrypts it with. THE KEY AND IV ARE SECRETS: they are held in memory
+// and handed only to ffmpeg's argv (Decrypt), never logged, stored, reported
+// or put in an error. The URL is a bearer link too (its signature): it goes
+// only to Download. Printing a License, logging it with slog or marshalling it
+// to JSON shows none of them.
+type License struct {
+	URL  string
+	Key  string
+	IV   string
+	Size int64
+}
+
+// String hides the license's secrets (fmt's %v and %s).
+func (License) String() string { return "audible.License{redacted}" }
+
+// GoString hides them from %#v too.
+func (License) GoString() string { return "audible.License{redacted}" }
+
+// LogValue hides them from slog.
+func (License) LogValue() slog.Value { return slog.StringValue("[redacted]") }
+
+// MarshalJSON refuses: a license never goes into JSON (a result, progress, the
+// store).
+func (License) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("audible: a license is never marshalled")
+}
+
+// Why Audible denied a license (License wraps one of these).
+var (
+	// ErrNotReleased: the title isn't out yet (a preorder).
+	ErrNotReleased = errors.New("the title isn't released yet")
+	// ErrNoRights: the account may not download the title (not owned, no
+	// download rights, a periodical or show).
+	ErrNoRights = errors.New("the account has no download rights for the title")
+	// ErrDenied: Audible denied it for another reason.
+	ErrDenied = errors.New("audible refused a download license")
+	// ErrDRMFree: Audible granted the title only as a DRM-free MP3 (drm_type
+	// Mpeg, no voucher), which the import doesn't back up yet. Not a denial.
+	ErrDRMFree = errors.New("audible offers the title only as a DRM-free MP3")
+)
+
+// denialKind sorts a denied license into ErrNotReleased, ErrNoRights or
+// ErrDenied by Audible's reasons (their validation type, rejection reason and
+// message). Audible doesn't document them: the owner's real run checks this.
+func denialKind(lr licenseResp) error {
+	var words []string
+	for _, r := range lr.ContentLicense.DenialReasons {
+		words = append(words, strings.ToLower(r.ValidationType+" "+r.RejectionReason+" "+r.Message))
+	}
+	all := strings.Join(words, " ")
+	switch {
+	case strings.Contains(all, "releas") || strings.Contains(all, "preorder") || strings.Contains(all, "pre-order"):
+		return ErrNotReleased
+	case strings.Contains(all, "ownership") || strings.Contains(all, "notowned") || strings.Contains(all, "not owned") ||
+		strings.Contains(all, "rights") || strings.Contains(all, "eligib"):
+		return ErrNoRights
+	}
+	return ErrDenied
 }
 
 // denialDetail summarizes why a license was denied, for the import error message
@@ -43,9 +112,10 @@ func denialDetail(lr licenseResp) string {
 	return strings.Join(parts, "; ")
 }
 
-// License requests a download license for an owned book and unwraps the voucher,
-// returning the (presigned) download URL plus the per-book ffmpeg key/iv.
-func (c *Client) License(ctx context.Context, asin string) (downloadURL, key, iv string, err error) {
+// License requests a download license for an owned book and unwraps the
+// voucher. A denial wraps ErrNotReleased, ErrNoRights or ErrDenied with
+// Audible's reasons; a 401/403 is the account's refusal (IsRefused).
+func (c *Client) License(ctx context.Context, asin string) (License, error) {
 	body, _ := json.Marshal(map[string]any{
 		"supported_drm_types": []string{"Mpeg", "Adrm"},
 		"quality":             "High",
@@ -54,20 +124,28 @@ func (c *Client) License(ctx context.Context, asin string) (downloadURL, key, iv
 	})
 	var lr licenseResp
 	if err := c.doSigned(ctx, http.MethodPost, "/1.0/content/"+url.PathEscape(asin)+"/licenserequest", body, &lr); err != nil {
-		return "", "", "", err
+		return License{}, err
+	}
+	if strings.EqualFold(lr.ContentLicense.DrmType, "Mpeg") && !strings.EqualFold(lr.ContentLicense.StatusCode, "Denied") {
+		return License{}, fmt.Errorf("%w: %s", ErrDRMFree, asin)
 	}
 	if lr.ContentLicense.LicenseResponse == "" {
+		kind := denialKind(lr)
 		if detail := denialDetail(lr); detail != "" {
-			return "", "", "", fmt.Errorf("audible refused a download license for %s (%s)", asin, detail)
+			return License{}, fmt.Errorf("%w: %s (%s)", kind, asin, detail)
 		}
-		return "", "", "", fmt.Errorf("no license voucher returned for %s", asin)
+		return License{}, fmt.Errorf("%w: no license voucher returned for %s", kind, asin)
 	}
-	key, iv, err = DecryptVoucher(lr.ContentLicense.LicenseResponse,
+	key, iv, err := DecryptVoucher(lr.ContentLicense.LicenseResponse,
 		c.creds.DeviceType, c.creds.DeviceSerial, c.creds.CustomerID, asin)
 	if err != nil {
-		return "", "", "", err
+		return License{}, err
 	}
-	return lr.ContentLicense.ContentMetadata.ContentURL.OfflineURL, key, iv, nil
+	meta := lr.ContentLicense.ContentMetadata
+	if meta.ContentURL.OfflineURL == "" {
+		return License{}, fmt.Errorf("the license for %s carries no download URL", asin)
+	}
+	return License{URL: meta.ContentURL.OfflineURL, Key: key, IV: iv, Size: max(meta.ContentReference.ContentSizeInBytes, 0)}, nil
 }
 
 type contentRefResp struct {

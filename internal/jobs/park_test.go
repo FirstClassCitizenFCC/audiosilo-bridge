@@ -327,9 +327,10 @@ func TestUnchangedProgressIsNotSent(t *testing.T) {
 // abandoner is a handler that hears of the jobs the runner ends without it.
 type abandoner struct {
 	handler
-	mu  sync.Mutex
-	got []int64
-	ran atomic.Bool
+	mu   sync.Mutex
+	got  []int64
+	lost []bool // Lost(ctx) at each Abandon
+	ran  atomic.Bool
 }
 
 func (a *abandoner) Run(ctx context.Context, j Job, rep *Reporter) (any, error) {
@@ -337,10 +338,11 @@ func (a *abandoner) Run(ctx context.Context, j Job, rep *Reporter) (any, error) 
 	return a.handler.Run(ctx, j, rep)
 }
 
-func (a *abandoner) Abandon(_ context.Context, j Job) {
+func (a *abandoner) Abandon(ctx context.Context, j Job) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.got = append(a.got, j.ID)
+	a.lost = append(a.lost, Lost(ctx))
 }
 
 func (a *abandoner) abandoned() []int64 {
@@ -360,9 +362,10 @@ func TestAbandonedJobs(t *testing.T) {
 		serverID string
 		setup    func(srv *fakeServer)
 		abandon  bool
+		lost     bool // Abandon hears a lost claim (the server may hand the job out again)
 	}{
 		"cancelled while down": {serverID: "srv", setup: func(srv *fakeServer) { srv.cancel[9] = true }, abandon: true},
-		"lost while down":      {serverID: "srv", setup: func(srv *fakeServer) { srv.notHeld[9] = true }, abandon: true},
+		"lost while down":      {serverID: "srv", setup: func(srv *fakeServer) { srv.notHeld[9] = true }, abandon: true, lost: true},
 		"another server's":     {serverID: "srv-new", setup: func(*fakeServer) {}, abandon: true},
 		"resumed and run":      {serverID: "srv", setup: func(*fakeServer) {}},
 	} {
@@ -384,6 +387,12 @@ func TestAbandonedJobs(t *testing.T) {
 			})
 			if got := h.abandoned(); tc.abandon != (len(got) == 1 && got[0] == 9) || (tc.abandon && h.ran.Load()) {
 				t.Fatalf("abandoned %v (ran %v), want abandoned %v", got, h.ran.Load(), tc.abandon)
+			}
+			h.mu.Lock()
+			lost := slices.Clone(h.lost)
+			h.mu.Unlock()
+			if tc.abandon && !slices.Equal(lost, []bool{tc.lost}) {
+				t.Fatalf("Lost at Abandon = %v, want %v", lost, tc.lost)
 			}
 		})
 	}

@@ -142,10 +142,33 @@ type Abandoner interface {
 
 // abandon tells the job's handler, when it is an Abandoner, that the job ended
 // without it.
-func (r *Runner) abandon(ctx context.Context, job Job) {
+func (r *Runner) abandon(ctx context.Context, job Job) { r.abandonFor(ctx, job, nil) }
+
+// abandonFor is abandon for a job whose context ended with cause: Abandon's
+// context carries it, for Lost.
+func (r *Runner) abandonFor(ctx context.Context, job Job, cause error) {
 	if a, ok := r.handlers[job.Kind].(Abandoner); ok {
+		if cause != nil {
+			ctx = context.WithValue(ctx, abandonCauseKey{}, cause)
+		}
 		a.Abandon(ctx, job)
 	}
+}
+
+// abandonCauseKey is where abandonFor puts why the job ended.
+type abandonCauseKey struct{}
+
+// Lost reports whether the job ended because the server no longer holds its
+// claim (a lease that lapsed while the Bridge was down or cut off): the server
+// may hand the same job out again, to this Bridge, so work it can resume (a
+// partial download) is worth keeping. For a running job's context, or the
+// context Abandon gets. Resumes is false for it all the same.
+func Lost(ctx context.Context) bool {
+	if errors.Is(context.Cause(ctx), errLost) {
+		return true
+	}
+	cause, _ := ctx.Value(abandonCauseKey{}).(error)
+	return errors.Is(cause, errLost)
 }
 
 // Resumes reports whether a job whose context ended will run again under its
@@ -622,7 +645,7 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 		// so what an earlier run of it left (an engine book) is released.
 		cause := context.Cause(ctx)
 		if errors.Is(cause, errCancelRequested) || errors.Is(cause, errLost) {
-			r.abandon(base, ru.job)
+			r.abandonFor(base, ru.job, cause)
 		}
 		return r.settle(base, srv, ru, rep, nil, cause)
 	}
@@ -639,7 +662,7 @@ func (r *Runner) execute(ctx, base context.Context, srv Server, h Handler, ru *r
 	} else if cause := context.Cause(ctx); errors.Is(cause, errCancelRequested) || errors.Is(cause, errLost) {
 		// A recovered job can lose its claim while waiting for a slot, after
 		// its first report succeeded but before its handler ever ran.
-		r.abandon(base, ru.job)
+		r.abandonFor(base, ru.job, cause)
 	}
 	close(done)
 	<-reporting
@@ -932,6 +955,29 @@ type Reporter struct {
 // LocalReporter returns a Reporter that records progress and sends nothing (a
 // handler's tests).
 func LocalReporter() *Reporter { return &Reporter{} }
+
+// CancelContext returns a child of parent and a func that ends it as an
+// admin's cancel does (Resumes is false after it): a handler's tests.
+func CancelContext(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	return ctx, func() { cancel(errCancelRequested) }
+}
+
+// LoseContext returns a child of parent and a func that ends it as a lost
+// claim does (Resumes is false, Lost true after it): a handler's tests.
+func LoseContext(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	return ctx, func() { cancel(errLost) }
+}
+
+// AbandonContext is the context the runner hands Abandon for a job whose claim
+// was lost (lost true) or cancelled: a handler's tests.
+func AbandonContext(parent context.Context, lost bool) context.Context {
+	if lost {
+		return context.WithValue(parent, abandonCauseKey{}, errLost)
+	}
+	return context.WithValue(parent, abandonCauseKey{}, errCancelRequested)
+}
 
 // Path is the job's book path as the server's last answer to a report gave it,
 // "" when no answer carried one: a book the server saw move since the claim is

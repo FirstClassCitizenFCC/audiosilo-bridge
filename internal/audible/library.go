@@ -2,6 +2,7 @@ package audible
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -65,7 +66,7 @@ const (
 // "contributed nothing new" stop never fires - one blank-ASIN item was enough to
 // spin the pager to its page cap. The API always sends an ASIN; this is the
 // defensive path, and collapsing two same-titled ASIN-less items loses nothing
-// (Record.Key is the ASIN, so downstream can't tell them apart anyway).
+// (the record's identity is the ASIN, so downstream can't tell them apart anyway).
 func (it libItem) dedupeKey() string {
 	if it.ASIN != "" {
 		return it.ASIN
@@ -73,15 +74,15 @@ func (it libItem) dedupeKey() string {
 	return "title:" + it.Title
 }
 
-// Library lists the account's owned audiobooks as import records (metadata only;
-// SrcPath is empty - the file is fetched on demand by Acquire). Items are deduped
+// Library lists the account's owned audiobooks as import records (metadata
+// only: audible.import fetches the file). Items are deduped
 // by dedupeKey, so a repeated page can neither duplicate a book nor spin the pager.
 func (c *Client) Library(ctx context.Context) ([]source.Record, error) {
 	var recs []source.Record
 	seen := make(map[string]bool, libraryPageSize) // one page is the common case
 	for page := 1; page <= maxLibraryPages; page++ {
 		q := url.Values{
-			"response_groups": {"contributors,series,product_desc,product_attrs,customer_rights"},
+			"response_groups": {libraryGroups},
 			"num_results":     {strconv.Itoa(libraryPageSize)},
 			"page":            {strconv.Itoa(page)},
 		}
@@ -109,10 +110,34 @@ func (c *Client) Library(ctx context.Context) ([]source.Record, error) {
 	return recs, nil
 }
 
+// libraryGroups are the response groups a library listing and a title read ask for.
+const libraryGroups = "contributors,series,product_desc,product_attrs,customer_rights"
+
+// ErrNotInLibrary is a title the account's library doesn't hold.
+var ErrNotInLibrary = errors.New("the title isn't in the account's Audible library")
+
+// Title reads one title of the account's library (GET /1.0/library/{asin}) as
+// an import record, as Library would list it. A title the library doesn't hold
+// is ErrNotInLibrary.
+func (c *Client) Title(ctx context.Context, asin string) (source.Record, error) {
+	var resp struct {
+		Item *libItem `json:"item"`
+	}
+	q := url.Values{"response_groups": {libraryGroups}}
+	err := c.doSigned(ctx, http.MethodGet, "/1.0/library/"+url.PathEscape(asin)+"?"+q.Encode(), nil, &resp)
+	if HTTPStatus(err) == http.StatusNotFound || (err == nil && (resp.Item == nil || !strings.EqualFold(resp.Item.ASIN, asin))) {
+		return source.Record{}, ErrNotInLibrary
+	}
+	if err != nil {
+		return source.Record{}, err
+	}
+	return resp.Item.toRecord(time.Now()), nil
+}
+
 func (it libItem) toRecord(now time.Time) source.Record {
 	reason, preorder := it.unavailableReason(now)
 	rec := source.Record{
-		Title: it.Title, TitleShort: it.Title, ASIN: it.ASIN, Key: it.ASIN,
+		Title: it.Title, TitleShort: it.Title, ASIN: it.ASIN,
 		FileName:          safeFileName(it.Title) + ".m4b",
 		RuntimeSec:        float64(it.RuntimeLengthMin) * 60,
 		UnavailableReason: reason,
@@ -303,7 +328,7 @@ func firstNonEmptyStr(vals ...string) string {
 func safeFileName(s string) string {
 	s = strings.TrimSpace(s)
 	r := strings.NewReplacer("/", "-", "\\", "-", ":", " -", "\x00", "")
-	out := strings.TrimRight(r.Replace(s), " .")
+	out := strings.Trim(r.Replace(s), " .") // no hidden (dot) name, which the server never indexes
 	if out == "" {
 		out = "audiobook"
 	}

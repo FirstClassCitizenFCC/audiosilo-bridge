@@ -2,11 +2,12 @@ package importjob
 
 import (
 	"path"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/placement"
@@ -14,44 +15,28 @@ import (
 	"github.com/kodestar/audiosilo-server/pkg/match"
 )
 
-// PlannedItem is one import candidate with its computed destination and whether it
-// already exists on the server.
+// PlannedItem is one import candidate's computed destination. Whether the
+// library already holds it is the caller's question (BookMatcher).
 type PlannedItem struct {
-	Record         source.Record
-	RelPath        string // suggested destination (folder + filename), library-relative
-	Kind           string // placement kind (series existing/new / standalone)
-	Note           string // human explanation of the placement
-	ExistsOnServer bool   // already indexed on the server (matched by ASIN or author+title)
+	RelPath string // suggested destination (folder + filename), library-relative
 }
 
 // PlanOptions configures Plan.
 type PlanOptions struct {
 	Mode     placement.Mode
 	Template string // used when Mode == placement.ModeTemplate
-	// SkipExistsCheck computes destinations without the existence check (a caller
-	// that matched the records itself, see BookMatcher).
-	SkipExistsCheck bool
 	// Books is the library's books (the server's paged listing, read whole). Plan
-	// matches siblings AND existence locally against it; nil is an empty library.
-	// (The manager could query the server per record; the Bridge always holds the
-	// listing, so there is no per-record path.)
+	// finds siblings and author folders locally in it; nil is an empty library.
 	Books []link.LibraryBook
-	// Rejected marks records (by Record.Key - the ASIN for Audible records) whose
-	// automatic server match the user has declared wrong ("Not on server"). Plan
-	// reports them as not existing, so Run imports them instead of skipping them -
-	// folded into planning so every caller gets correct items by construction.
-	Rejected map[string]bool
 }
 
-// Plan computes a destination and an existence check for each record against a
-// library's books (opts.Books). For series books the existing siblings anchor the
-// placement so it mirrors the established folder/shortcode convention.
+// Plan computes a destination for each record against a library's books
+// (opts.Books). For series books the existing siblings anchor the placement so
+// it mirrors the established folder/shortcode convention.
 func Plan(recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
 	items := make([]PlannedItem, 0, len(recs))
-	// Build the bulk-match candidate list once (not per record) for the existence
-	// check, and authorFolders (normalized author -> existing folder spelling) so a
+	// authorFolders (normalized author -> existing folder spelling) so a
 	// differently-spaced author reuses its existing folder. See AuthorFolders.
-	matcher := NewBookMatcher(opts.Books)
 	authorFolders := AuthorFolders(opts.Books)
 	for _, rec := range recs {
 		var siblings []placement.Sibling
@@ -64,7 +49,7 @@ func Plan(recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
 		// Name by the clean book title - strip the series prefix and "(Book N)" /
 		// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
 		// Truth", not "... - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
-		clean := match.CleanTitle(rec.Title, rec.Series)
+		clean := match.CleanTitle(rec.Title, seriesAsTitled(rec.Title, rec.Series))
 		sug, err := placement.SuggestWith(opts.Mode, opts.Template, placement.Input{
 			Author:       rec.Author,
 			Title:        clean,
@@ -72,7 +57,7 @@ func Plan(recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
 			SeriesName:   rec.Series,
 			Sequence:     rec.Sequence,
 			HasSequence:  rec.HasSequence,
-			Filename:     recordFileName(rec),
+			Filename:     rec.FileName,
 			ASIN:         rec.ASIN,
 			Narrator:     rec.Narrator,
 			Year:         rec.Year,
@@ -82,39 +67,32 @@ func Plan(recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
 		if err != nil {
 			return nil, err
 		}
-		exists := false
-		if !opts.SkipExistsCheck && !opts.Rejected[rec.Key] {
-			_, exists = matcher.Match(rec)
-		}
-		items = append(items, PlannedItem{
-			Record:         rec,
-			RelPath:        path.Join(sug.RelPath, sug.Filename),
-			Kind:           sug.Kind.String(),
-			Note:           sug.Note,
-			ExistsOnServer: exists,
-		})
+		items = append(items, PlannedItem{RelPath: path.Join(sug.RelPath, sug.Filename)})
 	}
 	return items, nil
 }
 
-// ApplyDestinations replaces planned destinations with user-chosen ones, keyed by
-// Record.Key (the ASIN for Audible records). A destination is the full
-// library-relative path including the filename, as the admin chose it.
-// Anything unsafe (absolute, empty, or escaping the root after Clean) is ignored
-// and the planned path kept; transfer.SafeJoin re-checks at place time.
-func ApplyDestinations(items []PlannedItem, dests map[string]string) {
-	for i, it := range items {
-		d, ok := dests[it.Record.Key]
-		if !ok {
-			continue
-		}
-		d = strings.TrimLeft(path.Clean(strings.TrimSpace(d)), "/")
-		if d == "" || d == "." || d == ".." || strings.HasPrefix(d, "../") {
-			continue
-		}
-		items[i].RelPath = d
-		items[i].Note = "manually chosen destination"
+// seriesAsTitled is the series name as the title opens with it, with the
+// article before it ("The Orchard Cycle: Books 1-3" in series "Orchard Cycle"
+// is "The Orchard Cycle"), so CleanTitle removes the article and the series
+// together; given the bare name it leaves the article and the separator
+// behind ("The : Books 1-3"). Any other title gets series as it is.
+func seriesAsTitled(title, series string) string {
+	t, s := strings.TrimSpace(title), strings.TrimSpace(series)
+	if s == "" {
+		return series
 	}
+	for _, art := range []string{"the ", "a ", "an "} {
+		n := len(art) + len(s)
+		if len(t) < n || !strings.EqualFold(t[:len(art)], art) || !strings.EqualFold(t[len(art):n], s) {
+			continue
+		}
+		if r, _ := utf8.DecodeRuneInString(t[n:]); n < len(t) && (unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			continue // the series name is the start of a longer word
+		}
+		return t[:n]
+	}
+	return series
 }
 
 // BookMatcher matches records against a fixed server-book list via the shared
@@ -418,11 +396,4 @@ func parsePosition(s string) (float64, bool) {
 		return 0, false
 	}
 	return v, true
-}
-
-func recordFileName(rec source.Record) string {
-	if rec.FileName != "" {
-		return rec.FileName
-	}
-	return filepath.Base(rec.SrcPath)
 }

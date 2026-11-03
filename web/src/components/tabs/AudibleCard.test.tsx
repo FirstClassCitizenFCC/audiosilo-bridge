@@ -221,6 +221,9 @@ describe('AudibleCard', () => {
     expect(within(row).getByLabelText('Library')).toHaveValue('');
     await userEvent.selectOptions(within(row).getByLabelText('Belongs to'), '3');
     await userEvent.selectOptions(within(row).getByLabelText('Library'), '2');
+    // The policy is the server's once the account exists: no selector here.
+    expect(within(row).queryByLabelText('Back up')).not.toBeInTheDocument();
+    expect(within(row).getByText(/changed in the server's console/)).toBeInTheDocument();
     await userEvent.click(within(row).getByRole('button', { name: 'Save' }));
     expect(await within(row).findByText('Kids')).toBeInTheDocument();
     expect(lastCall(calls, 'PUT', '/api/accounts/audible/acct0001')?.body).toEqual({

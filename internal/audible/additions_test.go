@@ -160,40 +160,87 @@ func TestAuthorizeURLEndpoints(t *testing.T) {
 	}
 }
 
-// rangeServer serves body, honouring a Range from its start offset when resume
-// is on, else always answering 200 with the whole body.
-func rangeServer(t *testing.T, body string, resume bool, ranges *[]string) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rg := r.Header.Get("Range")
-		*ranges = append(*ranges, rg)
-		if rg != "" && resume {
-			start, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(rg, "bytes="), "-"))
-			w.Header().Set("Content-Range", "bytes "+strconv.Itoa(start)+"-"+strconv.Itoa(len(body)-1)+"/"+strconv.Itoa(len(body)))
-			w.Header().Set("Content-Length", strconv.Itoa(len(body)-start))
-			w.WriteHeader(http.StatusPartialContent)
-			_, _ = io.WriteString(w, body[start:])
-			return
-		}
-		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-		_, _ = io.WriteString(w, body)
-	}))
+// fileServer serves body with http.ServeContent (Range and If-Range against
+// etag), recording each request's Range and If-Range; cut > 0 aborts the next
+// response after that many bytes, as a dropped connection does.
+type fileServer struct {
+	*httptest.Server
+	body     string
+	etag     string
+	cut      atomic.Int64
+	requests []string // "Range|If-Range" of each request
 }
 
-// A partial file resumes with a Range and is appended; progress counts the bytes
-// already held.
-func TestDownloadResumes(t *testing.T) {
-	body := strings.Repeat("0123456789", 300)
-	var ranges []string
-	ts := rangeServer(t, body, true, &ranges)
-	defer ts.Close()
-	dest := filepath.Join(t.TempDir(), "book.aaxc")
-	if err := os.WriteFile(dest, []byte(body[:1000]), 0o600); err != nil {
+func newFileServer(t *testing.T, body, etag string) *fileServer {
+	t.Helper()
+	fs := &fileServer{body: body, etag: etag}
+	fs.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fs.requests = append(fs.requests, r.Header.Get("Range")+"|"+r.Header.Get("If-Range"))
+		if fs.etag != "" {
+			w.Header().Set("ETag", fs.etag)
+		}
+		out := w
+		if n := fs.cut.Swap(0); n > 0 {
+			out = &cutWriter{ResponseWriter: w, left: n}
+		}
+		http.ServeContent(out, r, "book.aaxc", time.Unix(1_700_000_000, 0), strings.NewReader(fs.body))
+	}))
+	t.Cleanup(fs.Close)
+	return fs
+}
+
+// cutWriter aborts the response after left bytes.
+type cutWriter struct {
+	http.ResponseWriter
+	left int64
+}
+
+func (c *cutWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > c.left {
+		n, _ := c.ResponseWriter.Write(p[:c.left])
+		c.ResponseWriter.(http.Flusher).Flush()
+		_ = n
+		panic(http.ErrAbortHandler)
+	}
+	c.left -= int64(len(p))
+	return c.ResponseWriter.Write(p)
+}
+
+func writePartial(t *testing.T, dest, content string, st *partialState) {
+	t.Helper()
+	if err := os.WriteFile(dest, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if st != nil {
+		b, _ := json.Marshal(st)
+		if err := os.WriteFile(StatePath(dest), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A download cut part way keeps what arrived and its state; the next one, under
+// a new license's URL, resumes with a Range and If-Range and appends; progress
+// counts the bytes already held.
+func TestDownloadResumesAfterACut(t *testing.T) {
+	body := strings.Repeat("0123456789", 3000)
+	srv := newFileServer(t, body, `"v1"`)
+	srv.cut.Store(10000)
+	dest := filepath.Join(t.TempDir(), "acct-B0FAKE0001.aaxc.part")
+	cl := testClient(t, srv.URL)
+	if err := cl.Download(context.Background(), srv.URL+"/f?sig=one", dest, DownloadOptions{}); err == nil {
+		t.Fatal("a cut download must fail")
+	}
+	if st, err := os.Stat(dest); err != nil || st.Size() == 0 || st.Size() >= int64(len(body)) {
+		t.Fatalf("the partial wasn't kept: %v %v", st, err)
+	}
+	held, _ := os.Stat(dest)
 	var last int64
-	err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{
-		OnProgress: func(copied, _ int64) { last = copied },
+	var hookTotal, hookHeld int64
+	err := cl.Download(context.Background(), srv.URL+"/f?sig=two", dest, DownloadOptions{
+		ExpectedSize: int64(len(body)),
+		OnProgress:   func(copied, _ int64) { last = copied },
+		BeforeWrite:  func(total, h int64) error { hookTotal, hookHeld = total, h; return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -201,58 +248,100 @@ func TestDownloadResumes(t *testing.T) {
 	if got, _ := os.ReadFile(dest); string(got) != body {
 		t.Fatalf("resumed file has %d bytes, want the whole %d", len(got), len(body))
 	}
-	if len(ranges) != 1 || ranges[0] != "bytes=1000-" || last != int64(len(body)) {
-		t.Fatalf("ranges = %v, last progress = %d", ranges, last)
+	want := "bytes=" + strconv.FormatInt(held.Size(), 10) + "-|\"v1\""
+	if len(srv.requests) != 2 || srv.requests[1] != want || last != int64(len(body)) {
+		t.Fatalf("requests = %v (want %q second), last progress = %d", srv.requests, want, last)
+	}
+	if hookTotal != int64(len(body)) || hookHeld != held.Size() {
+		t.Fatalf("BeforeWrite saw total %d held %d", hookTotal, hookHeld)
 	}
 }
 
-// A server that ignores the Range (200, the whole body) starts the file again
-// instead of appending the whole body to the partial one.
-func TestDownloadRestartsOnFullAnswer(t *testing.T) {
+// Denied: a partial nothing vouches for is never appended to. No state file, a
+// state for another size, or a state with neither validator nor size: the file
+// starts again without a Range (the last only when the license gives no size
+// either: the license's size is proof enough for a 206 of that total).
+func TestDownloadUnprovenPartialStartsAgain(t *testing.T) {
 	body := strings.Repeat("ab", 700)
-	var ranges []string
-	ts := rangeServer(t, body, false, &ranges)
-	defer ts.Close()
-	dest := filepath.Join(t.TempDir(), "book.aaxc")
-	if err := os.WriteFile(dest, []byte("stale-bytes"), 0o600); err != nil {
-		t.Fatal(err)
+	for name, st := range map[string]*partialState{
+		"no state":        nil,
+		"another size":    {Size: 999, ETag: `"v1"`},
+		"nothing to test": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newFileServer(t, body, `"v1"`)
+			dest := filepath.Join(t.TempDir(), "book.aaxc")
+			writePartial(t, dest, "stale-bytes", st)
+			expected := int64(len(body))
+			if name == "nothing to test" {
+				expected = 0
+			}
+			if err := testClient(t, srv.URL).Download(context.Background(), srv.URL+"/f", dest, DownloadOptions{ExpectedSize: expected}); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := os.ReadFile(dest); string(got) != body {
+				t.Fatalf("file = %d bytes, want %d", len(got), len(body))
+			}
+			if len(srv.requests) != 1 || srv.requests[0] != "|" {
+				t.Fatalf("requests = %v, want one without a Range", srv.requests)
+			}
+		})
 	}
-	if err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{}); err != nil {
+}
+
+// The file changed behind the URL: If-Range doesn't match, the server answers
+// 200 with the whole new file, which replaces the partial (one request).
+func TestDownloadIfRangeMismatchStartsAgain(t *testing.T) {
+	body := strings.Repeat("new!", 400)
+	srv := newFileServer(t, body, `"v2"`)
+	dest := filepath.Join(t.TempDir(), "book.aaxc")
+	writePartial(t, dest, "old-bytes", &partialState{Size: int64(len(body)), ETag: `"v1"`})
+	if err := testClient(t, srv.URL).Download(context.Background(), srv.URL+"/f", dest, DownloadOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(dest); string(got) != body {
-		t.Fatalf("file = %d bytes, want %d", len(got), len(body))
+		t.Fatalf("file = %q...", string(got)[:12])
+	}
+	if len(srv.requests) != 1 || srv.requests[0] != `bytes=9-|"v1"` {
+		t.Fatalf("requests = %v", srv.requests)
+	}
+	if st, ok := readState(dest); !ok || st.ETag != `"v2"` {
+		t.Fatalf("state = %+v, %v: want the new file's", st, ok)
 	}
 }
 
-// A 206 that doesn't start where the file ends is not appended.
+// A 206 that doesn't start where the file ends, or is for a file of another
+// size, is not appended: the file starts again.
 func TestDownloadRejectsMisplacedRange(t *testing.T) {
 	body := strings.Repeat("x", 500)
-	var calls int
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if r.Header.Get("Range") != "" {
-			w.Header().Set("Content-Range", "bytes 0-499/500")
-			w.WriteHeader(http.StatusPartialContent)
-			_, _ = io.WriteString(w, body)
-			return
-		}
-		_, _ = io.WriteString(w, body)
-	}))
-	defer ts.Close()
-	dest := filepath.Join(t.TempDir(), "book.aaxc")
-	if err := os.WriteFile(dest, []byte("yyyy"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := os.ReadFile(dest); string(got) != body || calls != 2 {
-		t.Fatalf("file = %q (%d calls)", got, calls)
+	for name, cr := range map[string]string{"elsewhere": "bytes 0-499/500", "other size": "bytes 4-499/9999"} {
+		t.Run(name, func(t *testing.T) {
+			var calls int
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Header.Get("Range") != "" {
+					w.Header().Set("Content-Range", cr)
+					w.WriteHeader(http.StatusPartialContent)
+					_, _ = io.WriteString(w, body)
+					return
+				}
+				_, _ = io.WriteString(w, body)
+			}))
+			defer ts.Close()
+			dest := filepath.Join(t.TempDir(), "book.aaxc")
+			writePartial(t, dest, "yyyy", &partialState{Size: 500})
+			if err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := os.ReadFile(dest); string(got) != body || calls != 2 {
+				t.Fatalf("file = %d bytes (%d calls)", len(got), calls)
+			}
+		})
 	}
 }
 
-// A whole file answered 416 with its own size is done, not fetched again.
+// A whole file answered 416 with its own (recorded) size is done, not fetched
+// again.
 func TestDownloadAlreadyWhole(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Range", "bytes */4")
@@ -260,14 +349,68 @@ func TestDownloadAlreadyWhole(t *testing.T) {
 	}))
 	defer ts.Close()
 	dest := filepath.Join(t.TempDir(), "book.aaxc")
-	if err := os.WriteFile(dest, []byte("done"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writePartial(t, dest, "done", &partialState{Size: 4})
 	if err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(dest); string(got) != "done" {
 		t.Fatalf("file = %q", got)
+	}
+}
+
+// BeforeWrite's refusal (the caller's free-space check) ends the download
+// before a byte is written, the partial kept for later.
+func TestDownloadBeforeWriteRefuses(t *testing.T) {
+	body := strings.Repeat("q", 1000)
+	srv := newFileServer(t, body, `"v1"`)
+	dest := filepath.Join(t.TempDir(), "book.aaxc")
+	writePartial(t, dest, body[:100], &partialState{Size: 1000, ETag: `"v1"`})
+	full := errors.New("disk full")
+	err := testClient(t, srv.URL).Download(context.Background(), srv.URL+"/f", dest, DownloadOptions{
+		BeforeWrite: func(total, held int64) error {
+			if total != 1000 || held != 100 {
+				t.Errorf("BeforeWrite(%d, %d)", total, held)
+			}
+			return full
+		},
+	})
+	if !errors.Is(err, full) {
+		t.Fatalf("err = %v", err)
+	}
+	if got, _ := os.ReadFile(dest); string(got) != body[:100] {
+		t.Fatal("the partial was changed")
+	}
+}
+
+// RemovePartial removes the file and its state.
+func TestRemovePartial(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "book.aaxc")
+	writePartial(t, dest, "x", &partialState{Size: 9})
+	RemovePartial(dest)
+	for _, p := range []string{dest, StatePath(dest)} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s left", p)
+		}
+	}
+}
+
+// A cancelled download stops and keeps what arrived (the caller decides).
+func TestDownloadCancel(t *testing.T) {
+	started := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100000")
+		_, _ = io.WriteString(w, strings.Repeat("c", 10))
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { <-started; cancel() }()
+	dest := filepath.Join(t.TempDir(), "book.aaxc")
+	err := testClient(t, ts.URL).Download(ctx, ts.URL+"/f", dest, DownloadOptions{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
 
@@ -387,6 +530,150 @@ func TestReleaseDay(t *testing.T) {
 		"2016-08": "", "2016": "", "": "", "soon": ""} {
 		if got := releaseDay(in); got != want {
 			t.Errorf("releaseDay(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Denied: a partial that can't be removed (a read-only temp folder) and a
+// server that answers its Range with a 206 from elsewhere end the download
+// with the removal's error, instead of asking for the same Range again and
+// again.
+func TestDownloadRestartNeedsThePartialGone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes files from a read-only folder")
+	}
+	var calls atomic.Int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Range", "bytes 0-9/10")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = io.WriteString(w, "0123456789")
+	}))
+	defer ts.Close()
+	dir := filepath.Join(t.TempDir(), "tmp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, "book.aaxc")
+	writePartial(t, dest, "0123", &partialState{Size: 10})
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{})
+	if err == nil || calls.Load() > 2 {
+		t.Fatalf("err = %v after %d requests", err, calls.Load())
+	}
+}
+
+// A 200 with no length, cut short, is no whole file: the license's size is
+// the file's.
+func TestDownloadLengthlessBodyCutShort(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, strings.Repeat("a", 500))
+		w.(http.Flusher).Flush() // chunked: no Content-Length
+	}))
+	defer ts.Close()
+	var total int64
+	dest := filepath.Join(t.TempDir(), "book.aaxc")
+	err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{
+		ExpectedSize: 2000, BeforeWrite: func(t, _ int64) error { total = t; return nil }})
+	if !errors.Is(err, io.ErrUnexpectedEOF) || total != 2000 {
+		t.Fatalf("err = %v, BeforeWrite total %d", err, total)
+	}
+}
+
+// A connection that goes quiet (no answer, or a body that stops) ends the
+// attempt with ErrStalled once nothing has arrived for the stall time, keeping
+// what arrived; the caller resumes it.
+func TestDownloadStalls(t *testing.T) {
+	stallClient := func(t *testing.T, base string) *Client {
+		t.Helper()
+		keyPEM, _ := pemKey(t, false)
+		c, err := NewClient(Credentials{ADPToken: "ADP", DevicePrivateKey: keyPEM, DeviceType: deviceType,
+			DeviceSerial: "SER", CustomerID: "CUST", Marketplace: "us"},
+			WithEndpoints(Endpoints{API: base}), noSleep(), withStall(150*time.Millisecond))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	for name, headers := range map[string]bool{"mid-body": true, "no answer": false} {
+		t.Run(name, func(t *testing.T) {
+			release := make(chan struct{})
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if headers {
+					w.Header().Set("Content-Length", "2000")
+					w.Header().Set("ETag", `"v1"`)
+					_, _ = io.WriteString(w, strings.Repeat("b", 600))
+					w.(http.Flusher).Flush()
+				}
+				select {
+				case <-release:
+				case <-r.Context().Done():
+				}
+			}))
+			defer ts.Close()
+			defer close(release)
+			dest := filepath.Join(t.TempDir(), "book.aaxc")
+			start := time.Now()
+			err := stallClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{ExpectedSize: 2000})
+			if !errors.Is(err, ErrStalled) || time.Since(start) > 10*time.Second {
+				t.Fatalf("err = %v after %v", err, time.Since(start))
+			}
+			if got, _ := os.ReadFile(dest); headers && len(got) != 600 {
+				t.Fatalf("kept %d bytes, want the 600 that arrived", len(got))
+			}
+		})
+	}
+	// A body that keeps coming, however slowly, is no stall.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "10")
+		for i := range 10 {
+			_, _ = io.WriteString(w, strconv.Itoa(i))
+			w.(http.Flusher).Flush()
+			time.Sleep(40 * time.Millisecond)
+		}
+	}))
+	defer ts.Close()
+	dest := filepath.Join(t.TempDir(), "slow.aaxc")
+	if err := stallClient(t, ts.URL).Download(context.Background(), ts.URL+"/f", dest, DownloadOptions{}); err != nil {
+		t.Fatalf("a slow body: %v", err)
+	}
+}
+
+// A download URL that doesn't parse, or a redirect to one, is named in Go's
+// error with its query: neither the request's URL nor a Location's signature
+// reaches the error.
+func TestDownloadErrorHidesAnUnparsableURL(t *testing.T) {
+	err := testClient(t, "http://127.0.0.1:1").Download(context.Background(),
+		"https://cdn.example/f%zz.aaxc?Policy=POL&Signature=SECRETSIG&Key-Pair-Id=KP", filepath.Join(t.TempDir(), "x"), DownloadOptions{})
+	if err == nil || strings.Contains(err.Error(), "SECRETSIG") || strings.Contains(err.Error(), "Policy") {
+		t.Fatalf("an unparsable URL: %v", err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "https://cdn.example/f%zz.aaxc?Signature=SECRETSIG2")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer ts.Close()
+	err = testClient(t, ts.URL).Download(context.Background(), ts.URL+"/cds", filepath.Join(t.TempDir(), "y"), DownloadOptions{})
+	if err == nil || strings.Contains(err.Error(), "SECRETSIG2") {
+		t.Fatalf("an unparsable Location: %v", err)
+	}
+}
+
+// A title's file name is never hidden (a dot name the server never indexes),
+// never empty, and has no separator.
+func TestSafeFileName(t *testing.T) {
+	for in, want := range map[string]string{
+		"...And Ladies of the Club": "And Ladies of the Club",
+		".hack//Sign":               "hack--Sign",
+		"Re: Zero. ":                "Re - Zero",
+		" . ":                       "audiobook",
+	} {
+		if got := safeFileName(in); got != want {
+			t.Errorf("safeFileName(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

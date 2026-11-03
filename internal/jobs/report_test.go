@@ -172,3 +172,19 @@ func TestLocalReporterRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCancelContextReadsAsAnAdminsCancel(t *testing.T) {
+	ctx, cancel := CancelContext(context.Background())
+	if !Resumes(ctx) {
+		t.Fatal("a running job's context resumes")
+	}
+	cancel()
+	if ctx.Err() == nil || Resumes(ctx) {
+		t.Fatal("an admin's cancel ends the job for good")
+	}
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	if !Resumes(stopped) {
+		t.Fatal("a stop resumes at the next start")
+	}
+}

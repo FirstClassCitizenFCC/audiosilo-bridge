@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -103,8 +104,8 @@ func TestClientLibrary(t *testing.T) {
 	if r.ASIN != "B01" || r.Author != "Will Wight" || r.Series != "Cradle" || !r.HasSequence || r.Sequence != 2 {
 		t.Fatalf("mapped record wrong: %+v", r)
 	}
-	if r.Year != "2016" || r.FileName != "Soulsmith.m4b" || r.SrcPath != "" {
-		t.Fatalf("record fields: year=%q file=%q src=%q", r.Year, r.FileName, r.SrcPath)
+	if r.Year != "2016" || r.FileName != "Soulsmith.m4b" {
+		t.Fatalf("record fields: year=%q file=%q", r.Year, r.FileName)
 	}
 	if r.ReleaseDate != "2016-08-01" || r.SeriesPosition != "2" || len(r.Authors) != 1 || r.Authors[0] != "Will Wight" {
 		t.Fatalf("record: release=%q position=%q authors=%q", r.ReleaseDate, r.SeriesPosition, r.Authors)
@@ -233,15 +234,15 @@ func TestClientLicense(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	url, k, iv2, err := testClient(t, ts.URL).License(context.Background(), asin)
+	lic, err := testClient(t, ts.URL).License(context.Background(), asin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if url != "https://cdn.example/x.aaxc?sig=1" {
-		t.Fatalf("download url = %q", url)
+	if lic.URL != "https://cdn.example/x.aaxc?sig=1" {
+		t.Fatalf("download url = %q", lic.URL)
 	}
-	if k != "aaaa1111bbbb2222cccc3333dddd4444" || iv2 != "4444dddd3333cccc2222bbbb1111aaaa" {
-		t.Fatalf("voucher key/iv = %q / %q", k, iv2)
+	if lic.Key != "aaaa1111bbbb2222cccc3333dddd4444" || lic.IV != "4444dddd3333cccc2222bbbb1111aaaa" {
+		t.Fatalf("voucher key/iv = %q / %q", lic.Key, lic.IV)
 	}
 }
 
@@ -256,12 +257,12 @@ func TestClientLicenseDenied(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	_, _, _, err := testClient(t, ts.URL).License(context.Background(), "B00")
+	_, err := testClient(t, ts.URL).License(context.Background(), "B00")
 	if err == nil {
 		t.Fatal("expected an error for a denied license")
 	}
-	if !strings.Contains(err.Error(), "ContentEligibility") || !strings.Contains(err.Error(), "refused") {
-		t.Fatalf("denial detail missing from error: %v", err)
+	if !strings.Contains(err.Error(), "ContentEligibility") || !errors.Is(err, ErrNoRights) {
+		t.Fatalf("denial detail or kind missing from error: %v", err)
 	}
 }
 
@@ -401,5 +402,19 @@ func TestRegisterParse(t *testing.T) {
 	}
 	if _, err := creds.PrivateKey(); err != nil {
 		t.Fatalf("registered key not parseable: %v", err)
+	}
+}
+
+// A license granted as a DRM-free MP3 (drm_type Mpeg, no voucher) is no
+// denial: ErrDRMFree, not ErrDenied.
+func TestClientLicenseDRMFree(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"content_license":{"status_code":"Granted","drm_type":"Mpeg",
+			"content_metadata":{"content_url":{"offline_url":"https://cdn.example/x.mp3?sig=1"}}}}`))
+	}))
+	defer ts.Close()
+	_, err := testClient(t, ts.URL).License(context.Background(), "B00")
+	if !errors.Is(err, ErrDRMFree) || errors.Is(err, ErrDenied) || strings.Contains(err.Error(), "sig=1") {
+		t.Fatalf("err = %v, want ErrDRMFree", err)
 	}
 }
