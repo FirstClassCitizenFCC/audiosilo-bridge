@@ -7,7 +7,7 @@ toolchain go1.26.10
 require (
 	github.com/dlclark/regexp2 v1.12.0
 	github.com/kodestar/audiosilo-meta v0.21.0
-	github.com/kodestar/audiosilo-server v1.17.5-0.20261103105508-f1816a85ea42
+	github.com/kodestar/audiosilo-server v1.17.5-0.20261103112619-eec93d3f7a0b
 	github.com/mmcdole/gofeed v1.5.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/ulikunitz/xz v0.5.15
