@@ -30,6 +30,7 @@ func main() {
 	fake := audiblefake.New(audiblefake.Options{LastPositionsMax: *maxASINs})
 	fmt.Fprintf(os.Stderr, "Audible fake on http://%s (AUDIOSILO_BRIDGE_AUDIBLE_FAKE_URL=http://%s)\n"+
 		"controls: GET /_fake/calls, POST /_fake/refuse, GET /_fake/titles,\n"+
+		"  POST /_fake/old-profile (every device so far on the older profile: licenses denied as throttled),\n"+
 		"  POST /_fake/cut?after=BYTES (the next download drops part way), POST /_fake/expire (download URLs expire),\n"+
 		"  POST /_fake/release?asin=ASIN (a preorder comes out today)\n", *listen, *listen)
 	srv := &http.Server{Addr: *listen, Handler: fake.Handler(), ReadHeaderTimeout: 10 * time.Second}

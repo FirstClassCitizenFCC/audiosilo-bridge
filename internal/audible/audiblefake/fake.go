@@ -62,10 +62,40 @@ type Options struct {
 	FFmpeg string
 }
 
-// Registration is one device registration the fake accepted.
+// Registration is one device registration the fake accepted, with the device
+// profile it registered as (registration_data's app, os and software versions).
 type Registration struct {
-	Serial     string `json:"serial"`
-	DeviceName string `json:"device_name"`
+	Serial          string `json:"serial"`
+	DeviceName      string `json:"device_name"`
+	AppVersion      string `json:"app_version"`
+	OSVersion       string `json:"os_version"`
+	SoftwareVersion string `json:"software_version"`
+}
+
+// The device profile the fake licenses, as Amazon has since about September
+// 2026 (mkb79/Audible#909, PR #910): a device registered with other versions,
+// or a serial that isn't 40 ASCII letters and digits, is registered (and lists
+// its library) but every license request is Denied with the three reasons a
+// throttled device gets. Kept here, not read from the audible package (which
+// the fake never imports), so a change on one side alone fails the tests.
+const (
+	ProfileApp      = "4.60"
+	ProfileOS       = "26.2"
+	ProfileSoftware = "46000856"
+)
+
+// currentProfile reports whether a registration's serial and versions are the
+// profile the fake licenses.
+func currentProfile(serial string, data map[string]string) bool {
+	if len(serial) != 40 {
+		return false
+	}
+	for _, c := range serial {
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return data["app_version"] == ProfileApp && data["os_version"] == ProfileOS && data["software_version"] == ProfileSoftware
 }
 
 // PutPosition is one place written back with PUT /1.0/lastpositions/{asin}.
@@ -132,10 +162,13 @@ type pendingCode struct {
 type device struct {
 	serial  string
 	devType string
-	adp     string
-	access  string
-	refresh string
-	pub     *rsa.PublicKey
+	// licensed: registered with the current profile (currentProfile); a
+	// device that isn't gets the throttled denial on every license request.
+	licensed bool
+	adp      string
+	access   string
+	refresh  string
+	pub      *rsa.PublicKey
 }
 
 // New returns a fake holding the fixture library and places.
@@ -192,8 +225,21 @@ func (f *Fake) Refuse() {
 	f.mu.Unlock()
 }
 
+// OldProfile marks every device registered so far as registered with the
+// older profile, as a device an earlier Bridge registered is: its license
+// requests are Denied as throttled from now on (a sign-in again registers one
+// that isn't).
+func (f *Fake) OldProfile() {
+	f.mu.Lock()
+	for _, d := range f.devices {
+		d.licensed = false
+	}
+	f.mu.Unlock()
+}
+
 // Handler serves the fake. The /_fake/ routes are its own controls, for a live
-// check: GET /_fake/calls, POST /_fake/refuse, GET /_fake/titles.
+// check: GET /_fake/calls, POST /_fake/refuse, POST /_fake/old-profile, GET
+// /_fake/titles.
 func (f *Fake) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ap/signin", f.signin)
@@ -210,6 +256,10 @@ func (f *Fake) Handler() http.Handler {
 	mux.HandleFunc("GET /_fake/calls", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, f.Calls()) })
 	mux.HandleFunc("POST /_fake/refuse", func(w http.ResponseWriter, _ *http.Request) {
 		f.Refuse()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /_fake/old-profile", func(w http.ResponseWriter, _ *http.Request) {
+		f.OldProfile()
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("POST /_fake/cut", func(w http.ResponseWriter, r *http.Request) {
@@ -321,16 +371,19 @@ func (f *Fake) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := &device{
-		serial:  serial,
-		devType: body.RegistrationData["device_type"],
-		adp:     "{enc:FAKE" + randHex(24) + "}",
-		access:  "Atna|FAKE" + randHex(24),
-		refresh: "Atnr|FAKE" + randHex(24),
-		pub:     &key.PublicKey,
+		serial:   serial,
+		devType:  body.RegistrationData["device_type"],
+		licensed: currentProfile(serial, body.RegistrationData),
+		adp:      "{enc:FAKE" + randHex(24) + "}",
+		access:   "Atna|FAKE" + randHex(24),
+		refresh:  "Atnr|FAKE" + randHex(24),
+		pub:      &key.PublicKey,
 	}
 	f.mu.Lock()
 	f.devices[d.adp], f.byAccess[d.access], f.byRefresh[d.refresh] = d, d, d
-	f.calls.Registered = append(f.calls.Registered, Registration{Serial: serial, DeviceName: body.RegistrationData["device_name"]})
+	f.calls.Registered = append(f.calls.Registered, Registration{Serial: serial, DeviceName: body.RegistrationData["device_name"],
+		AppVersion: body.RegistrationData["app_version"], OSVersion: body.RegistrationData["os_version"],
+		SoftwareVersion: body.RegistrationData["software_version"]})
 	f.mu.Unlock()
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	writeJSON(w, http.StatusOK, map[string]any{"response": map[string]any{"success": map[string]any{

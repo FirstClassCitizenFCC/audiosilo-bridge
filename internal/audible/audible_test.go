@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -172,4 +173,52 @@ func idxOf(s []string, v string) int {
 		}
 	}
 	return -1
+}
+
+// A device serial is the official app's shape: 40 ASCII letters and digits,
+// fresh each time (the older profile's 32 uppercase hex gets licenses denied).
+func TestNewDeviceSerial(t *testing.T) {
+	shape := regexp.MustCompile(`^[A-Za-z0-9]{40}$`)
+	seen := map[string]bool{}
+	var lower, upper, digit bool
+	for range 50 {
+		s, err := NewDeviceSerial()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !shape.MatchString(s) {
+			t.Fatalf("serial %q isn't 40 letters and digits", s)
+		}
+		if seen[s] {
+			t.Fatalf("serial %q repeated", s)
+		}
+		seen[s] = true
+		lower = lower || strings.ContainsAny(s, "abcdefghijklmnopqrstuvwxyz")
+		upper = upper || strings.ContainsAny(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+		digit = digit || strings.ContainsAny(s, "0123456789")
+	}
+	if !lower || !upper || !digit {
+		t.Fatalf("50 serials never used every class: lower %v upper %v digit %v", lower, upper, digit)
+	}
+}
+
+// A sign-in without the profile recorded (made before it was) or with an
+// older one is not current; ProfileVersion round-trips through the vault.
+func TestCredentialsProfile(t *testing.T) {
+	for _, c := range []Credentials{{}, {Profile: "3.56.2/17.0/35602678"}} {
+		if c.CurrentProfile() {
+			t.Fatalf("%q reads as current", c.Profile)
+		}
+	}
+	raw, err := Credentials{Profile: ProfileVersion}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := ParseCredentials(raw)
+	if err != nil || !back.CurrentProfile() {
+		t.Fatalf("round trip = %+v, %v", back, err)
+	}
+	if old, _ := ParseCredentials(`{"device_serial":"0123456789ABCDEF0123456789ABCDEF"}`); old.CurrentProfile() {
+		t.Fatal("an earlier sign-in reads as current")
+	}
 }

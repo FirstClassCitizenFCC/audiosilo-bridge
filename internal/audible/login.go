@@ -1,7 +1,6 @@
 package audible
 
 import (
-	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"net/url"
@@ -11,15 +10,6 @@ import (
 // deviceType is the Audible-for-iPhone device type both mkb79/audible and
 // rmcrackan/AudibleApi register as.
 const deviceType = "A2CZJZGLK2JJVM"
-
-// NewDeviceSerial returns a random uppercase-hex device serial.
-func NewDeviceSerial() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return strings.ToUpper(hex.EncodeToString(b)), nil
-}
 
 // clientID is the hex of "<serial>#<deviceType>", as Audible expects.
 func clientID(serial string) string {

@@ -109,14 +109,16 @@ func FakeKey(asin string) (key, iv string) {
 	return hex.EncodeToString(sum[:16]), hex.EncodeToString(sum[16:])
 }
 
-// license is POST /1.0/content/{asin}/licenserequest: Denied for a title not
-// in the library, a preorder not yet out or one without download rights;
-// else Granted with a voucher only this device can open, a download URL and
+// license is POST /1.0/content/{asin}/licenserequest: Denied for a device on
+// an older profile (the three reasons Amazon sends a throttled device, the
+// customer id quoted in one, as Amazon's is), a title not in the library, a
+// preorder not yet out or one without download rights; else Granted with a voucher only this device can open, a download URL and
 // the file's size and ACR.
 func (f *Fake) license(w http.ResponseWriter, r *http.Request, _ []byte) {
 	asin := r.PathValue("asin")
 	f.mu.Lock()
 	d := f.devices[r.Header.Get("x-adp-token")]
+	licensed := d != nil && d.licensed
 	f.mu.Unlock()
 	if d == nil {
 		// Deregistered since signed() checked it (a sign-in again racing this
@@ -125,14 +127,26 @@ func (f *Fake) license(w http.ResponseWriter, r *http.Request, _ []byte) {
 		return
 	}
 	t, ok := f.title(asin)
-	deny := func(validation, rejection, message string) {
+	denyAll := func(reasons ...map[string]string) {
 		f.record(LicenseCall{ASIN: asin, Status: "Denied"})
 		writeJSON(w, http.StatusOK, map[string]any{"content_license": map[string]any{
-			"asin": asin, "status_code": "Denied",
-			"license_denial_reasons": []map[string]string{{"validationType": validation, "rejectionReason": rejection, "message": message}},
+			"asin": asin, "status_code": "Denied", "license_denial_reasons": reasons,
 		}})
 	}
+	deny := func(validation, rejection, message string) {
+		denyAll(map[string]string{"validationType": validation, "rejectionReason": rejection, "message": message})
+	}
 	switch {
+	case !licensed:
+		denyAll(
+			map[string]string{"validationType": "Membership", "rejectionReason": "RequesterEligibility",
+				"message": "Customer is not part of any plans"},
+			map[string]string{"validationType": "Ownership", "rejectionReason": "CustomerThrottled",
+				"message": "Customer id [" + f.opts.CustomerID + "] being throttled"},
+			map[string]string{"validationType": "Client", "rejectionReason": "RequesterEligibility",
+				"message": "urn:cdo:AudibleApiExternalRouterService:Prod:Default[AAA], does not has access to asin[" + asin + "]"},
+		)
+		return
 	case !ok:
 		deny("Ownership", "NotOwned", "the title is not in the customer's library")
 		return

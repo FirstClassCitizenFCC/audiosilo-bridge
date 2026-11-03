@@ -7,7 +7,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -107,6 +110,111 @@ func TestFakeSignInAndRegister(t *testing.T) {
 	if len(reg) != 1 || reg[0].Serial != serial || !strings.HasSuffix(reg[0].DeviceName, "%AudioSilo") {
 		t.Fatalf("registered = %+v", reg)
 	}
+	// The profile the fake (and Amazon) licenses: one constant set here, its
+	// copy there.
+	if reg[0].AppVersion != audiblefake.ProfileApp || reg[0].OSVersion != audiblefake.ProfileOS ||
+		reg[0].SoftwareVersion != audiblefake.ProfileSoftware || len(reg[0].Serial) != 40 || creds.Profile != ProfileVersion {
+		t.Fatalf("registered profile = %+v, creds %q", reg[0], creds.Profile)
+	}
+}
+
+// Allowed: a fresh sign-in's device gets licenses. Denied: a device
+// registered with the older profile (the 32-hex serial and 3.56.2 an earlier
+// Bridge registered with) lists its library but every license is
+// ErrThrottled, as is one the fake ages (OldProfile); neither error carries
+// the customer id or the serial.
+func TestFakeOldProfileIsThrottled(t *testing.T) {
+	const customer = "A1FAKECUSTOMER77"
+	fake := audiblefake.New(audiblefake.Options{KeyBits: 1024, CustomerID: customer})
+	ts := httptest.NewServer(fake.Handler())
+	t.Cleanup(ts.Close)
+	opts := []Option{WithEndpoints(Endpoints{Amazon: ts.URL, AmazonAPI: ts.URL, API: ts.URL}), noSleep()}
+	ctx := context.Background()
+	const asin = "B0FAKE0002"
+
+	fresh, err := NewClient(registerWithFake(t, opts), opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fresh.License(ctx, asin); err != nil {
+		t.Fatalf("a fresh sign-in's license: %v", err)
+	}
+
+	old := registerOldProfile(t, opts)
+	cl, err := NewClient(old, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recs, err := cl.Library(ctx); err != nil || len(recs) == 0 {
+		t.Fatalf("an old-profile device lists its library: %d, %v", len(recs), err)
+	}
+	noAccount := func(err error) {
+		t.Helper()
+		if !errors.Is(err, ErrThrottled) {
+			t.Fatalf("err = %v, want ErrThrottled", err)
+		}
+		for _, id := range []string{customer, old.DeviceSerial} {
+			if strings.Contains(err.Error(), id) {
+				t.Fatalf("the error carries an account id: %s", err)
+			}
+		}
+		if !strings.Contains(err.Error(), asin) || !strings.Contains(err.Error(), "being throttled") {
+			t.Fatalf("the ASIN or the reason was lost: %s", err)
+		}
+	}
+	_, err = cl.License(ctx, asin)
+	noAccount(err)
+
+	fake.OldProfile()
+	_, err = fresh.License(ctx, asin)
+	noAccount(err)
+	if got := fake.Calls().Licenses; len(got) != 3 || got[0].Status != "Granted" || got[1].Status != "Denied" || got[2].Status != "Denied" {
+		t.Fatalf("licenses = %+v", got)
+	}
+}
+
+// registerOldProfile signs in and registers a device the way an earlier
+// Bridge did (a 32-character uppercase-hex serial, app 3.56.2, iOS 17.0,
+// software 35602678), straight against the fake's /auth/register.
+func registerOldProfile(t *testing.T, opts []Option) Credentials {
+	t.Helper()
+	mp, _ := MarketplaceFor("us")
+	pkce, err := NewPKCE()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	serial := strings.ToUpper(hex.EncodeToString(b))
+	browser := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := browser.Get(BuildAuthorizeURL(mp, pkce, serial, opts...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	code, err := ParseAuthCode(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(registerBody{
+		RequestedTokenType: []string{"bearer", "mac_dms"},
+		Cookies:            registerCookies{WebsiteCookies: []string{}, Domain: mp.CookieDomain()},
+		RegistrationData: map[string]string{"domain": "Device", "app_version": "3.56.2", "device_serial": serial,
+			"device_type": deviceType, "device_name": "old", "os_version": "17.0", "software_version": "35602678",
+			"device_model": "iPhone", "app_name": "Audible"},
+		AuthData: map[string]string{"client_id": clientID(serial), "authorization_code": code, "code_verifier": pkce.Verifier,
+			"code_algorithm": "SHA-256", "client_domain": "DeviceLegacy"},
+	})
+	data, err := postAuth(context.Background(), resolve(mp, authTimeout, opts), "/auth/register", mp, "application/json", body, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds, err := parseRegister(data, mp, serial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds.Profile = "" // made before the profile was recorded
+	return creds
 }
 
 func TestFakeLibraryStates(t *testing.T) {

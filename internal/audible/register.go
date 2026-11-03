@@ -75,8 +75,8 @@ func Register(ctx context.Context, mp Marketplace, code string, pkce PKCE, seria
 			// server-side (the %FIRST_NAME% macros expand to the account holder's name),
 			// so retries don't collide - this is the mkb79/audible-proven form.
 			"device_name":      "%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%" + DeviceName,
-			"os_version":       "17.0",
-			"software_version": "35602678",
+			"os_version":       osVersion,
+			"software_version": softwareVersion,
 			"device_model":     "iPhone",
 			"app_name":         "Audible",
 		},
@@ -98,9 +98,6 @@ func Register(ctx context.Context, mp Marketplace, code string, pkce PKCE, seria
 	}
 	return parseRegister(data, mp, serial)
 }
-
-// appVersion is the Audible app version the device registers and refreshes as.
-const appVersion = "3.56.2"
 
 // authTimeout bounds one identity call (register, refresh, deregister).
 const authTimeout = 30 * time.Second
@@ -161,5 +158,6 @@ func parseRegister(data []byte, mp Marketplace, serial string) (Credentials, err
 		CustomerID:       s.Extensions.CustomerInfo.UserID,
 		Marketplace:      mp.Code,
 		ExpiresAt:        expires,
+		Profile:          ProfileVersion,
 	}, nil
 }
