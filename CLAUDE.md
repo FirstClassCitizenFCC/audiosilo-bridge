@@ -56,6 +56,9 @@ scripts/build-web.sh            # builds web/, syncs it into internal/web/dist, 
 ./bin/audiosilo-bridge --data ./data   # first start prints the page's password ONCE
 
 docker build --target slim .    # slim | cuda | agent | full (the default target)
+
+# The Audible fake exists only behind its tag (never in a release build or image):
+go vet -tags audiblefake ./internal/audible/... ./cmd/audiblefake && go test -race -tags audiblefake ./internal/audible/...
 ```
 
 **Before a change is done, run the gate of each side you touched**, plus an image
@@ -135,6 +138,13 @@ internal/
   chapterdetect/ (Phase 1d: chapters from the narration; pure, imported by pipeline)
   epubcfi/ readalong/ (Phase 3c-1: foliate's CFIs in Go; the read-along aligner, map
                        writer and heal/snap planning; pure, imported by pipeline)
+  -- Phase 4a: Audible (from audiosilo-manager, with its history) --
+  audible/    the Audible client: PKCE sign-in (paste-back), register, deregister,
+              signed library + lastpositions, license, resumable capped download,
+              429/503 backoff, injectable endpoints; audiblefake/ (-tags audiblefake
+              only): the fake and the scrubbing Recorder
+  importjob/  BookMatcher (link.LibraryBook) + Plan + Run: match and place against a library
+  placement/ source/ transfer/ (Local) progress/  (the manager's, imported as is)
 web/          the page: Vite + React 19 + TS + Tailwind v4; pure logic in src/lib
 docker/       entrypoint.sh (own /bridge-data, umask 022, drop to PUID:PGID)
 Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, agent
@@ -149,6 +159,9 @@ the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs
 link, mapping}`; `generate -> {jobs, link, mapping, store, scheduler, pipeline, ...}`
 through its own Engine/Server interfaces; `podcastjob -> {jobs, link, mapping, netguard, podcast, secrets, store}`;
 `podcast -> {fsutil, gofeed, x/net/html, x/text}`; `logring -> podcast`;
+`audible -> {progress, source}` (its tagged build also `audiblefake`, which never
+imports `audible`); `importjob -> {link, placement, source, transfer,
+audiosilo-server/pkg/match}`; `transfer -> progress`;
 `jobs -> {link, store}`; `mapping -> {fsutil, link}`;
 `link`, `agentproto` and `workerproto` are leaves; `workers -> {asr, fsutil,
 scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`
@@ -356,6 +369,14 @@ run of the same audio is reused by the reuse table (never a whole run cleared), 
 a generate job continues a done read-along run at qa_sweep. An ebook run is never
 continued, converted nor cleared by a read-along or chapters job: they run in the
 audio run beside it (`store.AudioRunKey`), which describe never reads.
+
+**Phase 4a (Audible), stage A:** the manager's `audible`, `importjob`, `placement`,
+`progress`, `source` and `transfer` imported with their history (registry dropped:
+the vault and the server's columns replace it); the client's deregister, resumable
+capped download, `last_updated`, backoff and endpoints; `link.LibraryBook` for the
+server's paged listing; the Audible fake behind `-tags audiblefake`
+(`AUDIOSILO_BRIDGE_AUDIBLE_FAKE_URL`, `cmd/audiblefake`). Nothing is wired into
+`app` yet.
 
 See BRIDGE-PLAN.md's Status table for what is next.
 
