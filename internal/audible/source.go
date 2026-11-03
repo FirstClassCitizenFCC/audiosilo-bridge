@@ -60,7 +60,7 @@ func (s *Source) Acquire(ctx context.Context, rec source.Record, onProgress sour
 			onProgress("downloading", copied, total)
 		}
 	}
-	if err := s.client.Download(ctx, dlURL, aaxc, dlProgress); err != nil {
+	if err := s.client.Download(ctx, dlURL, aaxc, DownloadOptions{OnProgress: dlProgress}); err != nil {
 		cleanup()
 		return "", nil, err
 	}

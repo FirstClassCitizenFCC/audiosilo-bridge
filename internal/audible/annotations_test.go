@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLastPositions(t *testing.T) {
@@ -19,7 +20,7 @@ func TestLastPositions(t *testing.T) {
 		}
 		// position_ms as a string for one and a number for another (Audible varies).
 		_, _ = io.WriteString(w, `{"asin_last_position_heard_annots":[
-			{"asin":"B01","last_position_heard":{"status":"Exists","position_ms":"123456"}},
+			{"asin":"B01","last_position_heard":{"status":"Exists","position_ms":"123456","last_updated":"2022-03-10 12:10:13.093"}},
 			{"asin":"B02","last_position_heard":{"status":"Exists","position_ms":7890}},
 			{"asin":"B03","last_position_heard":{"status":"DoesNotExist","position_ms":"0"}}
 		]}`)
@@ -31,8 +32,15 @@ func TestLastPositions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["B01"] != 123456 || got["B02"] != 7890 {
+	if got["B01"].PositionMs != 123456 || got["B02"].PositionMs != 7890 {
 		t.Fatalf("positions = %+v", got)
+	}
+	// last_updated is read as UTC; a missing one is zero, never a guess.
+	if want := time.Date(2022, 3, 10, 12, 10, 13, 93e6, time.UTC); !got["B01"].LastUpdated.Equal(want) {
+		t.Fatalf("B01 last_updated = %v, want %v", got["B01"].LastUpdated, want)
+	}
+	if !got["B02"].LastUpdated.IsZero() {
+		t.Fatalf("B02 last_updated = %v, want zero", got["B02"].LastUpdated)
 	}
 	if _, ok := got["B03"]; ok {
 		t.Fatal("non-existent position should be omitted")
@@ -157,5 +165,19 @@ func TestSetLastPosition(t *testing.T) {
 	// acr is required.
 	if err := c.SetLastPosition(context.Background(), "B01", "", 1); err == nil {
 		t.Fatal("expected an error when acr is empty")
+	}
+}
+
+func TestParseLastUpdated(t *testing.T) {
+	want := time.Date(2026, 11, 2, 9, 30, 0, 0, time.UTC)
+	for _, in := range []string{"2026-11-02 09:30:00", "2026-11-02T09:30:00", "2026-11-02T09:30:00Z", "2026-11-02T10:30:00+01:00"} {
+		if got := parseLastUpdated(in); !got.Equal(want) {
+			t.Errorf("parseLastUpdated(%q) = %v, want %v", in, got, want)
+		}
+	}
+	for _, in := range []string{"", "yesterday", "2026-13-40"} {
+		if got := parseLastUpdated(in); !got.IsZero() {
+			t.Errorf("parseLastUpdated(%q) = %v, want zero", in, got)
+		}
 	}
 }

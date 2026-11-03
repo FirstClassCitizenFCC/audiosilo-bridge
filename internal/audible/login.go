@@ -29,8 +29,10 @@ func clientID(serial string) string {
 // BuildAuthorizeURL builds the Amazon OAuth authorize URL the user opens in a
 // browser. After signing in they are redirected to .../ap/maplanding?...&
 // openid.oa2.authorization_code=...; pass that redirect URL to ParseAuthCode.
-func BuildAuthorizeURL(mp Marketplace, pkce PKCE, serial string) string {
-	returnTo := "https://" + mp.AmazonDomain() + "/ap/maplanding"
+// Only WithEndpoints applies (its Amazon host serves both pages).
+func BuildAuthorizeURL(mp Marketplace, pkce PKCE, serial string, opts ...Option) string {
+	amazon := endpointsOf(mp, opts).Amazon
+	returnTo := amazon + "/ap/maplanding"
 	q := url.Values{
 		"openid.oa2.response_type":         {"code"},
 		"openid.oa2.code_challenge_method": {"S256"},
@@ -51,7 +53,7 @@ func BuildAuthorizeURL(mp Marketplace, pkce PKCE, serial string) string {
 		"accountStatusPolicy":              {"P1"},
 		"forceMobileLayout":                {"true"},
 	}
-	return "https://" + mp.AmazonDomain() + "/ap/signin?" + q.Encode()
+	return amazon + "/ap/signin?" + q.Encode()
 }
 
 // ParseAuthCode extracts openid.oa2.authorization_code from the post-login redirect

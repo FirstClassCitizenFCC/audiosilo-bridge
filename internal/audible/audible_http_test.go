@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testClient(t *testing.T, baseURL string) *Client {
@@ -21,12 +22,16 @@ func testClient(t *testing.T, baseURL string) *Client {
 	c, err := NewClient(Credentials{
 		ADPToken: "ADP", DevicePrivateKey: keyPEM, DeviceType: deviceType,
 		DeviceSerial: "SER", CustomerID: "CUST", Marketplace: "us",
-	})
+	}, WithEndpoints(Endpoints{Amazon: baseURL, AmazonAPI: baseURL, API: baseURL}), noSleep())
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.baseURL = baseURL
 	return c
+}
+
+// noSleep makes the backoff's waits instant (tests).
+func noSleep() Option {
+	return withSleep(func(ctx context.Context, _ time.Duration) error { return ctx.Err() })
 }
 
 func TestLoginURLAndParse(t *testing.T) {
@@ -281,7 +286,7 @@ func TestDownloadIsSigned(t *testing.T) {
 	defer ts.Close()
 
 	dest := t.TempDir() + "/out.m4b"
-	if err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/content.aaxc", dest, nil); err != nil {
+	if err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/content.aaxc", dest, DownloadOptions{}); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	if !gotSig {
@@ -309,11 +314,11 @@ func TestDownloadReportsProgress(t *testing.T) {
 	dest := t.TempDir() + "/out.m4b"
 	var lastCopied, lastTotal int64
 	calls := 0
-	err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/file", dest,
-		func(copied, total int64) {
+	err := testClient(t, ts.URL).Download(context.Background(), ts.URL+"/file", dest, DownloadOptions{
+		OnProgress: func(copied, total int64) {
 			lastCopied, lastTotal = copied, total
 			calls++
-		})
+		}})
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
@@ -354,9 +359,13 @@ func TestRegisterParse(t *testing.T) {
 			t.Errorf("auth_data not carried through: %+v", sent.AuthData)
 		}
 		// The device name must carry the de-dupe macro, else a retry after a
-		// partial first registration fails with DuplicateDeviceName.
+		// partial first registration fails with DuplicateDeviceName, and end in
+		// the product name the owner sees in Amazon's device list.
 		if !strings.Contains(sent.RegistrationData["device_name"], "%DUPE_STRATEGY_1ST%") {
 			t.Errorf("device_name missing de-dupe macro: %q", sent.RegistrationData["device_name"])
+		}
+		if !strings.HasSuffix(sent.RegistrationData["device_name"], "%AudioSilo") {
+			t.Errorf("device_name = %q, want the AudioSilo name", sent.RegistrationData["device_name"])
 		}
 		resp := map[string]any{"response": map[string]any{"success": map[string]any{
 			"tokens": map[string]any{
@@ -372,7 +381,8 @@ func TestRegisterParse(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	creds, err := register(context.Background(), ts.URL, mp, "CODE", PKCE{Verifier: "v", Challenge: "c"}, "SER")
+	creds, err := Register(context.Background(), mp, "CODE", PKCE{Verifier: "v", Challenge: "c"}, "SER",
+		WithEndpoints(Endpoints{AmazonAPI: ts.URL}))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -53,27 +53,28 @@ type registerResp struct {
 	} `json:"response"`
 }
 
-// Register exchanges the post-login authorization code for durable device
-// credentials (the second phase of login). This hits Amazon and cannot be unit
-// tested against the live service.
-func Register(ctx context.Context, mp Marketplace, code string, pkce PKCE, serial string) (Credentials, error) {
-	return register(ctx, "https://"+mp.AmazonAPIDomain(), mp, code, pkce, serial)
-}
+// DeviceName is the name the registered device carries in the Amazon account's
+// device list, after the account holder's first name ("Chris's AudioSilo").
+const DeviceName = "AudioSilo"
 
-func register(ctx context.Context, baseURL string, mp Marketplace, code string, pkce PKCE, serial string) (Credentials, error) {
+// Register exchanges the post-login authorization code for durable device
+// credentials (the second phase of login). serial is the one the authorize URL
+// was built with.
+func Register(ctx context.Context, mp Marketplace, code string, pkce PKCE, serial string, opts ...Option) (Credentials, error) {
+	set := resolve(mp, authTimeout, opts)
 	body, err := json.Marshal(registerBody{
 		RequestedTokenType: []string{"bearer", "mac_dms", "website_cookies", "store_authentication_cookie"},
 		Cookies:            registerCookies{WebsiteCookies: []string{}, Domain: mp.CookieDomain()},
 		RegistrationData: map[string]string{
 			"domain":        "Device",
-			"app_version":   "3.56.2",
+			"app_version":   appVersion,
 			"device_serial": serial,
 			"device_type":   deviceType,
 			// Amazon rejects a second device with an identical name (DuplicateDeviceName).
 			// The %DUPE_STRATEGY_1ST% macro tells the registration service to de-dupe
 			// server-side (the %FIRST_NAME% macros expand to the account holder's name),
 			// so retries don't collide - this is the mkb79/audible-proven form.
-			"device_name":      "%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%AudioSilo Manager",
+			"device_name":      "%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%" + DeviceName,
 			"os_version":       "17.0",
 			"software_version": "35602678",
 			"device_model":     "iPhone",
@@ -91,23 +92,46 @@ func register(ctx context.Context, baseURL string, mp Marketplace, code string, 
 	if err != nil {
 		return Credentials{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/auth/register", bytes.NewReader(body))
+	data, err := postAuth(ctx, set, "/auth/register", mp, "application/json", body, "")
 	if err != nil {
 		return Credentials{}, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-amzn-identity-auth-domain", "api.amazon."+mp.TLD)
-
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		return Credentials{}, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	data, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return Credentials{}, fmt.Errorf("register: HTTP %d: %s", resp.StatusCode, snippet(data))
 	}
 	return parseRegister(data, mp, serial)
+}
+
+// appVersion is the Audible app version the device registers and refreshes as.
+const appVersion = "3.56.2"
+
+// authTimeout bounds one identity call (register, refresh, deregister).
+const authTimeout = 30 * time.Second
+
+// postAuth POSTs body to the identity API's path (with a bearer token when
+// accessToken is set), backing off on 429/503, and returns the 2xx answer's body.
+// An error never carries the request: its body holds the code, the verifier or
+// a token.
+func postAuth(ctx context.Context, set settings, path string, mp Marketplace, contentType string, body []byte, accessToken string) ([]byte, error) {
+	resp, err := sendWithBackoff(ctx, set.http, set.sleep, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, set.endpoints.AmazonAPI+path, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("x-amzn-identity-auth-domain", mp.AmazonAPIDomain())
+		if accessToken != "" {
+			req.Header.Set("Authorization", "Bearer "+accessToken)
+		}
+		return req, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &httpError{StatusCode: resp.StatusCode, Method: http.MethodPost, Path: path, Body: snippet(data)}
+	}
+	return data, nil
 }
 
 func parseRegister(data []byte, mp Marketplace, serial string) (Credentials, error) {

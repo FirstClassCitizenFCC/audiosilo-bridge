@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // flexMS unmarshals a millisecond value that Audible may encode as either a JSON
@@ -41,14 +42,22 @@ func (f *flexMS) UnmarshalJSON(b []byte) error {
 // self-tunes below this on a 400; this is just a low-request-count starting point.
 const lastPositionsBatch = 25
 
-// LastPositions fetches the last-heard position (in milliseconds) for each ASIN
-// from Audible's annotations service. ASINs with no recorded position are omitted.
+// Position is a book's last-heard place on Audible: milliseconds into the book,
+// and when Audible recorded it (zero when it didn't say, or said it in a shape
+// that doesn't parse). Sync compares LastUpdated with the server's place.
+type Position struct {
+	PositionMs  int64
+	LastUpdated time.Time
+}
+
+// LastPositions fetches the last-heard position for each ASIN from Audible's
+// annotations service. ASINs with no recorded position are omitted.
 // The ASIN list is chunked (lastPositionsBatch per request) so a large library
 // doesn't overflow the query-string length limit; results are merged. onProgress
 // (may be nil) is called with the cumulative count of ASINs fetched after each
 // batch, so a caller can show a progress bar over a large library.
-func (c *Client) LastPositions(ctx context.Context, asins []string, onProgress func(done int)) (map[string]int64, error) {
-	out := make(map[string]int64, len(asins))
+func (c *Client) LastPositions(ctx context.Context, asins []string, onProgress func(done int)) (map[string]Position, error) {
+	out := make(map[string]Position, len(asins))
 	for start := 0; start < len(asins); start += lastPositionsBatch {
 		end := min(start+lastPositionsBatch, len(asins))
 		if err := c.lastPositionsChunk(ctx, asins[start:end], out); err != nil {
@@ -68,7 +77,7 @@ func (c *Client) LastPositions(ctx context.Context, asins []string, onProgress f
 // retries each half - converging on whatever the real cap is without a magic
 // number. A single ASIN can't overflow a list-length cap, so the recursion always
 // terminates.
-func (c *Client) lastPositionsChunk(ctx context.Context, asins []string, out map[string]int64) error {
+func (c *Client) lastPositionsChunk(ctx context.Context, asins []string, out map[string]Position) error {
 	if len(asins) == 0 {
 		return nil
 	}
@@ -77,8 +86,9 @@ func (c *Client) lastPositionsChunk(ctx context.Context, asins []string, out map
 		Annots []struct {
 			ASIN string `json:"asin"`
 			Last struct {
-				Status     string `json:"status"`
-				PositionMs flexMS `json:"position_ms"`
+				Status      string `json:"status"`
+				PositionMs  flexMS `json:"position_ms"`
+				LastUpdated string `json:"last_updated"`
 			} `json:"last_position_heard"`
 		} `json:"asin_last_position_heard_annots"`
 	}
@@ -97,9 +107,31 @@ func (c *Client) lastPositionsChunk(ctx context.Context, asins []string, out map
 		if a.Last.Status != "Exists" {
 			continue
 		}
-		out[a.ASIN] = int64(a.Last.PositionMs)
+		out[a.ASIN] = Position{PositionMs: int64(a.Last.PositionMs), LastUpdated: parseLastUpdated(a.Last.LastUpdated)}
 	}
 	return nil
+}
+
+// lastUpdatedLayouts are the shapes Audible's last_updated has been seen in
+// ("2022-03-10 12:10:13.093", UTC), plus RFC 3339 in case it moves to that.
+var lastUpdatedLayouts = []string{
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02T15:04:05.999999999",
+	time.RFC3339Nano,
+}
+
+// parseLastUpdated reads a last_updated value as UTC; zero when it doesn't parse.
+func parseLastUpdated(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range lastUpdatedLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
 }
 
 // SetLastPosition writes a last-heard position (milliseconds) back to Audible so
