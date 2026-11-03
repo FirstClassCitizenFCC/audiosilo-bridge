@@ -42,7 +42,7 @@ func newTitlePlanner(libraryID int64, template string, books []link.LibraryBook,
 	}
 	if mount != "" {
 		if root, err := os.OpenRoot(mount); err == nil {
-			t.root, t.fsys = root, newDirCache(root.FS().(transfer.LibraryFS))
+			t.root, t.fsys = root, newDirCache(transfer.RootFS(root))
 		}
 	}
 	return t

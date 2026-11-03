@@ -27,10 +27,11 @@ type Credentials struct {
 	Profile string `json:"profile,omitempty"`
 }
 
-// CurrentProfile reports whether the device registered with the profile this
-// build registers with. One that didn't must sign in again: Amazon denies
-// licenses to devices on the older profile (see ProfileVersion).
-func (c Credentials) CurrentProfile() bool { return c.Profile == ProfileVersion }
+// IsCurrentProfile reports whether a device registered with profile (as
+// Credentials.Profile records it) used the profile this build registers with.
+// One that didn't must sign in again: Amazon denies licenses to devices on the
+// older profile (see ProfileVersion).
+func IsCurrentProfile(profile string) bool { return profile == ProfileVersion }
 
 // Marshal/ParseCredentials round-trip the credentials for the vault.
 func (c Credentials) Marshal() (string, error) {

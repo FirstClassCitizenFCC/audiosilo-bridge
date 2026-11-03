@@ -741,13 +741,13 @@ func (h *Importer) spelled(mount, rel string) (string, error) {
 		return "", fail(CodeNotWritable, "The Bridge can't open the library at its mount: %v", err)
 	}
 	defer func() { _ = root.Close() }()
-	return spelled(root.FS().(transfer.LibraryFS), rel)
+	return spelled(transfer.RootFS(root), rel)
 }
 
 // spelled is Importer.spelled over the library's files (a poll's plans read
 // them through a view that lists each folder once).
 func spelled(fsys transfer.LibraryFS, rel string) (string, error) {
-	got, err := transfer.OnDiskFS(fsys, rel)
+	got, err := transfer.OnDisk(fsys, rel)
 	if err != nil {
 		return "", fail(CodeNotWritable, "The Bridge can't place the book at %s in the library: %v", rel, err)
 	}
@@ -768,7 +768,7 @@ func (h *Importer) vacant(mount, rel string, books []link.LibraryBook) error {
 		return fail(CodeNotWritable, "The Bridge can't open the library at its mount: %v", err)
 	}
 	defer func() { _ = root.Close() }()
-	_, err = vacant(root.FS().(transfer.LibraryFS), rel, bookPaths(books))
+	_, err = vacant(transfer.RootFS(root), rel, bookPaths(books))
 	return err
 }
 

@@ -9,6 +9,10 @@ import (
 // Redacted stands in for an account identifier RedactAccountIDs removed.
 const Redacted = "[redacted]"
 
+// redactedBare is Redacted inside brackets the text already has
+// ("Customer id [redacted]").
+const redactedBare = "redacted"
+
 // Amazon's error text quotes the account it refused: a license denial reads
 // "Customer id [A1B2C3D4E5F6G7] being throttled; ... does not has access to
 // asin[B00H3R0B0W]". Every error the package builds from an Amazon answer
@@ -93,11 +97,11 @@ func (c Credentials) Redact(err error) error {
 func redactValues(re *regexp.Regexp, s string) string {
 	return re.ReplaceAllStringFunc(s, func(m string) string {
 		g := re.FindStringSubmatch(m)
-		if g[3] == Redacted || g[3] == strings.Trim(Redacted, "[]") {
+		if g[3] == Redacted || g[3] == redactedBare {
 			return m
 		}
 		if strings.HasSuffix(strings.TrimSpace(g[2]), "[") {
-			return g[1] + g[2] + strings.Trim(Redacted, "[]") // "Customer id [redacted]"
+			return g[1] + g[2] + redactedBare // "Customer id [redacted]"
 		}
 		return g[1] + g[2] + Redacted
 	})

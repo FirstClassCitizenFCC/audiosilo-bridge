@@ -305,14 +305,14 @@ func TestOnDisk(t *testing.T) {
 		if !insensitive {
 			want = rel // a case-sensitive disk: another spelling is another folder
 		}
-		got, err := OnDisk(root, rel)
+		got, err := OnDisk(RootFS(root), rel)
 		if err != nil || got != want {
 			t.Errorf("OnDisk(%q) = %q, %v; want %q (case-insensitive disk: %v)", rel, got, err, want, insensitive)
 		}
 	}
 	// A file where a folder should be is an error, not a spelling.
 	writeFile(t, filepath.Join(dir, "Loose"), "x")
-	if _, err := OnDisk(root, "Loose/Book/x.m4b"); err == nil {
+	if _, err := OnDisk(RootFS(root), "Loose/Book/x.m4b"); err == nil {
 		t.Error("a file where a folder goes was accepted")
 	}
 }

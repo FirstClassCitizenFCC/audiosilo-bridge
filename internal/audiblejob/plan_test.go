@@ -149,7 +149,7 @@ func TestPlanReadsEachFolderOnce(t *testing.T) {
 	}
 	tp := newTitlePlanner(1, "", goldenBooks(), mount)
 	defer tp.close()
-	counted := &countingFS{LibraryFS: tp.root.FS().(transfer.LibraryFS), reads: map[string]int{}}
+	counted := &countingFS{LibraryFS: transfer.RootFS(tp.root), reads: map[string]int{}}
 	tp.fsys = newDirCache(counted)
 
 	tp.plan(rec("B0PLAN0020", "Nowhere Yet", "Nobody Known", "", 0))

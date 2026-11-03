@@ -2076,7 +2076,7 @@ internal/
             softwareVersion) serves register, the token refresh and deregister;
             NewDeviceSerial draws 40 letters and digits from crypto/rand;
             ProfileVersion ("4.60/26.2/46000856") is recorded in Credentials.Profile
-            at Register (CurrentProfile; "" is an earlier sign-in). Changing the set
+            at Register (IsCurrentProfile; "" is an earlier sign-in). Changing the set
             flags every account registered before it. denialKind checks the
             customer's throttling (customerthrottled, "being throttled") FIRST, as
             ErrThrottled (a bare "Throttled", a rate limit, stays ErrDenied);
@@ -2207,8 +2207,8 @@ internal/
             license again, never the account's refusal). 4b owner fixes: Finish
             records the device's profile (store device_profile from
             Credentials.Profile); OldProfile(a) (not audible.ProfileVersion, or none)
-            flags an account that must sign in again (OldProfileText, "Sign in again
-            to keep backups working"): the page's old_profile and the setup item
+            flags an account that must sign in again ("Sign in again to keep
+            backups working"): the page's old_profile and the setup item
             ("N account(s) need signing in again to keep backups working", not done;
             optional as ever). A sign-in again of the same Amazon account replaces
             the device and deregisters the old one (as before). Errors carry Amazon's or the
@@ -2404,10 +2404,10 @@ internal/
             imported).
   transfer/ Local only (SFTP and Index were not kept): CleanRel (mapping.SafeJoin's
             rules, no empty path, no hidden (dot) segment anywhere: the server
-            never indexes one), OnDisk(root, rel) = OnDiskFS(root.FS(), rel) over
-            a LibraryFS (fs.ReadLinkFS + fs.ReadDirFS: os.Root.FS(), or the poll's
-            caching view) (rel as the disk spells the
-            folders of it that exist, by an exact name or os.SameFile in a listing,
+            never indexes one), OnDisk(fsys, rel) over a LibraryFS
+            (fs.ReadLinkFS + fs.ReadDirFS: RootFS(root), or the poll's caching
+            view) (rel as the disk spells the
+            folders of it that exist, by an exact name or os.SameFile in a listing (same name folded first),
             the rest as given; an Lstat error other than not-exist is an error) and
             Place (Phase 4b, hardened before it writes a library): the mapping's
             root opened first (a missing root, or a file, fails before the source

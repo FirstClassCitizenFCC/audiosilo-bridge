@@ -405,7 +405,7 @@ func TestRegisterParse(t *testing.T) {
 	if creds.ADPToken != "ADP" || creds.RefreshToken != "RT" || creds.CustomerID != "amzn1.account.X" {
 		t.Fatalf("creds = %+v", creds)
 	}
-	if creds.DeviceSerial != "DS" || creds.Marketplace != "us" || creds.Profile != "4.60/26.2/46000856" || !creds.CurrentProfile() {
+	if creds.DeviceSerial != "DS" || creds.Marketplace != "us" || creds.Profile != "4.60/26.2/46000856" || !IsCurrentProfile(creds.Profile) {
 		t.Fatalf("creds device/marketplace/profile: %+v", creds)
 	}
 	if _, err := creds.PrivateKey(); err != nil {

@@ -75,16 +75,12 @@ var (
 // RefusedText is an account's last_error after a refusal.
 const RefusedText = "Audible refused the sign-in (the device was removed from the Amazon account, or it expired): sign in again"
 
-// OldProfileText is what the page and the setup checklist say of an account
-// whose device registered with an older profile (OldProfile).
-const OldProfileText = "Sign in again to keep backups working"
-
 // OldProfile reports whether a's device registered with a profile other than
 // the one this build registers with (audible.ProfileVersion), or before the
 // profile was recorded: Amazon denies its licenses (audible.ErrThrottled)
 // until the account signs in again, which registers a new device and removes
 // the old one.
-func OldProfile(a store.AudibleAccount) bool { return a.DeviceProfile != audible.ProfileVersion }
+func OldProfile(a store.AudibleAccount) bool { return !audible.IsCurrentProfile(a.DeviceProfile) }
 
 // Service is Audible as the accounts use it: the audible package's calls
 // (Audible returns them), a stub in tests.

@@ -206,7 +206,7 @@ func TestNewDeviceSerial(t *testing.T) {
 // older one is not current; ProfileVersion round-trips through the vault.
 func TestCredentialsProfile(t *testing.T) {
 	for _, c := range []Credentials{{}, {Profile: "3.56.2/17.0/35602678"}} {
-		if c.CurrentProfile() {
+		if IsCurrentProfile(c.Profile) {
 			t.Fatalf("%q reads as current", c.Profile)
 		}
 	}
@@ -215,10 +215,10 @@ func TestCredentialsProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	back, err := ParseCredentials(raw)
-	if err != nil || !back.CurrentProfile() {
+	if err != nil || !IsCurrentProfile(back.Profile) {
 		t.Fatalf("round trip = %+v, %v", back, err)
 	}
-	if old, _ := ParseCredentials(`{"device_serial":"0123456789ABCDEF0123456789ABCDEF"}`); old.CurrentProfile() {
+	if old, _ := ParseCredentials(`{"device_serial":"0123456789ABCDEF0123456789ABCDEF"}`); IsCurrentProfile(old.Profile) {
 		t.Fatal("an earlier sign-in reads as current")
 	}
 }

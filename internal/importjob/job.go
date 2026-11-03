@@ -99,21 +99,11 @@ func (p *Planner) Plan(rec source.Record, mode placement.Mode, template string) 
 		idx, _ := SeriesPosition(b, rec.Series)
 		siblings = append(siblings, placement.Sibling{RelPath: b.Path, SeriesIndex: idx})
 	}
-	// placement's own rule (Suggest), so a template that fails still says how
-	// the book would have been placed.
-	item := PlannedItem{Kind: placement.Standalone, Siblings: len(siblings)}
-	switch {
-	case rec.Series == "":
-	case len(siblings) > 0:
-		item.Kind = placement.SeriesExisting
-	default:
-		item.Kind = placement.SeriesNew
-	}
 	// Name by the clean book title - strip the series prefix and "(Book N)" /
 	// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
 	// Truth", not "... - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
 	clean := match.CleanTitle(rec.Title, seriesAsTitled(rec.Title, rec.Series))
-	sug, err := placement.SuggestWith(mode, template, placement.Input{
+	in := placement.Input{
 		Author:       rec.Author,
 		Title:        clean,
 		TitleShort:   clean,
@@ -126,7 +116,11 @@ func (p *Planner) Plan(rec source.Record, mode placement.Mode, template string) 
 		Year:         rec.Year,
 		Siblings:     siblings,
 		AuthorFolder: p.authorFolders[match.Normalize(rec.Author)],
-	})
+	}
+	// placement's own rule, so a template that fails still says how the book
+	// would have been placed.
+	item := PlannedItem{Kind: placement.KindFor(in), Siblings: len(siblings)}
+	sug, err := placement.SuggestWith(mode, template, in)
 	if err != nil {
 		return item, err
 	}
