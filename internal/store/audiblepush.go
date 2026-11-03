@@ -72,7 +72,8 @@ func scanAudiblePush(row interface{ Scan(...any) error }) (AudiblePush, error) {
 // unlisted (a title the console stopped syncing, or one that lost its match),
 // and its waiting place forgotten. The pushes, places heard and cached
 // content references stay. A title whose book changed forgets its waiting
-// place too.
+// place too, and the other book's row last read (the next one read for the
+// new book is a new place).
 func (db *DB) ListAudibleSync(ctx context.Context, account string, titles []AudibleSyncTitle) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -86,6 +87,10 @@ func (db *DB) ListAudibleSync(ctx context.Context, account string, titles []Audi
 		VALUES (?, ?, ?, ?, ?, 1)
 		ON CONFLICT(account, asin) DO UPDATE SET
 			want_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN want_ms ELSE NULL END,
+			row_version = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_version ELSE -1 END,
+			row_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_ms ELSE -1 END,
+			row_duration = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_duration ELSE 0 END,
+			row_seen = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_seen ELSE '' END,
 			library_id = excluded.library_id, path = excluded.path, runtime_s = excluded.runtime_s, listed = 1`)
 	if err != nil {
 		return err
@@ -209,11 +214,16 @@ func (db *DB) AudiblePushed(ctx context.Context, account, asin string, ms int64,
 // place last written is no longer Audible's (last_ms -1), unless the push wrote
 // again since. applied: the server took the place (it was further on), so a
 // place waiting to be pushed from an older server row goes, unless the push
-// recorded a new place since (row_ms or row_seen moved).
+// recorded a new place since (row_ms or row_seen moved). One recorded since
+// that is not further on than ms goes too while the push hasn't written since
+// the job started: the server row it came from was replaced by ms (a book has
+// one row), and Audible is still at ms, so writing it would move Audible back
+// behind the server.
 func (db *DB) AudibleHeard(ctx context.Context, x AudiblePush, ms int64, applied bool, since time.Time) error {
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET heard_ms = ?1,
 			last_ms = CASE WHEN at < ?2 THEN -1 ELSE last_ms END,
-			want_ms = CASE WHEN ?3 AND row_ms = ?4 AND row_seen = ?5 THEN NULL ELSE want_ms END
+			want_ms = CASE WHEN ?3 AND ((row_ms = ?4 AND row_seen = ?5) OR (want_ms <= ?1 AND at < ?2)) THEN NULL
+				ELSE want_ms END
 		WHERE account = ?6 AND asin = ?7`, ms, timestamp(since), applied, x.RowMs, x.RowSeen, x.Account, x.ASIN)
 	return err
 }

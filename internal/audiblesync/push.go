@@ -131,7 +131,8 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 		titles[x.ASIN] = x
 	}
 	cursor := a.PushCursor
-	end := false // the feed was read to its end
+	end := false        // the feed was read to its end
+	unrecorded := false // a row wasn't recorded: the cursor stays, so it is read again
 	for range maxPages {
 		page, err := srv.AudibleProgress(ctx, a.ID, cursor, link.MaxAudibleProgress)
 		switch {
@@ -156,7 +157,9 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			return
 		}
 		for _, row := range page.Rows {
-			p.row(ctx, a, titles, row, cutoff, now)
+			if !p.row(ctx, a, titles, row, cutoff, now) {
+				unrecorded = true
+			}
 		}
 		if page.Next != "" {
 			cursor = page.Next
@@ -166,12 +169,17 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 			break
 		}
 	}
-	var from time.Time // the baseline is over once a read reached the end
-	if end {
-		from = now
-	}
-	if err := p.o.DB.SetAudiblePushCursor(ctx, a.ID, cursor, from); err != nil {
-		p.o.Log.Warn("audible: recording the push's cursor failed", "account", a.ID, "err", err)
+	// A row that wasn't recorded keeps the cursor where it was: the next pass
+	// reads the pages again (the rows recorded read again at the same place
+	// change nothing), never past a place it would then never push.
+	if !unrecorded {
+		var from time.Time // the baseline is over once a read reached the end
+		if end {
+			from = now
+		}
+		if err := p.o.DB.SetAudiblePushCursor(ctx, a.ID, cursor, from); err != nil {
+			p.o.Log.Warn("audible: recording the push's cursor failed", "account", a.ID, "err", err)
+		}
 	}
 	p.due(ctx, a, now)
 }
@@ -189,24 +197,25 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 // server's feed already syncs it: a new match, a re-match, a title synced
 // again) is kept pending until the next sync lists it, never skipped past.
 // titles is account a's rows by ASIN, kept up to date with what row records.
+// ok is false when recording the row failed.
 func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[string]store.AudiblePush, row link.AudibleProgressRow,
-	cutoff, now time.Time) {
+	cutoff, now time.Time) (ok bool) {
 	if row.DeviceID == DeviceID(a.ID) {
-		return
+		return true
 	}
 	place := ms(row.Position)
-	x, ok := titles[row.ASIN]
-	sameBook := ok && x.LibraryID == row.LibraryID && x.Path == row.Path
+	x, known := titles[row.ASIN]
+	sameBook := known && x.LibraryID == row.LibraryID && x.Path == row.Path
 	if sameBook && x.RowMs == place {
 		if x.RowVersion != row.Version || x.RowDuration != row.Duration {
 			if err := p.o.DB.TouchAudibleRow(ctx, a.ID, row.ASIN, row.Version, row.Duration); err != nil {
 				p.o.Log.Warn("audible: recording a server place failed", "account", a.ID, "err", err)
-				return
+				return false
 			}
 			x.RowVersion, x.RowDuration = row.Version, row.Duration
 			titles[row.ASIN] = x
 		}
-		return
+		return true
 	}
 	history := false
 	if !cutoff.IsZero() {
@@ -219,7 +228,7 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 	case !sameBook || !x.Listed:
 		err = p.o.DB.PendAudiblePush(ctx, a.ID, row.ASIN, row.LibraryID, row.Path, !history, rec)
 		x = store.AudiblePush{Account: a.ID, ASIN: row.ASIN, LibraryID: row.LibraryID, Path: row.Path, LastMs: x.LastMs, HeardMs: x.HeardMs}
-		if !ok {
+		if !known {
 			x.LastMs, x.HeardMs = -1, -1
 		}
 	case history:
@@ -229,10 +238,11 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 	}
 	if err != nil {
 		p.o.Log.Warn("audible: recording a server place failed", "account", a.ID, "err", err)
-		return
+		return false
 	}
 	x.RowVersion, x.RowMs, x.RowDuration, x.RowSeen = rec.Version, rec.Ms, rec.Duration, store.Timestamp(now)
 	titles[row.ASIN] = x
+	return true
 }
 
 // due writes each waiting place still for StillFor (since this Bridge first

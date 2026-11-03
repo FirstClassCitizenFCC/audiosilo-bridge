@@ -655,3 +655,42 @@ func TestPushDurationMismatch(t *testing.T) {
 		t.Fatalf("the mismatched place still waits: %+v", x)
 	}
 }
+
+// failWant is the store with WantAudiblePush failing while fail is set.
+type failWant struct {
+	*store.DB
+	fail bool
+}
+
+func (f *failWant) WantAudiblePush(ctx context.Context, account, asin string, row store.AudibleRow) error {
+	if f.fail {
+		return errors.New("database is locked")
+	}
+	return f.DB.WantAudiblePush(ctx, account, asin, row)
+}
+
+// A row the push failed to record keeps the feed's cursor where it was: the
+// next pass reads it again and the place is written, never skipped past.
+func TestPushRowNotRecordedIsReadAgain(t *testing.T) {
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 3600))
+	db := &failWant{DB: e.db}
+	e.o.DB = db
+	p := NewPusher(e.o)
+	e.started(t, p)
+	cursor := e.account(t).PushCursor
+
+	db.fail = true
+	e.srv.add("A/One", "B000000001", 600, e.now, "web-1")
+	e.read(p)
+	if a := e.account(t); a.PushCursor != cursor {
+		t.Fatalf("the cursor moved past a row not recorded: %q -> %q", cursor, a.PushCursor)
+	}
+	db.fail = false
+	e.read(p)
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 1 || got[0] != "B000000001@600000" {
+		t.Fatalf("sets = %v", got)
+	}
+}

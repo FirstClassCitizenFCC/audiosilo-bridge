@@ -1338,7 +1338,8 @@ internal/
             last_ms/at written to Audible, heard_ms sent from it (each clears the other: AudiblePushed,
             and AudibleHeard for a write before the job began), want_ms waiting, the feed row last
             read: row_version/row_ms/row_duration and row_seen, when this Bridge first read that place;
-            TouchAudibleRow a new version at the same place) and on audible_accounts
+            TouchAudibleRow a new version at the same place; a sync listing the title for another book
+            forgets them) and on audible_accounts
             push_cursor/push_from (push_from '' until a read reaches the feed's end; started again by a mapping to another server, person or
             library), sync_at/sync_error/sync_retry_at (AudibleSyncFailed and AudibleSyncOK never shorten a
             wait still ahead) and refusal_kind (bridge#46: 'sign_in' | 'device'
@@ -2415,7 +2416,8 @@ internal/
             a re-matched title's place is a new event) and a finish at the book's end (98%, or 3 min
             left past 90%), 200 a call; a place answered (not rejected) records heard_ms
             (store.AudibleHeard: it clears a last_ms written before the job began, and an applied one
-            drops a place waiting from the row the push had then: it would move Audible back); sync_off
+            drops a place waiting from the row the push had then, or one not further on recorded since
+            while the push hasn't written since the job began: it would move Audible back); sync_off
             ends it quietly, user_unavailable fails coded; a rejected duration_mismatch (the book's length
             disagrees with the title's runtime) is counted (Mismatched), sent once a job, never retried
             in it. Pusher (not a job): every PushEvery (1 min)
@@ -2424,7 +2426,8 @@ internal/
             this loop only): reads the feed from push_cursor (it pages in the server's write order, change_seq, and
             may give a row again with updated_at unchanged, so a row is new by its version and place,
             never its time; the baseline, every read until one reaches the feed's end, takes only rows
-            of the last 10 min by updated_at, history after it is none), skips rows by audible:<account>, keeps a
+            of the last 10 min by updated_at, history after it is none; a row it fails to record keeps
+            the cursor, so the pass reads it again), skips rows by audible:<account>, keeps a
             row on a title the last sync didn't list for that book pending (listed 0,
             store.PendAudiblePush) until a sync lists it; for the places still for StillFor (3 min, since
             row_seen: the Bridge's clock) it drops one under 1 s, within 5 s of last_ms (debounce) or

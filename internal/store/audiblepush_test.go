@@ -176,7 +176,6 @@ func TestAudiblePushMarkers(t *testing.T) {
 	if p := get(); p.LastMs != 100_000 || p.WantMs == nil || *p.WantMs != 110_000 || p.HeardMs != 120_000 {
 		t.Fatalf("a push during the job was undone: %+v", p)
 	}
-
 	// Pending: a place on a title the feed syncs but the last job didn't list.
 	row := AudibleRow{Version: 1, Ms: 5_000, Seen: at}
 	if err := db.PendAudiblePush(ctx, a.ID, "B000000002", 1, "A/Two", true, row); err != nil {
@@ -214,6 +213,32 @@ func TestAudiblePushMarkers(t *testing.T) {
 	_ = db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000003", LibraryID: 1, Path: "A/Other", RuntimeS: 60}})
 	if p, _ := db.GetAudiblePush(ctx, a.ID, "B000000003"); p.WantMs != nil || !p.Listed {
 		t.Fatalf("a pending place on another book was kept: %+v", p)
+	}
+	// A newer row read while the job ran, with no push since it started, and
+	// behind the place the server took: it goes (Audible is still there).
+	later := at.Add(2 * time.Hour)
+	snap, _ = db.GetAudiblePush(ctx, a.ID, "B000000003")
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000003", AudibleRow{Version: 2, Ms: 130_000, Seen: later.Add(time.Minute)})
+	if err := db.AudibleHeard(ctx, snap, 140_000, true, later); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := db.GetAudiblePush(ctx, a.ID, "B000000003"); p.WantMs != nil {
+		t.Fatalf("a place behind the one the server took stayed: %+v", p)
+	}
+	// One further on than the place heard stays.
+	snap, _ = db.GetAudiblePush(ctx, a.ID, "B000000003")
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000003", AudibleRow{Version: 3, Ms: 150_000, Seen: later.Add(2 * time.Minute)})
+	if err := db.AudibleHeard(ctx, snap, 145_000, true, later); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := db.GetAudiblePush(ctx, a.ID, "B000000003"); p.WantMs == nil || *p.WantMs != 150_000 {
+		t.Fatalf("a place further on went: %+v", p)
+	}
+	// A job listing the title for another book forgets the row last read.
+	_ = db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000003", LibraryID: 1, Path: "A/Elsewhere", RuntimeS: 60}})
+	if p, _ := db.GetAudiblePush(ctx, a.ID, "B000000003"); p.WantMs != nil || p.RowMs != -1 || p.RowVersion != -1 ||
+		p.RowSeen != "" || p.RowDuration != 0 {
+		t.Fatalf("re-listed for another book = %+v", p)
 	}
 }
 
