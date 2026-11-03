@@ -29,6 +29,9 @@ type licenseResp struct {
 			ContentReference struct {
 				// ContentSizeInBytes is the file's size, when Audible sends it.
 				ContentSizeInBytes int64 `json:"content_size_in_bytes"`
+				// ACR is the content reference a place written back needs
+				// (ContentACR).
+				ACR string `json:"acr"`
 			} `json:"content_reference"`
 		} `json:"content_metadata"`
 	} `json:"content_license"`
@@ -162,20 +165,12 @@ func (c *Client) License(ctx context.Context, asin string) (License, error) {
 	return License{URL: meta.ContentURL.OfflineURL, Key: key, IV: iv, Size: max(meta.ContentReference.ContentSizeInBytes, 0)}, nil
 }
 
-type contentRefResp struct {
-	ContentLicense struct {
-		ContentMetadata struct {
-			ContentReference struct {
-				ACR string `json:"acr"`
-			} `json:"content_reference"`
-		} `json:"content_metadata"`
-	} `json:"content_license"`
-}
-
 // ContentACR fetches the Audible Content Reference (ACR) for a book - required to
 // write a last-heard position back to Audible (PUT /1.0/lastpositions/{asin}). It
 // uses the same license request as a download (the only documented source of the
-// ACR) but only reads content_reference.acr.
+// ACR) but only reads content_reference.acr. An answer with no ACR is a denied
+// license, wrapping its kind as License does (IsDenial): Audible answers it 200,
+// so it carries no HTTP status.
 func (c *Client) ContentACR(ctx context.Context, asin string) (string, error) {
 	body, _ := json.Marshal(map[string]any{
 		"supported_drm_types": []string{"Mpeg", "Adrm"},
@@ -183,12 +178,20 @@ func (c *Client) ContentACR(ctx context.Context, asin string) (string, error) {
 		"consumption_type":    "Download",
 		"response_groups":     "content_reference",
 	})
-	var r contentRefResp
+	var r licenseResp
 	if err := c.doSigned(ctx, http.MethodPost, "/1.0/content/"+url.PathEscape(asin)+"/licenserequest", body, &r); err != nil {
 		return "", err
 	}
-	if r.ContentLicense.ContentMetadata.ContentReference.ACR == "" {
-		return "", fmt.Errorf("no content reference (acr) returned for %s", asin)
+	if acr := r.ContentLicense.ContentMetadata.ContentReference.ACR; acr != "" {
+		return acr, nil
 	}
-	return r.ContentLicense.ContentMetadata.ContentReference.ACR, nil
+	return "", fmt.Errorf("%w: no content reference (acr) returned for %s", denialKind(r), asin)
+}
+
+// IsDenial reports whether err is Audible denying a license (ErrThrottled,
+// ErrNotReleased, ErrNoRights or ErrDenied): an answer about the title or the
+// device, not a failure to answer.
+func IsDenial(err error) bool {
+	return errors.Is(err, ErrThrottled) || errors.Is(err, ErrNotReleased) || errors.Is(err, ErrNoRights) ||
+		errors.Is(err, ErrDenied)
 }

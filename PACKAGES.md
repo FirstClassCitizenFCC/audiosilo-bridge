@@ -1333,10 +1333,13 @@ internal/
             ends a refusal only of the reason given (audibleacct.RefusedText). 0010 (4b owner fixes) adds audible_accounts.device_profile
             (audible.ProfileVersion at the sign-in; '' for one made before it was
             kept, which reads as the older profile). 0011 (Phase 4c, audiblepush.go) adds audible_push
-            ((account, asin): the book the last audible.sync listed, runtime_s, listed, the cached acr,
-            last_ms/at written to Audible, heard_ms sent from it, want_ms + row_updated waiting) and on
+            ((account, asin): the book the last audible.sync listed, or with listed 0 the one a feed row
+            named, pending until a sync lists it (PendAudiblePush), runtime_s, listed, the cached acr,
+            last_ms/at written to Audible, heard_ms sent from it (each clears the other: AudiblePushed,
+            and AudibleHeard for a write before the job began), want_ms + row_updated waiting) and on
             audible_accounts push_cursor/push_from (started again by a mapping to another server, person or
-            library), sync_at/sync_error/sync_retry_at and refusal_kind (bridge#46: 'sign_in' | 'device'
+            library), sync_at/sync_error/sync_retry_at (AudibleSyncFailed and AudibleSyncOK never shorten a
+            wait still ahead) and refusal_kind (bridge#46: 'sign_in' | 'device'
             in a column, 4b's throttled rows migrated by their text; AudiblePolled keeps a device refusal,
             AudibleAccepted ends one of the kind given). 0007 adds podcast_shows, a credential-free cache keyed by
             (server_id, show_id), indexed by server/library/feed hash. An empty
@@ -2154,7 +2157,9 @@ internal/
             in ffmpeg's argv (visible in the container's process table): accepted.
             Phase 4c: a 414 splits a lastpositions batch as a 400 does; RetryWait(err) reads a 429/503's
             Retry-After (kept on the error, read up to a day); the identity calls (register, token,
-            deregister) send the profile's userAgent too (bridge#46).
+            deregister) send the profile's userAgent too (bridge#46); ContentACR's answer with no acr
+            (a 200 denying the license) wraps the denial's kind as License does, and IsDenial(err)
+            says whether an error is one of the four.
             Deps: stdlib + progress + source.
             Build tag audiblefake (never in a release build or image; fake_off.go /
             fake_on.go): AUDIOSILO_BRIDGE_AUDIBLE_FAKE_URL points every endpoint at the
@@ -2395,24 +2400,37 @@ internal/
             fsutil, importjob, jobs, link, mapping, placement, source, store,
             transfer.
   audiblesync/ Phase 4c: an account's places both ways. audible.sync (light; params
-            link.AudibleSyncParams, strict): a refused account fails audible_refused (the server stops
-            queueing), another server's or none unknown_account; while sync_retry_at is ahead it ends
-            "waiting" without calling Audible; lists the titles (store.ListAudibleSync), reads
-            lastpositions (25s, split on 400/414), skips a place under 1 s, past the runtime (5% + 2 min),
-            older than 85 days or within 5 s of the place last written (its echo), posts a listen of no
-            length (from_pos = to_pos, started_at = ended_at = last_updated, start jump; id EventID:
-            "aud-" + 32 hex of sha256(account|asin|position_ms|last_updated)) and a finish at the book's end
-            (98%, or 3 min left past 90%; the id with "|finish"), 200 a call, records heard_ms; sync_off
-            ends it quietly, user_unavailable fails coded. Pusher (not a job): every PushEvery (1 min) per
-            account mapped here, not refused, not waiting, not paused (sync_off 5 min, user_unavailable or
-            unknown 15 min, in memory): reads the feed from push_cursor (the first read takes only rows of
-            the last 10 min, later ones nothing older than push_from), skips rows by audible:<account>, a
-            title not listed or another book than its match, then writes a place still for StillFor (3
-            min) unless under 1 s, within 5 s of last_ms (debounce) or heard_ms (echo), or past the
-            runtime: ContentACR once per ASIN (cached; a 400/404 on the write forgets it), SetPosition. A
-            429/503 keeps the place and waits its Retry-After (at least 2 min); another HTTP answer drops
-            it; never a refusal. Health (sync_at, sync_error) feeds the setup item's detail only.
-            Deps: audible, audibleacct, jobs, link, store.
+            link.AudibleSyncParams, strict): a device refusal fails audible_refused (the server stops
+            queueing until a sign-in again maps the account), a sign-in refusal audible_sign_in (the
+            server keeps queueing: the next poll Audible answers ends it), another server's or none
+            unknown_account; lists the titles (store.ListAudibleSync) first, then while sync_retry_at
+            is ahead ends "waiting" without calling Audible; reads the push's rows, then lastpositions
+            (25s, split on 400/414; a failure waits Audible's Retry-After from when it came back, at
+            least 2 min), skips a place under 1 s, past the runtime (5% + 2 min), older than 85 days
+            or within 5 s of the place last written (its echo), posts a listen of no length (from_pos =
+            to_pos, started_at = ended_at = last_updated, start jump; id EventID: "aud-" + 32 hex of
+            sha256(account|asin|position_ms|last_updated|kind|library_id|path), kind "" or "finish", so
+            a re-matched title's place is a new event) and a finish at the book's end (98%, or 3 min
+            left past 90%), 200 a call; a place answered (not rejected) records heard_ms
+            (store.AudibleHeard: it clears a last_ms written before the job began, and an applied one
+            drops a place waiting from the row the push had then: it would move Audible back); sync_off
+            ends it quietly, user_unavailable fails coded. Pusher (not a job): every PushEvery (1 min)
+            per account mapped here, not refused, not waiting, not paused (in memory: sync_off 5 min,
+            user_unavailable or unknown 15 min, the server's 429/503 its Retry-After, at least 2 min,
+            this loop only): reads the feed from push_cursor (the first read takes only rows of the last
+            10 min, later ones nothing older than push_from), skips rows by audible:<account>, keeps a
+            row on a title the last sync didn't list for that book pending (listed 0,
+            store.PendAudiblePush) until a sync lists it; for the places still for StillFor (3 min) it
+            drops one under 1 s, within 5 s of last_ms (debounce) or heard_ms (echo), or past the
+            runtime, reads Audible's places once (Positions) and drops one Audible moved on from since
+            (over 5 s further on and neither last_ms nor heard_ms: furthest wins, the next sync brings
+            it in), else writes it: ContentACR once per ASIN (cached; a cached one a write answers
+            400/404 for is read again and the write tried once more), SetPosition. A 429/503 keeps the
+            place and waits its Retry-After (at least 2 min) counted from the failure; a 5xx or no
+            answer keeps it and leaves the account 2 min (this loop only); another 4xx or a denied
+            license (audible.IsDenial) drops it, a throttled device also leaving the account 15 min;
+            never a refusal. Health (sync_at, sync_error; sync_retry_at, which no later call shortens)
+            feeds the setup item's detail only. Deps: audible, audibleacct, jobs, link, store.
   importjob/ matching and placement against a library (the manager's, ported):
             BookMatcher over []link.LibraryBook (pkg/match.BestWith under
             match.ImportOptions(), the import rules the server's own callers don't

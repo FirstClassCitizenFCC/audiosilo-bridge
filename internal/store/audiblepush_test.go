@@ -36,7 +36,7 @@ func TestAudiblePushRows(t *testing.T) {
 	if err := db.SetAudibleACR(ctx, a.ID, "B000000001", "CR!ACR1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AudibleHeard(ctx, a.ID, "B000000001", 30_000); err != nil {
+	if err := db.AudibleHeard(ctx, AudiblePush{Account: a.ID, ASIN: "B000000001", RowUpdated: Timestamp(at)}, 30_000, false, at); err != nil {
 		t.Fatal(err)
 	}
 	p, err := db.GetAudiblePush(ctx, a.ID, "B000000001")
@@ -61,8 +61,9 @@ func TestAudiblePushRows(t *testing.T) {
 	if err := db.AudiblePushed(ctx, a.ID, "B000000001", 60_000, at.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.WantMs != nil || p.LastMs != 60_000 || p.At != Timestamp(at.Add(time.Minute)) {
-		t.Fatalf("after the push = %+v", p)
+	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.WantMs != nil || p.LastMs != 60_000 || p.At != Timestamp(at.Add(time.Minute)) ||
+		p.HeardMs != -1 {
+		t.Fatalf("after the push = %+v (the place heard before it is no longer Audible's)", p)
 	}
 
 	// The next sync lists only the first (the second was marked Don't sync):
@@ -81,7 +82,7 @@ func TestAudiblePushRows(t *testing.T) {
 	if two, _ = db.GetAudiblePush(ctx, a.ID, "B000000002"); two.WantMs != nil {
 		t.Fatalf("an unlisted title took a want: %+v", two)
 	}
-	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.ACR != "CR!ACR1" || p.LastMs != 60_000 || p.HeardMs != 30_000 {
+	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.ACR != "CR!ACR1" || p.LastMs != 60_000 {
 		t.Fatalf("a listing forgot the push state: %+v", p)
 	}
 	// A title whose book moved forgets its waiting place.
@@ -108,6 +109,92 @@ func TestAudiblePushRows(t *testing.T) {
 	}
 	if list, _ := db.AudiblePushes(ctx, a.ID); len(list) != 0 {
 		t.Fatalf("rows outlived the account: %+v", list)
+	}
+}
+
+// The two directions' markers: a place heard from Audible ends the place last
+// written (unless the push wrote again since the job started), a place the
+// server applied drops the place waiting from an older server row (unless the
+// push read a newer row since), and a place pending on a title not listed yet
+// is kept by the listing that lists it for its book, else forgotten.
+func TestAudiblePushMarkers(t *testing.T) {
+	ctx := context.Background()
+	db := open(t)
+	at := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	a := AudibleAccount{ID: "abcd1234", Label: "Chris", Marketplace: "us", ServerID: "srv-1", UserID: 3, LibraryID: 1, Policy: "manual"}
+	if err := db.SignInAudibleAccount(ctx, a, at); err != nil {
+		t.Fatal(err)
+	}
+	one := AudibleSyncTitle{ASIN: "B000000001", LibraryID: 1, Path: "A/One", RuntimeS: 3600}
+	if err := db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{one}); err != nil {
+		t.Fatal(err)
+	}
+	get := func() AudiblePush {
+		t.Helper()
+		p, err := db.GetAudiblePush(ctx, a.ID, "B000000001")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// The push wrote 60 s an hour ago; a job starting now hears 90 s: the
+	// write is no longer Audible's place. Not applied: the waiting place stays.
+	_ = db.AudiblePushed(ctx, a.ID, "B000000001", 60_000, at.Add(-time.Hour))
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000001", 70_000, at)
+	snap := get()
+	if err := db.AudibleHeard(ctx, snap, 90_000, false, at); err != nil {
+		t.Fatal(err)
+	}
+	if p := get(); p.HeardMs != 90_000 || p.LastMs != -1 || p.WantMs == nil {
+		t.Fatalf("heard = %+v", p)
+	}
+	// Applied: the waiting place goes.
+	if err := db.AudibleHeard(ctx, snap, 95_000, true, at); err != nil {
+		t.Fatal(err)
+	}
+	if p := get(); p.WantMs != nil || p.HeardMs != 95_000 {
+		t.Fatalf("applied = %+v", p)
+	}
+	// The push wrote again and read a newer row while the job ran: both stay.
+	snap = get()
+	_ = db.AudiblePushed(ctx, a.ID, "B000000001", 100_000, at.Add(time.Minute))
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000001", 110_000, at.Add(time.Minute))
+	if err := db.AudibleHeard(ctx, snap, 120_000, true, at); err != nil {
+		t.Fatal(err)
+	}
+	if p := get(); p.LastMs != 100_000 || p.WantMs == nil || *p.WantMs != 110_000 || p.HeardMs != 120_000 {
+		t.Fatalf("a push during the job was undone: %+v", p)
+	}
+
+	// Pending: a place on a title the feed syncs but the last job didn't list.
+	ms := int64(5_000)
+	if err := db.PendAudiblePush(ctx, a.ID, "B000000002", 1, "A/Two", &ms, at); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := db.AudibleWaiting(ctx, a.ID); len(w) != 1 || w[0].ASIN != "B000000001" {
+		t.Fatalf("a pending place is waiting to be pushed: %+v", w)
+	}
+	// A re-match: the listed title's book changes on the server first.
+	if err := db.PendAudiblePush(ctx, a.ID, "B000000001", 1, "A/One (right)", &ms, at.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if p := get(); p.Listed || p.Path != "A/One (right)" || p.WantMs == nil || p.RowUpdated != Timestamp(at.Add(2*time.Minute)) ||
+		p.LastMs != 100_000 {
+		t.Fatalf("re-matched = %+v", p)
+	}
+	// The next job lists both for those books: kept, and now waiting.
+	if err := db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000001", LibraryID: 1, Path: "A/One (right)", RuntimeS: 3600},
+		{ASIN: "B000000002", LibraryID: 1, Path: "A/Two", RuntimeS: 7200}}); err != nil {
+		t.Fatal(err)
+	}
+	if w, _ := db.AudibleWaiting(ctx, a.ID); len(w) != 2 || w[1].RuntimeS != 7200 {
+		t.Fatalf("listed pending places = %+v", w)
+	}
+	// A pending place the next job doesn't list for its book goes.
+	_ = db.PendAudiblePush(ctx, a.ID, "B000000003", 1, "A/Three", &ms, at)
+	_ = db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000003", LibraryID: 1, Path: "A/Other", RuntimeS: 60}})
+	if p, _ := db.GetAudiblePush(ctx, a.ID, "B000000003"); p.WantMs != nil || !p.Listed {
+		t.Fatalf("a pending place on another book was kept: %+v", p)
 	}
 }
 
@@ -197,11 +284,24 @@ func TestAudibleSyncHealth(t *testing.T) {
 	if got.SyncError != "Audible asked to wait" || got.SyncRetryAt != Timestamp(at.Add(time.Hour)) || got.RefusedAt != "" {
 		t.Fatalf("failed = %+v", got)
 	}
+	// The job and the push share the wait: a failure with no wait of its
+	// own, a shorter one or a success before it has passed never ends it.
 	if err := db.AudibleSyncFailed(ctx, a.ID, "no wait", time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ = db.GetAudibleAccount(ctx, a.ID); got.SyncRetryAt != "" {
-		t.Fatalf("a failure with no wait kept the old one: %+v", got)
+	_ = db.AudibleSyncFailed(ctx, a.ID, "a shorter wait", at.Add(time.Minute))
+	if got, _ = db.GetAudibleAccount(ctx, a.ID); got.SyncRetryAt != Timestamp(at.Add(time.Hour)) || got.SyncError != "a shorter wait" {
+		t.Fatalf("a later failure shortened the wait: %+v", got)
+	}
+	if err := db.AudibleSyncOK(ctx, a.ID, at.Add(30*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = db.GetAudibleAccount(ctx, a.ID); got.SyncError != "" || got.SyncRetryAt != Timestamp(at.Add(time.Hour)) {
+		t.Fatalf("a success ended a wait still ahead: %+v", got)
+	}
+	_ = db.AudibleSyncFailed(ctx, a.ID, "a longer wait", at.Add(90*time.Minute))
+	if got, _ = db.GetAudibleAccount(ctx, a.ID); got.SyncRetryAt != Timestamp(at.Add(90*time.Minute)) {
+		t.Fatalf("a longer wait was not kept: %+v", got)
 	}
 	if err := db.AudibleSyncOK(ctx, a.ID, at.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)

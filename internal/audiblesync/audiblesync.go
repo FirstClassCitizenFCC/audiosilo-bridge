@@ -11,8 +11,9 @@
 //     reads the person's places that changed (GET /bridge/progress, the
 //     account's own rows left out) and writes back to Audible
 //     (SetLastPosition, the content reference cached per ASIN) a place that
-//     has been still for 3 minutes and is more than 5 seconds from the last
-//     one written.
+//     has been still for 3 minutes, is more than 5 seconds from the last one
+//     written, and that Audible hasn't moved further on from since: furthest
+//     wins both ways.
 //
 // Neither touches a title the server didn't list (Not this book, Don't sync
 // this book, no match), nor a place past Audible's runtime (the match looks
@@ -33,7 +34,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"net/http"
 	"strconv"
 	"time"
 
@@ -49,9 +49,13 @@ const Kind = link.KindAudibleSync
 
 // The failure codes a sync reports ({code, message} as its result and error).
 // The server reads CodeRefused: it marks the account refused and queues no
-// sync until the Bridge maps it again.
+// sync until the Bridge maps it again, so it is a device refusal's alone (only
+// a sign-in again ends one, and that maps it again). A sign-in refusal ends by
+// itself once Audible answers a call (the next poll): CodeSignIn, which the
+// server leaves alone, so its syncs are queued as usual.
 const (
-	CodeRefused         = "audible_refused"  // the account must sign in again on the Bridge
+	CodeRefused         = "audible_refused"  // Audible denied the account's device: it must sign in again on the Bridge
+	CodeSignIn          = "audible_sign_in"  // Audible refused the sign-in for now
 	CodeUnknownAccount  = "unknown_account"  // not this Bridge's account, or mapped on another server
 	CodeUserUnavailable = "user_unavailable" // the server can't sync for the account's person now
 	CodeAudible         = "audible_error"    // Audible didn't answer the places (backed off)
@@ -97,18 +101,18 @@ func atBookEnd(placeS float64, runtimeS int64) bool {
 }
 
 // EventID is a place's event id: "aud-" and the first 32 hex characters of
-// sha256(account|asin|position_ms|last_updated), so an unchanged Audible
-// place is the same event (duplicate on the server) at every sync. kind ""
-// is the listen; another kind ("finish") is appended.
-func EventID(account, asin string, positionMs int64, lastUpdated time.Time, kind string) string {
+// sha256(account|asin|position_ms|last_updated|kind|library_id|path), so an
+// unchanged Audible place is the same event (duplicate on the server) at every
+// sync, and the same place on another book (the title matched again) is a new
+// one: the server keeps ids per person, not per book. kind "" is the listen,
+// "finish" the finish; the path, the one free-form part, comes last.
+func EventID(account string, t link.AudibleSyncTitle, pl audible.Position, kind string) string {
 	updated := ""
-	if !lastUpdated.IsZero() {
-		updated = lastUpdated.UTC().Format(time.RFC3339Nano)
+	if !pl.LastUpdated.IsZero() {
+		updated = pl.LastUpdated.UTC().Format(time.RFC3339Nano)
 	}
-	in := account + "|" + asin + "|" + strconv.FormatInt(positionMs, 10) + "|" + updated
-	if kind != "" {
-		in += "|" + kind
-	}
+	in := account + "|" + t.ASIN + "|" + strconv.FormatInt(pl.PositionMs, 10) + "|" + updated + "|" + kind + "|" +
+		strconv.FormatInt(t.LibraryID, 10) + "|" + t.Path
 	sum := sha256.Sum256([]byte(in))
 	return "aud-" + hex.EncodeToString(sum[:])[:32]
 }
@@ -133,9 +137,10 @@ type Store interface {
 	AudibleWaiting(ctx context.Context, account string) ([]store.AudiblePush, error)
 	WantAudiblePush(ctx context.Context, account, asin string, ms int64, rowUpdated time.Time) error
 	SeenAudibleRow(ctx context.Context, account, asin string, rowUpdated time.Time) error
+	PendAudiblePush(ctx context.Context, account, asin string, libraryID int64, path string, ms *int64, rowUpdated time.Time) error
 	AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time) error
 	DropAudiblePush(ctx context.Context, account, asin string) error
-	AudibleHeard(ctx context.Context, account, asin string, ms int64) error
+	AudibleHeard(ctx context.Context, x store.AudiblePush, ms int64, applied bool, since time.Time) error
 	SetAudibleACR(ctx context.Context, account, asin, acr string) error
 	SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error
 	AudibleSyncOK(ctx context.Context, id string, at time.Time) error
@@ -213,16 +218,15 @@ func (o *Options) health(ctx context.Context, a store.AudibleAccount, err error,
 	}
 }
 
-// retryAt is when the account may call Audible again after err: Audible's
-// Retry-After (at least minWait) for a 429/503, else zero (no wait).
+// retryAt is when the account may call Audible again after err, with now the
+// moment the failure came back (after the client's own waits): Audible's
+// Retry-After (at least minWait) for a 429/503, else zero (no wait). Only
+// Audible's: the server asking the Bridge to wait is no reason to leave
+// Audible alone.
 func retryAt(err error, now time.Time, minWait time.Duration) time.Time {
 	wait, ok := audible.RetryWait(err)
 	if !ok {
-		var e *link.APIError
-		if !errors.As(err, &e) || (e.Status != http.StatusTooManyRequests && e.Status != http.StatusServiceUnavailable) {
-			return time.Time{}
-		}
-		wait = e.RetryAfter
+		return time.Time{}
 	}
 	return now.Add(max(wait, minWait))
 }
@@ -356,8 +360,11 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	if acct.OnOtherServer(h.o.ServerID()) {
 		return nil, fail(CodeUnknownAccount, "The Audible account is mapped on another server: map it again on the Bridge's Accounts tab.")
 	}
+	if audibleacct.Throttled(acct) {
+		return nil, fail(CodeRefused, "Audible refused the account's device: sign in to Audible again on the Bridge (Accounts); its places sync again after that.")
+	}
 	if acct.RefusedAt != "" {
-		return nil, fail(CodeRefused, "Audible refused the account: sign in to Audible again on the Bridge (Accounts); its places sync again after that.")
+		return nil, fail(CodeSignIn, "Audible refused the account's sign-in: its places sync again once Audible accepts it, or after signing in again on the Bridge (Accounts).")
 	}
 	srv := h.o.server()
 	if srv == nil {
@@ -365,11 +372,9 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	}
 	res := &Result{Account: acct.ID, Titles: len(p.Titles)}
 	now := h.o.Now()
-	if until, ok := waiting(acct, now); ok {
-		res.Waiting, res.WaitUntil = true, until.UTC().Format(time.RFC3339)
-		return res, nil
-	}
 
+	// The listing goes first, even while Audible asks the Bridge to wait: the
+	// push reads it (a title the console stopped syncing is never pushed).
 	titles := make([]store.AudibleSyncTitle, len(p.Titles))
 	asins := make([]string, len(p.Titles))
 	for i, t := range p.Titles {
@@ -379,27 +384,36 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 	if err := h.o.DB.ListAudibleSync(ctx, acct.ID, titles); err != nil {
 		return nil, err
 	}
+	if until, ok := waiting(acct, now); ok {
+		res.Waiting, res.WaitUntil = true, until.UTC().Format(time.RFC3339)
+		return res, nil
+	}
 	if len(asins) == 0 {
 		h.o.health(ctx, acct, nil, time.Time{})
 		return res, nil
 	}
 
+	// The push's rows before Audible's places: a place the push writes while
+	// they are read is then compared with the write before it (its echo), never
+	// taken for Audible's own.
+	list, err := h.o.DB.AudiblePushes(ctx, acct.ID)
+	if err != nil {
+		return nil, err
+	}
+	pushes := make(map[string]store.AudiblePush, len(list))
+	for _, x := range list {
+		pushes[x.ASIN] = x
+	}
 	rep.Progress(jobs.Progress{Step: "audible", Message: "Reading the places on Audible", Total: len(asins)})
 	places, err := h.o.Accounts.Positions(ctx, acct.ID, asins)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		h.o.health(ctx, acct, fmt.Errorf("reading the places on Audible: %w", err), retryAt(err, now, 0))
+		h.o.health(ctx, acct, fmt.Errorf("reading the places on Audible: %w", err), retryAt(err, h.o.Now(), errorWait))
 		return nil, fail(CodeAudible, "Audible didn't answer the places: %v", err)
 	}
 
-	pushes := map[string]store.AudiblePush{}
-	if list, err := h.o.DB.AudiblePushes(ctx, acct.ID); err == nil {
-		for _, x := range list {
-			pushes[x.ASIN] = x
-		}
-	}
 	var events []link.AudibleEvent
 	type heardPlace struct {
 		asin string
@@ -436,12 +450,12 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 			at = now
 		}
 		stamp := at.UTC().Format(time.RFC3339)
-		id := EventID(acct.ID, t.ASIN, pl.PositionMs, pl.LastUpdated, "")
+		id := EventID(acct.ID, t, pl, "")
 		events = append(events, link.AudibleEvent{ID: id, Kind: link.EventListen, LibraryID: t.LibraryID, Path: t.Path,
 			FromPos: &placeS, ToPos: &placeS, StartedAt: stamp, EndedAt: stamp, Start: "jump"})
 		heard[id] = heardPlace{t.ASIN, pl.PositionMs}
 		if atBookEnd(placeS, t.RuntimeS) {
-			fid := EventID(acct.ID, t.ASIN, pl.PositionMs, pl.LastUpdated, link.EventFinish)
+			fid := EventID(acct.ID, t, pl, link.EventFinish)
 			events = append(events, link.AudibleEvent{ID: fid, Kind: link.EventFinish, LibraryID: t.LibraryID, Path: t.Path, At: stamp})
 			res.Finished++
 		}
@@ -464,13 +478,14 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			h.o.health(ctx, acct, fmt.Errorf("sending the places to the server: %w", err), retryAt(err, now, 0))
+			h.o.health(ctx, acct, fmt.Errorf("sending the places to the server: %w", err), time.Time{})
 			return nil, fmt.Errorf("sending the places to the server: %w", err)
 		}
 		res.Sent += len(batch)
 		for _, r := range ans.Results {
+			applied := r.Status == link.SyncApplied || r.Status == link.SyncDiverged
 			switch {
-			case r.Status == link.SyncApplied || r.Status == link.SyncDiverged:
+			case applied:
 				res.Applied++
 			case r.Status == link.SyncDuplicate:
 				res.Duplicate++
@@ -481,13 +496,18 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 			default:
 				res.Rejected++
 			}
-			if hp, ok := heard[r.ID]; ok && r.Status != link.SyncRejected {
-				if x, ok := pushes[hp.asin]; ok && x.HeardMs == hp.ms {
-					continue // already recorded
-				}
-				if err := h.o.DB.AudibleHeard(ctx, acct.ID, hp.asin, hp.ms); err != nil {
-					h.o.Log.Warn("audible: recording a place heard failed", "account", acct.ID, "err", err)
-				}
+			hp, ok := heard[r.ID]
+			if !ok || r.Status == link.SyncRejected {
+				continue
+			}
+			x, ok := pushes[hp.asin]
+			if !ok || (!applied && x.HeardMs == hp.ms) {
+				continue // not listed, or already recorded
+			}
+			// Applied: the server's place is Audible's now, so a place waiting
+			// from an older server row would move Audible back: it goes.
+			if err := h.o.DB.AudibleHeard(ctx, x, hp.ms, applied, now); err != nil {
+				h.o.Log.Warn("audible: recording a place heard failed", "account", acct.ID, "err", err)
 			}
 		}
 		rep.Progress(jobs.Progress{Step: "server", Message: "Sending the places to the server", Done: res.Sent, Total: len(events)})

@@ -266,6 +266,35 @@ func TestClientLicenseDenied(t *testing.T) {
 	}
 }
 
+// ContentACR reads the content reference; a 200 with none is a denied license
+// of its kind (the position sync drops the place on it), not a bare error a
+// caller can't tell from no answer.
+func TestClientContentACRDenied(t *testing.T) {
+	answer := `{"content_license":{"status_code":"Granted","content_metadata":{"content_reference":{"acr":"CR!ONE"}}}}`
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(answer))
+	}))
+	defer ts.Close()
+	c := testClient(t, ts.URL)
+	if acr, err := c.ContentACR(context.Background(), "B00"); err != nil || acr != "CR!ONE" {
+		t.Fatalf("acr = %q, %v", acr, err)
+	}
+	for body, want := range map[string]error{
+		`{"content_license":{"status_code":"Denied","license_denial_reasons":[{"rejectionReason":"CustomerThrottled","validationType":"Ownership"}]}}`:  ErrThrottled,
+		`{"content_license":{"status_code":"Denied","license_denial_reasons":[{"rejectionReason":"ContentEligibility","validationType":"Ownership"}]}}`: ErrNoRights,
+		`{"content_license":{"status_code":"Denied"}}`: ErrDenied,
+	} {
+		answer = body
+		_, err := c.ContentACR(context.Background(), "B00")
+		if !errors.Is(err, want) || !IsDenial(err) || HTTPStatus(err) != 0 {
+			t.Fatalf("%s: err = %v, want %v", body, err, want)
+		}
+	}
+	if IsDenial(errors.New("connection refused")) {
+		t.Fatal("no answer read as a denial")
+	}
+}
+
 func TestDownloadIsSigned(t *testing.T) {
 	// The content-delivery GET must be RSA-signed and carry the Audible user agent,
 	// or Audible's CDS returns HTTP 403 (the bug an unsigned plain GET hit). Also

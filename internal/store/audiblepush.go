@@ -134,11 +134,27 @@ func (db *DB) WantAudiblePush(ctx context.Context, account, asin string, ms int6
 }
 
 // SeenAudibleRow records that the server row updated at rowUpdated was read
-// and needs no push (an echo of Audible's own place, past the runtime, ...):
-// the waiting place goes.
+// and needs no push (history: changed before the feed's start): the waiting
+// place goes.
 func (db *DB) SeenAudibleRow(ctx context.Context, account, asin string, rowUpdated time.Time) error {
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, row_updated = ? WHERE account = ? AND asin = ?`,
 		timestamp(rowUpdated), account, asin)
+	return err
+}
+
+// PendAudiblePush records a server place (ms; nil: history, only the row's
+// time) on a title the server's feed syncs for the book (libraryID, path) but
+// the last audible.sync didn't list for it (a new match, a re-match, a title
+// synced again, a remap): it waits unlisted, never pushed, until the next
+// sync lists the title for that book (ListAudibleSync keeps it) or doesn't
+// (it goes).
+func (db *DB) PendAudiblePush(ctx context.Context, account, asin string, libraryID int64, path string, ms *int64,
+	rowUpdated time.Time) error {
+	_, err := db.sql.ExecContext(ctx, `INSERT INTO audible_push (account, asin, library_id, path, listed, want_ms, row_updated)
+		VALUES (?, ?, ?, ?, 0, ?, ?)
+		ON CONFLICT(account, asin) DO UPDATE SET library_id = excluded.library_id, path = excluded.path, listed = 0,
+			want_ms = excluded.want_ms, row_updated = excluded.row_updated`,
+		account, asin, libraryID, path, ms, timestamp(rowUpdated))
 	return err
 }
 
@@ -148,18 +164,26 @@ func (db *DB) DropAudiblePush(ctx context.Context, account, asin string) error {
 	return err
 }
 
-// AudiblePushed records that ms was written to Audible at at (the waiting
-// place goes).
+// AudiblePushed records that ms was written to Audible at at: the waiting
+// place goes, and the place heard before it is no longer Audible's (heard_ms
+// -1: a server place there is a move, written like any other).
 func (db *DB) AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, last_ms = ?, at = ? WHERE account = ? AND asin = ?`,
-		ms, timestamp(at), account, asin)
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, last_ms = ?, at = ?, heard_ms = -1
+		WHERE account = ? AND asin = ?`, ms, timestamp(at), account, asin)
 	return err
 }
 
-// AudibleHeard records the Audible place an audible.sync sent to the server
-// for (account, asin).
-func (db *DB) AudibleHeard(ctx context.Context, account, asin string, ms int64) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET heard_ms = ? WHERE account = ? AND asin = ?`, ms, account, asin)
+// AudibleHeard records the Audible place (ms) an audible.sync that started at
+// since sent to the server for x's title (x as the job read it at since). The
+// place last written is no longer Audible's (last_ms -1), unless the push wrote
+// again since. applied: the server took the place (it was further on), so a
+// place waiting to be pushed from an older server row goes, unless the push
+// recorded a newer row since (row_updated moved).
+func (db *DB) AudibleHeard(ctx context.Context, x AudiblePush, ms int64, applied bool, since time.Time) error {
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET heard_ms = ?1,
+			last_ms = CASE WHEN at < ?2 THEN -1 ELSE last_ms END,
+			want_ms = CASE WHEN ?3 AND row_updated = ?4 THEN NULL ELSE want_ms END
+		WHERE account = ?5 AND asin = ?6`, ms, timestamp(since), applied, x.RowUpdated, x.Account, x.ASIN)
 	return err
 }
 
@@ -178,20 +202,24 @@ func (db *DB) SetAudiblePushCursor(ctx context.Context, id, cursor string, from 
 }
 
 // AudibleSyncOK records that id's sync (a job or a push) went through at at:
-// its error and any wait clear.
+// its error clears, and a wait once it has passed (the job and the push run
+// side by side: one's success never ends a wait Audible gave the other).
 func (db *DB) AudibleSyncOK(ctx context.Context, id string, at time.Time) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_at = ?, sync_error = '', sync_retry_at = '' WHERE id = ?`,
-		timestamp(at), id)
+	ts := timestamp(at)
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_at = ?1, sync_error = '',
+		sync_retry_at = CASE WHEN sync_retry_at > ?1 THEN sync_retry_at ELSE '' END WHERE id = ?2`, ts, id)
 	return err
 }
 
 // AudibleSyncFailed records why id's sync failed, and until when Audible asked
-// the Bridge to wait (zero: no wait). It never refuses the account.
+// the Bridge to wait (zero: no new wait). A wait is never shortened: the later
+// of the one stored and retryAt stays. It never refuses the account.
 func (db *DB) AudibleSyncFailed(ctx context.Context, id, why string, retryAt time.Time) error {
 	retry := ""
 	if !retryAt.IsZero() {
 		retry = timestamp(retryAt)
 	}
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_error = ?, sync_retry_at = ? WHERE id = ?`, why, retry, id)
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_error = ?1,
+		sync_retry_at = CASE WHEN ?2 > sync_retry_at THEN ?2 ELSE sync_retry_at END WHERE id = ?3`, why, retry, id)
 	return err
 }

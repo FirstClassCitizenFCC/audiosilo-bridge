@@ -3,11 +3,13 @@ package audiblesync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kodestar/audiosilo-bridge/internal/audible"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
@@ -97,7 +99,7 @@ func TestPushDebounce(t *testing.T) {
 func TestPushEchoSuppression(t *testing.T) {
 	e := newEnv(t)
 	e.list(t, st("B000000001", "A/One", 36000), st("B000000002", "A/Two", 36000))
-	if err := e.db.AudibleHeard(context.Background(), acctID, "B000000002", 1_200_000); err != nil {
+	if err := e.db.AudibleHeard(context.Background(), store.AudiblePush{Account: acctID, ASIN: "B000000002"}, 1_200_000, false, e.now); err != nil {
 		t.Fatal(err)
 	}
 	p := NewPusher(e.o)
@@ -276,5 +278,238 @@ func TestPushUnpaired(t *testing.T) {
 	NewPusher(e.o).Tick(context.Background())
 	if len(e.srv.feedAsks) != 0 {
 		t.Fatal("an unpaired Bridge read the feed")
+	}
+}
+
+// Furthest wins both ways: a place Audible moved further on since the Bridge
+// last wrote or heard it (listening in the Audible app no sync has brought in
+// yet, here during a sync off) isn't overwritten by an older AudioSilo place:
+// the waiting place goes and the next sync sends Audible's. A move back made
+// on AudioSilo while Audible stayed where the Bridge left it is written.
+func TestPushLeavesAudibleFurtherOn(t *testing.T) {
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000))
+	p := NewPusher(e.o)
+	e.started(t, p)
+	e.srv.add("A/One", "B000000001", 3000, e.now, "web-1")
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 1 || got[0] != "B000000001@3000000" {
+		t.Fatalf("sets = %v", got)
+	}
+
+	// The person listens on in the Audible app to 5000 s, then plays a little
+	// on AudioSilo from the stale 3000 s.
+	e.accts.mu.Lock()
+	e.accts.places["B000000001"] = audible.Position{PositionMs: 5_000_000, LastUpdated: e.now}
+	e.accts.mu.Unlock()
+	e.now = e.now.Add(time.Minute)
+	e.srv.add("A/One", "B000000001", 3010, e.now, "web-1")
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 1 {
+		t.Fatalf("Audible's further place was overwritten: %v", got)
+	}
+	if x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000001"); x.WantMs != nil {
+		t.Fatalf("the older place still waits: %+v", x)
+	}
+	res, err := e.runSync(t, params(t, title("B000000001", "A/One", 36000)))
+	if err != nil || res.Applied != 1 || e.srv.server["A/One"] != 5000 {
+		t.Fatalf("the sync = %+v, %v (server %v)", res, err, e.srv.server["A/One"])
+	}
+
+	// Audible is where the sync heard it; a move back on AudioSilo is written.
+	e.now = e.now.Add(time.Minute)
+	e.srv.add("A/One", "B000000001", 1200, e.now, "web-1")
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@1200000" {
+		t.Fatalf("a move back wasn't written: %v", got)
+	}
+}
+
+// A place the sync applies (Audible was further on) ends the place waiting
+// from the older server row, so the push never moves Audible back to it.
+func TestPushAfterAppliedListen(t *testing.T) {
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000))
+	p := NewPusher(e.o)
+	e.started(t, p)
+	e.srv.server["A/One"] = 3000
+	e.srv.add("A/One", "B000000001", 3100, e.now, "web-1") // stopped behind Audible's place
+	e.now = e.now.Add(time.Minute)
+	p.Tick(context.Background())
+	if x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000001"); x.WantMs == nil {
+		t.Fatal("no place waiting")
+	}
+	e.accts.mu.Lock()
+	e.accts.places["B000000001"] = audible.Position{PositionMs: 4_000_000, LastUpdated: e.now.Add(-5 * time.Minute)}
+	e.accts.mu.Unlock()
+	res, err := e.runSync(t, params(t, title("B000000001", "A/One", 36000)))
+	if err != nil || res.Applied != 1 {
+		t.Fatalf("the sync = %+v, %v", res, err)
+	}
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 0 {
+		t.Fatalf("the place the sync replaced was written over Audible's: %v", got)
+	}
+}
+
+// The two directions' markers end each other: once the sync hears Audible
+// elsewhere, a move back to the place last written is no debounce; once the
+// push writes, a move back to the place last heard is no echo. Both are
+// written.
+func TestPushMarkersSupersede(t *testing.T) {
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000))
+	p := NewPusher(e.o)
+	e.started(t, p)
+	e.srv.add("A/One", "B000000001", 3000, e.now, "web-1")
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background()) // writes 3000 s
+	// Audible plays on to 5000 s, and the sync brings it in.
+	e.now = e.now.Add(time.Minute)
+	e.accts.mu.Lock()
+	e.accts.places["B000000001"] = audible.Position{PositionMs: 5_000_000, LastUpdated: e.now}
+	e.accts.mu.Unlock()
+	if res, err := e.runSync(t, params(t, title("B000000001", "A/One", 36000))); err != nil || res.Applied != 1 {
+		t.Fatalf("the sync = %+v, %v", res, err)
+	}
+	// Back on AudioSilo to within 5 s of the place written before.
+	e.now = e.now.Add(time.Minute)
+	e.srv.add("A/One", "B000000001", 3002, e.now, "web-1")
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@3002000" {
+		t.Fatalf("a move back to the old write was taken for the debounce: %v", got)
+	}
+	// Now the place heard (5000 s) is no longer Audible's: moving to it on
+	// AudioSilo is written too.
+	e.now = e.now.Add(time.Minute)
+	e.srv.add("A/One", "B000000001", 5001, e.now, "web-1")
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 3 || got[2] != "B000000001@5001000" {
+		t.Fatalf("a move to the old place heard was taken for Audible's own: %v", got)
+	}
+}
+
+// Audible's answers: a license it denies (no content reference) drops the
+// place and isn't asked again every minute (a device denied every license
+// leaves the account for a while); a 5xx keeps the place for a later pass (no
+// wait for the sync); a cached content reference Audible no longer takes is
+// read again and the place written in the same pass; a wait is counted from
+// when the 429 came back, after the client's own waits.
+func TestPushAudibleAnswers(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000))
+	p := NewPusher(e.o)
+	e.started(t, p)
+
+	e.accts.acrErr = fmt.Errorf("%w: no content reference (acr) returned for B000000001", audible.ErrNoRights)
+	e.srv.add("A/One", "B000000001", 600, e.now, "web-1")
+	e.now = e.now.Add(4 * time.Minute)
+	for range 3 {
+		p.Tick(ctx)
+		e.now = e.now.Add(time.Minute)
+	}
+	if x, _ := e.db.GetAudiblePush(ctx, acctID, "B000000001"); x.WantMs != nil || e.accts.acrs != 1 {
+		t.Fatalf("a denied license: %+v (%d license requests)", x, e.accts.acrs)
+	}
+	e.accts.acrErr = fmt.Errorf("%w: no content reference (acr) returned for B000000001", audible.ErrThrottled)
+	e.srv.add("A/One", "B000000001", 700, e.now, "web-1")
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(ctx)
+	asks := len(e.srv.feedAsks)
+	e.now = e.now.Add(time.Minute)
+	p.Tick(ctx)
+	if a := e.account(t); len(e.srv.feedAsks) != asks || a.RefusedAt != "" || e.accts.acrs != 2 {
+		t.Fatalf("a throttled device: asked %d -> %d, %+v (%d license requests)", asks, len(e.srv.feedAsks), a, e.accts.acrs)
+	}
+	e.accts.acrErr = nil
+	e.now = e.now.Add(refusedWait)
+
+	// A 502: kept, left for errorWait (the sync isn't held), then written.
+	e.accts.setErr = audibleAnswer(t, http.StatusBadGateway, "")
+	e.srv.add("A/One", "B000000001", 800, e.now, "web-1")
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(ctx)
+	if x, _ := e.db.GetAudiblePush(ctx, acctID, "B000000001"); x.WantMs == nil {
+		t.Fatal("a 502 dropped the place")
+	}
+	if a := e.account(t); a.SyncError == "" || a.SyncRetryAt != "" {
+		t.Fatalf("after a 502: %+v", a)
+	}
+	e.accts.setErr = nil
+	e.now = e.now.Add(errorWait)
+	p.Tick(ctx)
+	if got := e.sets(); len(got) != 1 || got[0] != "B000000001@800000" {
+		t.Fatalf("sets = %v", got)
+	}
+
+	// A stale cached content reference: read again, written in this pass.
+	if err := e.db.SetAudibleACR(ctx, acctID, "B000000001", "CR!OLD"); err != nil {
+		t.Fatal(err)
+	}
+	e.accts.wrongACR = audibleAnswer(t, http.StatusNotFound, "")
+	acrs := e.accts.acrs
+	e.srv.add("A/One", "B000000001", 900, e.now, "web-1")
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(ctx)
+	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@900000" || e.accts.acrs != acrs+1 {
+		t.Fatalf("a stale content reference: sets %v (%d license requests)", got, e.accts.acrs-acrs)
+	}
+
+	// The 429 comes back 3 minutes into the call (the client's own waits):
+	// the wait runs from then.
+	e.accts.setErr = audibleAnswer(t, http.StatusTooManyRequests, "600")
+	e.accts.onSet = func() { e.now = e.now.Add(3 * time.Minute) }
+	e.srv.add("A/One", "B000000001", 1000, e.now, "web-1")
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(ctx)
+	if a := e.account(t); a.SyncRetryAt != store.Timestamp(e.now.Add(10*time.Minute)) {
+		t.Fatalf("wait until %q, want %q", a.SyncRetryAt, store.Timestamp(e.now.Add(10*time.Minute)))
+	}
+}
+
+// A feed row on a title the last sync didn't list for that book (a new match,
+// a re-match) is kept pending, never skipped past: the next sync lists it and
+// the place is written.
+func TestPushPendingTitle(t *testing.T) {
+	e := newEnv(t)
+	e.list(t, st("B000000001", "A/One", 36000))
+	p := NewPusher(e.o)
+	e.started(t, p)
+	e.srv.add("A/Two", "B000000002", 900, e.now, "web-1")          // a title matched since the last sync
+	e.srv.add("A/One (right)", "B000000001", 1500, e.now, "web-1") // a title matched again
+	e.now = e.now.Add(4 * time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 0 {
+		t.Fatalf("a title not listed yet was written: %v", got)
+	}
+	e.list(t, st("B000000001", "A/One (right)", 36000), st("B000000002", "A/Two", 36000))
+	e.now = e.now.Add(time.Minute)
+	p.Tick(context.Background())
+	if got := e.sets(); len(got) != 2 || got[0] != "B000000001@1500000" || got[1] != "B000000002@900000" {
+		t.Fatalf("sets = %v", got)
+	}
+}
+
+// The server asking the push to wait (its own 429/503) pauses the push only:
+// it is no wait for Audible, so the sync isn't held.
+func TestPushServerWait(t *testing.T) {
+	e := newEnv(t)
+	p := NewPusher(e.o)
+	e.srv.feedErr = &link.APIError{Status: http.StatusServiceUnavailable, Code: "unavailable", RetryAfter: 10 * time.Minute}
+	p.Tick(context.Background())
+	if a := e.account(t); a.SyncRetryAt != "" || a.SyncError == "" {
+		t.Fatalf("after the server's 503: %+v", a)
+	}
+	e.now = e.now.Add(5 * time.Minute)
+	p.Tick(context.Background())
+	if len(e.srv.feedAsks) != 1 {
+		t.Fatalf("the server's wait wasn't kept: %v", e.srv.feedAsks)
 	}
 }

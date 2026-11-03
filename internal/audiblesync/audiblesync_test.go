@@ -30,10 +30,13 @@ type stubAccounts struct {
 	places    map[string]audible.Position
 	placesErr error
 	reads     int
+	onRead    func() // runs as Audible answers a read (outside the lock)
 	acrs      int
 	acrErr    error
 	sets      []string // "asin@ms"
 	setErr    error
+	wrongACR  error  // the answer to a write with another content reference
+	onSet     func() // runs as a write reaches Audible (outside the lock)
 }
 
 func (s *stubAccounts) Account(ctx context.Context, id string) (store.AudibleAccount, error) {
@@ -50,9 +53,9 @@ func (s *stubAccounts) Accounts(ctx context.Context) ([]store.AudibleAccount, er
 
 func (s *stubAccounts) Positions(_ context.Context, _ string, asins []string) (map[string]audible.Position, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.reads++
 	if s.placesErr != nil {
+		s.mu.Unlock()
 		return nil, s.placesErr
 	}
 	out := map[string]audible.Position{}
@@ -60,6 +63,11 @@ func (s *stubAccounts) Positions(_ context.Context, _ string, asins []string) (m
 		if p, ok := s.places[a]; ok {
 			out[a] = p
 		}
+	}
+	hook := s.onRead
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
 	}
 	return out, nil
 }
@@ -76,14 +84,25 @@ func (s *stubAccounts) ContentACR(_ context.Context, _, asin string) (string, er
 
 func (s *stubAccounts) SetPosition(_ context.Context, _, asin, acr string, positionMs int64) error {
 	s.mu.Lock()
+	hook := s.onSet
+	s.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	s.mu.Lock()
 	defer s.mu.Unlock()
 	if acr != "CR!"+asin {
+		if s.wrongACR != nil {
+			return s.wrongACR
+		}
 		return fmt.Errorf("wrong acr %q", acr)
 	}
 	if s.setErr != nil {
 		return s.setErr
 	}
 	s.sets = append(s.sets, fmt.Sprintf("%s@%d", asin, positionMs))
+	// Audible holds the place written now (a later read answers it).
+	s.places[asin] = audible.Position{PositionMs: positionMs}
 	return nil
 }
 
@@ -256,7 +275,7 @@ func TestSyncSendsAudiblePlaces(t *testing.T) {
 	stamp := heard.Format(time.RFC3339)
 	if one.Kind != link.EventListen || one.Path != "A/One" || *one.FromPos != 1234.5 || *one.ToPos != 1234.5 || one.Start != "jump" ||
 		one.StartedAt != stamp || one.EndedAt != stamp || one.At != "" || !eventIDPattern.MatchString(one.ID) ||
-		one.ID != EventID(acctID, "B000000001", 1_234_500, heard, "") {
+		one.ID != EventID(acctID, title("B000000001", "A/One", 36000), audible.Position{PositionMs: 1_234_500, LastUpdated: heard}, "") {
 		t.Fatalf("listen = %+v", one)
 	}
 	fin := evs[3]
@@ -282,40 +301,50 @@ func TestSyncSendsAudiblePlaces(t *testing.T) {
 	}
 }
 
-// The event id is sha256(account|asin|position_ms|last_updated), cut to 32 hex
-// characters: the same place is the same id, a moved or re-heard one another.
+// The event id is sha256(account|asin|position_ms|last_updated|kind|library|path),
+// cut to 32 hex characters: the same place on the same book is the same id; a
+// moved or re-heard one, or the same place on another book (the title matched
+// again: the server keeps ids per person), another.
 func TestEventID(t *testing.T) {
 	at := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
-	a := EventID(acctID, "B000000001", 5000, at, "")
-	if !eventIDPattern.MatchString(a) || a != EventID(acctID, "B000000001", 5000, at.In(time.FixedZone("x", 3600)), "") {
+	one := title("B000000001", "A/One", 3600)
+	pl := audible.Position{PositionMs: 5000, LastUpdated: at}
+	a := EventID(acctID, one, pl, "")
+	if !eventIDPattern.MatchString(a) || a != EventID(acctID, one, audible.Position{PositionMs: 5000, LastUpdated: at.In(time.FixedZone("x", 3600))}, "") ||
+		a != EventID(acctID, title("B000000001", "A/One", 60), pl, "") {
 		t.Fatalf("id = %q", a)
 	}
-	for _, other := range []string{
-		EventID(acctID, "B000000001", 5001, at, ""), EventID(acctID, "B000000002", 5000, at, ""),
-		EventID("efgh5678", "B000000001", 5000, at, ""), EventID(acctID, "B000000001", 5000, at.Add(time.Millisecond), ""),
-		EventID(acctID, "B000000001", 5000, at, link.EventFinish), EventID(acctID, "B000000001", 5000, time.Time{}, ""),
+	other := one
+	other.LibraryID = 2
+	for _, id := range []string{
+		EventID(acctID, one, audible.Position{PositionMs: 5001, LastUpdated: at}, ""), EventID(acctID, title("B000000002", "A/One", 3600), pl, ""),
+		EventID("efgh5678", one, pl, ""), EventID(acctID, one, audible.Position{PositionMs: 5000, LastUpdated: at.Add(time.Millisecond)}, ""),
+		EventID(acctID, one, pl, link.EventFinish), EventID(acctID, one, audible.Position{PositionMs: 5000}, ""),
+		EventID(acctID, title("B000000001", "A/One (right)", 3600), pl, ""), EventID(acctID, other, pl, ""),
 	} {
-		if other == a {
+		if id == a {
 			t.Fatal("two different places share an id")
 		}
 	}
 }
 
-// Denied: a refused account (the "Sign in again" state) doesn't sync: the job
-// fails audible_refused (the server reads the code) before asking Audible
-// anything. An unknown account, or one mapped on another server, is
-// unknown_account.
+// Denied: a refused account (the "Sign in again" state) doesn't sync, failing
+// before asking Audible anything: a device refusal (only a sign-in again ends
+// it) audible_refused, which the server keeps until the account is mapped
+// again; a sign-in refusal, which ends by itself once Audible answers a call,
+// audible_sign_in, which the server leaves alone (its syncs stay queued). An
+// unknown account, or one mapped on another server, is unknown_account.
 func TestSyncRefusedAccount(t *testing.T) {
 	e := newEnv(t)
 	e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
-	for _, kind := range []string{store.RefusalSignIn, store.RefusalDevice} {
+	for kind, code := range map[string]string{store.RefusalSignIn: CodeSignIn, store.RefusalDevice: CodeRefused} {
 		if err := e.db.RefuseAudibleAccount(context.Background(), acctID, kind, "refused", e.now); err != nil {
 			t.Fatal(err)
 		}
 		_, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600)))
 		var f *Failure
-		if !errors.As(err, &f) || f.Code != CodeRefused {
-			t.Fatalf("%s: err = %v", kind, err)
+		if !errors.As(err, &f) || f.Code != code {
+			t.Fatalf("%s: err = %v, want %s", kind, err, code)
 		}
 		if e.accts.reads != 0 || len(e.srv.posted) != 0 {
 			t.Fatalf("%s: a refused account asked Audible (%d) or posted (%d)", kind, e.accts.reads, len(e.srv.posted))
@@ -436,5 +465,71 @@ func TestSyncFailureRedacts(t *testing.T) {
 	f := fail(CodeAudible, "Audible didn't answer: %v", errors.New("customer_id=A1B2C3D4E5F6G7 refused"))
 	if strings.Contains(f.Message, "A1B2C3D4E5F6G7") {
 		t.Fatalf("failure = %q", f.Message)
+	}
+}
+
+// The job reads the push's rows before Audible's places: a push that lands
+// while they are read (a move back on AudioSilo) is compared as the write
+// before it, so Audible's old place, read before the write, is still the
+// echo and never undoes the move back on the server.
+func TestSyncReadsPushesFirst(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	raw := params(t, title("B000000001", "A/One", 36000))
+	if err := e.db.ListAudibleSync(ctx, acctID, []store.AudibleSyncTitle{{ASIN: "B000000001", LibraryID: 1, Path: "A/One", RuntimeS: 36000}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.db.AudiblePushed(ctx, acctID, "B000000001", 7_200_000, e.now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.server["A/One"] = 3600 // moved back to 1:00:00 on AudioSilo
+	e.accts.places["B000000001"] = audible.Position{PositionMs: 7_200_000, LastUpdated: e.now.Add(-time.Hour)}
+	e.accts.onRead = func() {
+		// The push writes the move back while Audible's answer is on its way.
+		if err := e.db.AudiblePushed(ctx, acctID, "B000000001", 3_600_000, e.now); err != nil {
+			t.Error(err)
+		}
+	}
+	res, err := e.runSync(t, raw)
+	if err != nil || res.SkippedEcho != 1 || res.Sent != 0 || e.srv.server["A/One"] != 3600 {
+		t.Fatalf("result = %+v, %v (server %v)", res, err, e.srv.server["A/One"])
+	}
+}
+
+// A sync that waits on Audible still lists its titles (the push reads the
+// listing), and a wait Audible gave with no time in it still holds for at
+// least errorWait. The server's own failure is no wait for Audible.
+func TestSyncWaitsAndLists(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
+	e.accts.placesErr = audibleAnswer(t, http.StatusTooManyRequests, "0")
+	if _, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600))); err == nil {
+		t.Fatal("a 429 went through")
+	}
+	if a := e.account(t); a.SyncRetryAt != store.Timestamp(e.now.Add(errorWait)) {
+		t.Fatalf("a 429 with no wait in it: wait %q", a.SyncRetryAt)
+	}
+	e.accts.placesErr = nil
+	res, err := e.runSync(t, params(t, title("B000000002", "A/Two", 3600)))
+	if err != nil || !res.Waiting {
+		t.Fatalf("while waiting = %+v, %v", res, err)
+	}
+	if two, err := e.db.GetAudiblePush(ctx, acctID, "B000000002"); err != nil || !two.Listed {
+		t.Fatalf("a waiting sync didn't list its titles: %+v, %v", two, err)
+	}
+	if one, _ := e.db.GetAudiblePush(ctx, acctID, "B000000001"); one.Listed {
+		t.Fatalf("a waiting sync kept a title it no longer lists: %+v", one)
+	}
+
+	e.now = e.now.Add(errorWait)
+	e.srv.postErr = &link.APIError{Status: http.StatusServiceUnavailable, Code: "unavailable", RetryAfter: time.Hour}
+	if _, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600))); err == nil {
+		t.Fatal("the server's 503 went through")
+	}
+	if a := e.account(t); a.SyncError == "" {
+		t.Fatalf("the server's 503 wasn't recorded: %+v", a)
+	} else if _, held := waiting(a, e.now); held {
+		t.Fatalf("the server's 503 became a wait for Audible: %+v", a)
 	}
 }
