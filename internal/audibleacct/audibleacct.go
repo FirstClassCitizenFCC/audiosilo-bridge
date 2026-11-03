@@ -186,7 +186,7 @@ func New(o Options) *Manager {
 		o.Now = time.Now
 	}
 	if o.Service == nil {
-		o.Service = Audible()
+		o.Service = Audible(audible.WithLogger(o.Log))
 	}
 	return &Manager{o: o, logins: map[string]login{}}
 }

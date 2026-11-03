@@ -165,10 +165,10 @@ func TestBookMatcherSameAsBest(t *testing.T) {
 		if rec.Narrator != "" {
 			q.Narrators = []string{rec.Narrator}
 		}
-		wantI, wantOK := match.Best(m.cands, q)
-		gotI, gotOK := m.best(q)
-		if gotI != wantI || gotOK != wantOK {
-			t.Errorf("%q by %q: best = %d %v, match.Best = %d %v", rec.Title, rec.Author, gotI, gotOK, wantI, wantOK)
+		wantI, wantScore, wantOK := match.BestWith(m.cands, q, match.ImportOptions())
+		gotI, gotScore, gotOK := m.best(q, false)
+		if gotI != wantI || gotOK != wantOK || gotScore != wantScore {
+			t.Errorf("%q by %q: best = %d %.2f %v, match.BestWith = %d %.2f %v", rec.Title, rec.Author, gotI, gotScore, gotOK, wantI, wantScore, wantOK)
 		}
 	}
 }

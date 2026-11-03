@@ -85,9 +85,15 @@ type AudibleMatch struct {
 	How       string `json:"how"`
 }
 
+// ReasonContested is an available title's Reason when it matched a book
+// another title claimed with a better (or the same) score: the book is
+// probably here under the other title, so a backup of everything skips it.
+const ReasonContested = "contested"
+
 // AudibleTitle is one title of an account's library as a poll reports it.
 // ReleaseDate is YYYY-MM-DD or ""; Reason says why an unavailable title can't
-// be downloaded; Match is nil when no book matched.
+// be downloaded, or ReasonContested for an available one; Match is nil when no
+// book matched.
 type AudibleTitle struct {
 	ASIN        string        `json:"asin"`
 	Title       string        `json:"title"`

@@ -2,6 +2,7 @@ package audible
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -97,6 +98,7 @@ func (c *Client) Library(ctx context.Context) ([]source.Record, error) {
 			}
 			seen[k] = true
 			recs = append(recs, it.toRecord(now))
+			it.logOddDate(c.set.log, now)
 		}
 		// A short page is the last one. A full page that contributed nothing new means
 		// the endpoint is replaying a page instead of advancing - stop either way.
@@ -108,11 +110,13 @@ func (c *Client) Library(ctx context.Context) ([]source.Record, error) {
 }
 
 func (it libItem) toRecord(now time.Time) source.Record {
+	reason, preorder := it.unavailableReason(now)
 	rec := source.Record{
 		Title: it.Title, TitleShort: it.Title, ASIN: it.ASIN, Key: it.ASIN,
 		FileName:          safeFileName(it.Title) + ".m4b",
 		RuntimeSec:        float64(it.RuntimeLengthMin) * 60,
-		UnavailableReason: it.unavailableReason(now),
+		UnavailableReason: reason,
+		Preorder:          preorder,
 	}
 	if len(it.Authors) > 0 {
 		rec.Author = it.Authors[0].Name
@@ -132,32 +136,87 @@ func (it libItem) toRecord(now time.Time) source.Record {
 			rec.Sequence, rec.HasSequence = seq, true
 		}
 	}
-	date := firstNonEmptyStr(it.ReleaseDate, it.IssueDate)
-	rec.Preorder = ReleaseIsUpcoming(date, now)
+	date, _ := it.dates(now)
 	rec.Year = yearFromDate(date)
 	rec.ReleaseDate = releaseDay(date)
 	return rec
 }
 
-// unavailableReason reports why a library item can't be downloaded ("" = it can).
-// The license endpoint would fail these with an opaque error (HTTP 400 for
-// periodicals, an empty voucher for titles without offline rights), so classifying
-// them here lets the UI say why up front. All checks are defensive: a missing
-// field never marks a book unavailable.
-func (it libItem) unavailableReason(now time.Time) string {
-	if ReleaseIsUpcoming(firstNonEmptyStr(it.ReleaseDate, it.IssueDate), now) {
-		return "Not released yet (pre-order)"
+// maxAheadYears is how far ahead a release date may plausibly be: Audible
+// lists preorders months ahead, never years. A date further out, or in the
+// year maxPlausibleYear or later, is a placeholder (Audible sends 2200-01-01
+// for some titles it has had for years) and reads as no date.
+const (
+	maxAheadYears    = 2
+	maxPlausibleYear = 2100
+)
+
+// plausibleDate reports whether an Audible date can be a real release date:
+// parseable, before maxPlausibleYear and at most maxAheadYears after now (a
+// zero now checks the year only).
+func plausibleDate(s string, now time.Time) bool {
+	d := parseAudibleDate(s)
+	if d.IsZero() || d.Year() >= maxPlausibleYear {
+		return false
 	}
+	return now.IsZero() || !d.After(now.AddDate(maxAheadYears, 0, 0))
+}
+
+// dates is the item's release date and whether a date Audible sent was set
+// aside: release_date when it is plausible, else issue_date when that is, else
+// "" (unknown, which reads as released: never withhold a real title on a
+// placeholder date). odd is true when either non-blank field is implausible.
+func (it libItem) dates(now time.Time) (date string, odd bool) {
+	for _, d := range []string{it.ReleaseDate, it.IssueDate} {
+		switch {
+		case strings.TrimSpace(d) == "":
+		case !plausibleDate(d, now):
+			odd = true
+		case date == "":
+			date = d
+		}
+	}
+	return date, odd
+}
+
+// logOddDate logs, once per title a listing returns, the raw fields behind a
+// date it set aside, so a title stored oddly can be explained from the log.
+// Only library fields: never a token, the customer id or a request.
+func (it libItem) logOddDate(log *slog.Logger, now time.Time) {
+	if _, odd := it.dates(now); log == nil || !odd {
+		return
+	}
+	rights := "absent"
+	if it.CustomerRights != nil {
+		rights = strconv.FormatBool(it.CustomerRights.IsConsumableOffline)
+	}
+	log.Info("audible: a title's release or issue date is implausible, set aside",
+		"asin", it.ASIN, "title", it.Title, "release_date", it.ReleaseDate, "issue_date", it.IssueDate,
+		"content_delivery_type", it.ContentDeliveryType, "content_type", it.ContentType,
+		"is_consumable_offline", rights)
+}
+
+// unavailableReason reports why a library item can't be downloaded ("" = it
+// can) and whether that is because it is a pre-order. The license endpoint
+// would fail these with an opaque error (HTTP 400 for periodicals, an empty
+// voucher for titles without offline rights), so classifying them here lets the
+// UI say why up front. The delivery type and the rights are checked before the
+// date, so a show or a title without rights is never called a pre-order. All
+// checks are defensive: a missing field never marks a book unavailable.
+func (it libItem) unavailableReason(now time.Time) (reason string, preorder bool) {
 	switch it.ContentDeliveryType {
 	case "Periodical", "PodcastParent":
 		// Audible shows/podcasts are containers of episodes, not a single
 		// downloadable audiobook file; a license request is refused outright.
-		return "An Audible show/periodical - it has no downloadable audiobook file"
+		return "An Audible show/periodical - it has no downloadable audiobook file", false
 	}
 	if it.CustomerRights != nil && !it.CustomerRights.IsConsumableOffline {
-		return "Audible reports no download rights for this title (often a Plus/included title that left the catalog)"
+		return "Audible reports no download rights for this title (often a Plus/included title that left the catalog)", false
 	}
-	return ""
+	if date, _ := it.dates(now); ReleaseIsUpcoming(date, now) {
+		return "Not released yet (pre-order)", true
+	}
+	return "", false
 }
 
 // ReleaseIsUpcoming reports whether an Audible release/issue date falls after now -

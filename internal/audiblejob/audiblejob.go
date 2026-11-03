@@ -4,8 +4,8 @@
 // first, then author, series and title), report the titles to the server in
 // calls of at most link.MaxAudibleTitles (the last one final, so the titles
 // the poll didn't see become gone there), then backfill the ASIN of each book
-// a title matched without doubt (the manager's Contested guard: a book two
-// titles matched is never enriched).
+// a title matched without doubt (a book two titles claimed is never enriched,
+// whichever kept it: importjob.KeepBest), paced (enrich.go).
 //
 // It writes nothing into a library and reads no credential itself: the account
 // manager (audibleacct) holds the sign-in and lists the library. Params,
@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/audibleacct"
 	"github.com/kodestar/audiosilo-bridge/internal/importjob"
@@ -78,7 +79,11 @@ type Options struct {
 }
 
 // Handler runs audible.poll.
-type Handler struct{ o Options }
+type Handler struct {
+	o     Options
+	now   func() time.Time
+	sleep func(context.Context, time.Duration) error // the enrichment's pace (tests stub both)
+}
 
 // New returns the handler.
 func New(o Options) *Handler {
@@ -88,13 +93,14 @@ func New(o Options) *Handler {
 	if o.ServerID == nil {
 		o.ServerID = func() string { return "" }
 	}
-	return &Handler{o: o}
+	return &Handler{o: o, now: time.Now, sleep: sleepCtx}
 }
 
 // Kind is audible.poll.
 func (h *Handler) Kind() string { return Kind }
 
-// Lane is the light lane: a poll is a few API calls.
+// Lane is the light lane: a poll is a few API calls, then the paced ASIN
+// backfill (up to enrichBudget, the rest deferred to the next poll).
 func (h *Handler) Lane() string { return jobs.LaneLight }
 
 // Params are audible.poll's params.
@@ -135,7 +141,11 @@ type Result struct {
 	// didn't answer for (tried again at the next poll).
 	Enriched     int `json:"enriched"`
 	EnrichFailed int `json:"enrich_failed,omitempty"`
-	Books        int `json:"books"`
+	// EnrichDeferred books wait for the next poll: the server asked the
+	// Bridge to slow down past what one poll waits, or the poll's time for
+	// the backfill ran out (enrichBudget).
+	EnrichDeferred int `json:"enrich_deferred,omitempty"`
+	Books          int `json:"books"`
 }
 
 // Run polls the account.
@@ -180,13 +190,10 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	rep.Progress(jobs.Progress{Step: "matching", Message: "Matching the titles to the library", Total: len(recs)})
 	res := Result{Account: acct.ID, PollID: pollID(job), Books: len(books)}
 	matcher := importjob.NewBookMatcher(books)
-	type matched struct {
-		rec      source.Record
-		book     link.LibraryBook
-		preorder bool
-	}
-	var hits []matched
 	titles := make([]link.AudibleTitle, 0, len(recs))
+	used := make([]source.Record, 0, len(recs)) // used[i] is titles[i]'s record
+	claims := make([]importjob.Claim, 0, len(recs))
+	matchedBook := map[string]link.LibraryBook{}
 	for _, rec := range recs {
 		rec.ASIN = strings.ToUpper(strings.TrimSpace(rec.ASIN))
 		if !asinPattern.MatchString(rec.ASIN) {
@@ -202,20 +209,56 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		default:
 			res.Unavailable++
 		}
-		if b, ok := matcher.Match(rec); ok && matchable(b.Path) {
-			how := link.MatchFuzzy
-			if strings.EqualFold(b.ASIN, rec.ASIN) {
-				how = link.MatchASIN
-				res.MatchedASIN++
-			} else {
-				res.MatchedFuzzy++
-			}
-			t.Match = &link.AudibleMatch{LibraryID: acct.LibraryID, Path: b.Path, How: how}
-			hits = append(hits, matched{rec: rec, book: b, preorder: t.State == link.AudiblePreorder})
+		c := importjob.Claim{}
+		if b, score, ok := matcher.MatchScored(rec); ok && matchable(b.Path) {
+			c = importjob.Claim{Path: b.Path, Score: score, Work: importjob.WorkKey(rec)}
+			matchedBook[b.Path] = b
 		}
-		titles = append(titles, t)
+		titles, used, claims = append(titles, t), append(used, rec), append(claims, c)
 	}
-	res.Titles, res.Matched = len(titles), len(hits)
+	// A book several titles claimed keeps the best one only (a tie between two
+	// works, none): the others are reported unmatched with the reason
+	// contested, so the console shows them as not here and a backup of
+	// everything can skip them.
+	keep := importjob.KeepBest(claims)
+	claimed := map[string]int{} // path -> how many titles claimed it
+	for _, c := range claims {
+		if c.Path == "" {
+			continue
+		}
+		if claimed[c.Path]++; claimed[c.Path] == 2 {
+			res.Contested++
+		}
+	}
+	var hits []hit
+	for i, c := range claims {
+		if c.Path == "" {
+			continue
+		}
+		if !keep[i] {
+			if titles[i].Reason == "" {
+				titles[i].Reason = link.ReasonContested
+			}
+			continue
+		}
+		b, rec := matchedBook[c.Path], used[i]
+		how := link.MatchFuzzy
+		if strings.EqualFold(b.ASIN, rec.ASIN) {
+			how = link.MatchASIN
+			res.MatchedASIN++
+		} else {
+			res.MatchedFuzzy++
+		}
+		titles[i].Match = &link.AudibleMatch{LibraryID: acct.LibraryID, Path: b.Path, How: how}
+		// A book two titles claimed gets no ASIN: at least one of the claims
+		// was wrong. A preorder isn't out yet, so the book on disk is another
+		// edition: its ASIN would stay on that book for good. A pack matched
+		// to a folder that holds no range may be one volume: not the pack's.
+		if claimed[c.Path] == 1 && b.ASIN == "" && titles[i].State != link.AudiblePreorder && !importjob.SpanMismatch(rec, b) {
+			hits = append(hits, hit{path: b.Path, asin: rec.ASIN})
+		}
+	}
+	res.Titles, res.Matched = len(titles), res.MatchedASIN+res.MatchedFuzzy
 
 	rep.Progress(jobs.Progress{Step: "reporting", Message: "Reporting the titles to the server", Total: len(titles)})
 	for start := 0; ; start += link.MaxAudibleTitles {
@@ -233,36 +276,15 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		}
 	}
 
-	rep.Progress(jobs.Progress{Step: "enriching", Message: "Adding the ASINs of the matched books"})
-	contested := map[string]bool{}
-	for _, m := range hits {
-		if matcher.Contested(m.book.Path) {
-			contested[m.book.Path] = true
-			continue
-		}
-		// A preorder isn't out yet, so the book on disk is another edition: its
-		// ASIN would stay on that book for good.
-		if m.book.ASIN != "" || m.preorder {
-			continue
-		}
-		switch err := srv.Enrich(ctx, acct.LibraryID, m.book.Path, m.rec.ASIN); {
-		case err == nil:
-			res.Enriched++
-		case errors.Is(err, link.ErrASINSet), errors.Is(err, link.ErrNoBook):
-			// Another ASIN arrived meanwhile, or the book moved: the next poll sees it.
-		case ctx.Err() != nil:
-			return nil, ctx.Err()
-		default:
-			res.EnrichFailed++
-			h.o.Log.Warn("audible: adding a book's ASIN failed", "account", acct.ID, "library", acct.LibraryID, "err", err)
-		}
+	if err := h.enrich(ctx, srv, acct, hits, rep, &res); err != nil {
+		return nil, err
 	}
-	res.Contested = len(contested)
 
 	if err := h.o.Accounts.Polled(ctx, acct.ID, res.Titles, res.Matched); err != nil {
 		h.o.Log.Warn("audible: recording the poll failed", "account", acct.ID, "err", err)
 	}
-	h.o.Log.Info("audible: polled", "account", acct.ID, "titles", res.Titles, "matched", res.Matched, "enriched", res.Enriched)
+	h.o.Log.Info("audible: polled", "account", acct.ID, "titles", res.Titles, "matched", res.Matched, "contested", res.Contested,
+		"enriched", res.Enriched, "enrich_failed", res.EnrichFailed, "enrich_deferred", res.EnrichDeferred)
 	return res, nil
 }
 
