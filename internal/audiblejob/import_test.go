@@ -622,6 +622,8 @@ func TestSweepTmp(t *testing.T) {
 	write("a-B0FAKE0002.aaxc.part.state", time.Hour)
 	write("a-B0FAKE0003.aaxc.part.state", time.Hour) // no partial
 	write("a-B0FAKE0001.m4b", time.Minute)           // a decrypted copy a crash left
+	write("a-B0FAKE0004.placed.json", time.Hour)
+	write("a-B0FAKE0005.placed.json", 8*24*time.Hour) // too old
 	write("stray.txt", time.Minute)
 	if err := os.MkdirAll(filepath.Join(dir, "audible-123"), 0o700); err != nil {
 		t.Fatal(err)
@@ -634,7 +636,7 @@ func TestSweepTmp(t *testing.T) {
 	for _, e := range entries {
 		left = append(left, e.Name())
 	}
-	if strings.Join(left, ",") != "a-B0FAKE0001.aaxc.part,a-B0FAKE0001.aaxc.part.state" {
+	if strings.Join(left, ",") != "a-B0FAKE0001.aaxc.part,a-B0FAKE0001.aaxc.part.state,a-B0FAKE0004.placed.json" {
 		t.Fatalf("left %v", left)
 	}
 	if err := SweepTmp(filepath.Join(dir, "missing"), now); err != nil {
@@ -699,5 +701,77 @@ func TestImportRescanRetries(t *testing.T) {
 	_, err := e2.run(context.Background(), e2.params(nil))
 	if err == nil || !strings.Contains(err.Error(), "is in the library") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// An install that succeeded before the rescan failed: the retry finds the
+// book its marker recorded and goes on from the rescan, with the same result
+// and no second license or download.
+func TestImportRetryAfterTheInstallFinishes(t *testing.T) {
+	e := newImportEnv(t)
+	e.srv.rescanErr = []error{errors.New("busy"), errors.New("busy"), errors.New("busy")}
+	if _, err := e.run(context.Background(), e.params(nil)); err == nil {
+		t.Fatal("the rescan failing must fail the job")
+	}
+	if _, err := os.Stat(filepath.Join(e.tmp, "acct0001-B0FAKE0002"+placedSuffix)); err != nil {
+		t.Fatalf("no placement marker: %v", err)
+	}
+	if err := SweepTmp(e.tmp, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	e.steps = nil
+	res, err := e.run(context.Background(), e.params(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := int64(len(e.accts.body))
+	want := ImportResult{LibraryID: 1, Path: path.Dir(copperGrove), Files: []ImportFile{{Path: copperGrove, Size: size}}, Bytes: size, Enriched: true}
+	if mustJSON(t, res) != mustJSON(t, want) {
+		t.Fatalf("result = %s", mustJSON(t, res))
+	}
+	if e.accts.downloads != 1 || e.accts.licenses != 1 {
+		t.Fatalf("downloads %d, licenses %d: the retry fetched the book again", e.accts.downloads, e.accts.licenses)
+	}
+	if strings.Join(e.steps, ",") != "rescan,enrich" {
+		t.Fatalf("retry steps = %v", e.steps)
+	}
+	e.tmpEmpty(t) // the marker went with the result
+	e.noSecrets(t, res, err)
+}
+
+// A marker whose file was changed or replaced since is no reason to go on:
+// anything else at the destination still fails exists.
+func TestImportMarkerNeedsTheSameFile(t *testing.T) {
+	for name, change := range map[string]func(p string) error{
+		"rewritten": func(p string) error {
+			if err := os.WriteFile(p, []byte("an administrator's own copy"), 0o644); err != nil {
+				return err
+			}
+			old := time.Now().Add(-time.Hour)
+			return os.Chtimes(p, old, old)
+		},
+		"touched": func(p string) error {
+			later := time.Now().Add(time.Hour)
+			return os.Chtimes(p, later, later)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newImportEnv(t)
+			e.srv.rescanErr = []error{errors.New("busy"), errors.New("busy"), errors.New("busy")}
+			if _, err := e.run(context.Background(), e.params(nil)); err == nil {
+				t.Fatal("the rescan failing must fail the job")
+			}
+			if err := change(filepath.Join(e.root, filepath.FromSlash(copperGrove))); err != nil {
+				t.Fatal(err)
+			}
+			_, err := e.run(context.Background(), e.params(nil))
+			var f *Failure
+			if !errors.As(err, &f) || f.Code != CodeExists {
+				t.Fatalf("err = %v, want exists", err)
+			}
+			if len(e.srv.rescanned) != 3 || e.accts.downloads != 1 {
+				t.Fatalf("rescanned %v, downloads %d", e.srv.rescanned, e.accts.downloads)
+			}
+		})
 	}
 }

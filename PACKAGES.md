@@ -2194,8 +2194,13 @@ internal/
             Cleanup: a stop (jobs.Resumes) keeps the partial and its state for the
             next start; a cancel, a lost claim or a failure deletes it; Abandon
             deletes it for a job the runner ends unrun; the decrypted copy always
-            goes. SweepTmp at start keeps only *.aaxc.part younger than 7 days
-            (PartialMaxAge) with their state (decision 6). Deps:
+            goes. After the install a placement marker (<tmp>/<acct>-<asin>.placed.json:
+            library_id, path, size, mtime) is written: a retry after a failed rescan
+            finds the library holding exactly that file and goes on from the rescan
+            (no second license or download, the same result); a changed or replaced
+            file there drops the marker and is exists. The result removes it.
+            SweepTmp at start keeps only *.aaxc.part younger than 7 days
+            (PartialMaxAge) with their state, and markers as young (decision 6). Deps:
             audibleacct (types), audible, fsutil, importjob, jobs, link, mapping,
             placement, source, store, transfer.
   importjob/ matching and placement against a library (the manager's, ported):

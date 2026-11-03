@@ -322,6 +322,14 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		audible.RemovePartial(part)
 	}()
 
+	// An earlier run installed the book and then failed (the rescan): its
+	// marker says what it placed, and while the library holds exactly that the
+	// job goes on from the rescan instead of failing exists.
+	marker := h.markerPath(acct.ID, p.ASIN)
+	if m, ok := readPlaced(marker, lib.ID, mount); ok {
+		return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, m.Path, m.Size, true, marker)
+	}
+
 	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Reading the title from Audible"})
 	rec, err := h.o.Accounts.Title(ctx, acct.ID, p.ASIN)
 	switch {
@@ -392,27 +400,112 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		return nil, fmt.Errorf("copying the book into the library: %w", err)
 	}
 
+	if err := writePlaced(marker, lib.ID, mount, placed.RelPath); err != nil {
+		h.o.Log.Warn("audible: recording an imported book's placement failed", "account", acct.ID, "asin", p.ASIN, "err", err)
+	}
+	return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, placed.RelPath, placed.Size, placed.AlreadyPresent, marker)
+}
+
+// finish is the steps after the install: the rescan, the ASIN and the result.
+// The placement marker goes once the result is made.
+func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportServer, account, asin string, libraryID int64,
+	rel string, size int64, already bool, marker string) (*ImportResult, error) {
 	h.report(rep, jobs.Progress{Step: StepRescan, Message: "Asking the server to index the book"})
-	bookPath, err := h.rescan(ctx, srv, lib.ID, placed.RelPath)
+	bookPath, err := h.rescan(ctx, srv, libraryID, rel)
 	if err != nil {
-		return nil, h.quiet(ctx, fmt.Errorf("the book is in the library at %s, but the server couldn't index it: %w", placed.RelPath, err))
+		return nil, h.quiet(ctx, fmt.Errorf("the book is in the library at %s, but the server couldn't index it: %w", rel, err))
 	}
 
 	h.report(rep, jobs.Progress{Step: StepEnrich, Message: "Adding the title's ASIN to the book"})
 	enriched := false
-	switch err := srv.Enrich(ctx, lib.ID, bookPath, p.ASIN); {
+	switch err := srv.Enrich(ctx, libraryID, bookPath, asin); {
 	case err == nil:
 		enriched = true
 	case errors.Is(err, link.ErrASINSet), errors.Is(err, link.ErrNoBook):
 	case ctx.Err() != nil:
 		return nil, ctx.Err()
 	default:
-		h.o.Log.Warn("audible: adding an imported book's ASIN failed", "account", acct.ID, "library", lib.ID, "err", err)
+		h.o.Log.Warn("audible: adding an imported book's ASIN failed", "account", account, "library", libraryID, "err", err)
 	}
-	h.o.Log.Info("audible: imported", "account", acct.ID, "asin", p.ASIN, "library", lib.ID, "path", bookPath,
-		"bytes", placed.Size, "already_there", placed.AlreadyPresent, "enriched", enriched)
-	return &ImportResult{LibraryID: lib.ID, Path: bookPath, Files: []ImportFile{{Path: placed.RelPath, Size: placed.Size}},
-		Bytes: placed.Size, Enriched: enriched}, nil
+	h.o.Log.Info("audible: imported", "account", account, "asin", asin, "library", libraryID, "path", bookPath,
+		"bytes", size, "already_there", already, "enriched", enriched)
+	_ = os.Remove(marker)
+	return &ImportResult{LibraryID: libraryID, Path: bookPath, Files: []ImportFile{{Path: rel, Size: size}},
+		Bytes: size, Enriched: enriched}, nil
+}
+
+// placedMarker is what an install recorded: the file it placed, with the size
+// and modification time it had, so a retry knows the library still holds
+// exactly that file (and nothing an administrator put there since).
+type placedMarker struct {
+	LibraryID int64  `json:"library_id"`
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	ModTime   int64  `json:"mtime_ns"`
+}
+
+// markerPath is the job's placement marker, beside its temp files.
+func (h *Importer) markerPath(account, asin string) string {
+	return filepath.Join(h.o.TmpDir, account+"-"+asin+placedSuffix)
+}
+
+// placedSuffix names the placement markers (SweepTmp keeps the young ones).
+const placedSuffix = ".placed.json"
+
+// writePlaced records the file an install placed at rel.
+func writePlaced(marker string, libraryID int64, mount, rel string) error {
+	st, err := placedStat(mount, rel)
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(placedMarker{LibraryID: libraryID, Path: rel, Size: st.Size(), ModTime: st.ModTime().UnixNano()})
+	if err != nil {
+		return err
+	}
+	return fsutil.WriteFileAtomic(marker, b, 0o600)
+}
+
+// readPlaced answers the marker when the library at mount holds exactly the
+// file it recorded (a regular file of the same size and modification time);
+// anything else is no marker, and a marker that doesn't hold any more goes.
+func readPlaced(marker string, libraryID int64, mount string) (placedMarker, bool) {
+	b, err := os.ReadFile(marker) //nolint:gosec // G304: the job's own marker in the Bridge's data
+	if err != nil {
+		return placedMarker{}, false
+	}
+	var m placedMarker
+	if json.Unmarshal(b, &m) != nil || m.LibraryID != libraryID {
+		_ = os.Remove(marker)
+		return placedMarker{}, false
+	}
+	if _, err := transfer.CleanRel(m.Path); err != nil {
+		_ = os.Remove(marker)
+		return placedMarker{}, false
+	}
+	st, err := placedStat(mount, m.Path)
+	if err != nil || st.Size() != m.Size || st.ModTime().UnixNano() != m.ModTime {
+		_ = os.Remove(marker)
+		return placedMarker{}, false
+	}
+	return m, true
+}
+
+// placedStat is the Lstat of a library file through the mount's root (never
+// following a link out of it); only a regular file answers.
+func placedStat(mount, rel string) (fs.FileInfo, error) {
+	root, err := os.OpenRoot(mount)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	st, err := root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", rel)
+	}
+	return st, nil
 }
 
 // report records the job's progress.
@@ -710,8 +803,10 @@ func size(n int64) string {
 
 // SweepTmp is the start-up sweep of the import's temp folder (decision 6): a
 // partial download (*.aaxc.part and its .state) younger than PartialMaxAge
-// stays for its job to resume; everything else goes (decrypted copies, older
-// partials, a state without its partial, anything a crash left).
+// stays for its job to resume, as does a placement marker (*.placed.json) as
+// young, for a retry to finish an installed book; everything else goes
+// (decrypted copies, older partials and markers, a state without its partial,
+// anything a crash left).
 func SweepTmp(dir string, now time.Time) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -722,7 +817,16 @@ func SweepTmp(dir string, now time.Time) error {
 	}
 	keep := map[string]bool{}
 	for _, e := range entries {
-		if !e.Type().IsRegular() || !strings.HasSuffix(e.Name(), ".aaxc.part") {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), placedSuffix) {
+			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) < PartialMaxAge {
+				keep[e.Name()] = true
+			}
+			continue
+		}
+		if !strings.HasSuffix(e.Name(), ".aaxc.part") {
 			continue
 		}
 		if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) < PartialMaxAge {
