@@ -8,6 +8,7 @@ package placement
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -178,6 +179,32 @@ func buildLeaf(prefix string, width int, in Input) string {
 // LitRPG Adventure" once the series name and genre subtitle are stripped.
 func bareTitle(t string) bool {
 	return !strings.ContainsFunc(t, unicode.IsLetter)
+}
+
+// leadingSequence is a title that opens with a number and a separator ("2.5:
+// Margins", "3 - The Coast"), the shape CleanTitle leaves of "<Series> N:
+// Subtitle" once it strips the series name.
+var leadingSequence = regexp.MustCompile(`^(\d+(?:\.\d+)?)\s*[:\-\x{2013}\x{2014},]\s*(.+)$`)
+
+// dropLeadingSequence removes the book's own series position from the front of
+// a cleaned title: "Mapmakers 2.5: Margins" cleans to "2.5: Margins", which
+// buildLeaf would name "2.5 - 2.5 - Margins" since the folder code carries the
+// number already. Only the book's sequence is dropped, only before an explicit
+// separator and only when letters follow, so a bare "13" (bareTitle names that
+// by its series or siblings) and a title of its own ("3 Days of Rain", or a
+// number that is not this book's position) stay as they are.
+func dropLeadingSequence(t string, in Input) string {
+	if !in.HasSequence {
+		return t
+	}
+	m := leadingSequence.FindStringSubmatch(t)
+	if m == nil || bareTitle(m[2]) {
+		return t
+	}
+	if n, err := strconv.ParseFloat(m[1], 64); err != nil || n != in.Sequence {
+		return t
+	}
+	return m[2]
 }
 
 // seriesTitle names a bare-titled book by its series: "He Who Fights with Monsters

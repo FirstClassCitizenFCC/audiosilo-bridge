@@ -268,3 +268,48 @@ func TestTitleFromSibling(t *testing.T) {
 		t.Error("no sequence must not renumber")
 	}
 }
+
+func TestDropLeadingSequence(t *testing.T) {
+	in := Input{Sequence: 2.5, HasSequence: true}
+	for _, c := range []struct{ in, want string }{
+		{"2.5: Margins", "Margins"},
+		{"2.50 - Margins", "Margins"},
+		{"2.5", "2.5"},                 // bare: bareTitle names it by series or siblings
+		{"2.5: 1", "2.5: 1"},           // nothing of its own after the number
+		{"2.5 Margins", "2.5 Margins"}, // no separator: may be the title's own words
+		{"25: Margins", "25: Margins"},
+		{"Margins", "Margins"},
+	} {
+		if got := dropLeadingSequence(c.in, in); got != c.want {
+			t.Errorf("%q: got %q, want %q", c.in, got, c.want)
+		}
+	}
+	if got := dropLeadingSequence("2.5: Margins", Input{}); got != "2.5: Margins" {
+		t.Errorf("no sequence: got %q", got)
+	}
+}
+
+// SuggestWith drops the book's own position from {Title} and {TitleShort} in
+// both modes, so "2.5: Margins" never doubles the folder code's number.
+func TestSuggestWithLeadingSequence(t *testing.T) {
+	in := Input{
+		Author: "Wen Liang", Title: "2.5: Margins", TitleShort: "2.5: Margins", SeriesName: "Mapmakers",
+		Sequence: 2.5, HasSequence: true, Filename: "Mapmakers 2.5 - Margins.m4b",
+		Siblings: []Sibling{{RelPath: "Wen Liang/Mapmakers/1 - The Cartographer's Apprentice", SeriesIndex: 1}},
+	}
+	for _, c := range []struct {
+		mode       Mode
+		tmpl, want string
+	}{
+		{ModeAuto, "", "Wen Liang/Mapmakers/2.5 - Margins/Mapmakers 2.5 - Margins.m4b"},
+		{ModeTemplate, "{Author}/{Series}/{Seq} - {Title}/{TitleShort}{Ext}", "Wen Liang/Mapmakers/2.5 - Margins/Margins.m4b"},
+	} {
+		sug, err := SuggestWith(c.mode, c.tmpl, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sug.FullPath(); got != c.want {
+			t.Errorf("mode %v: got %q, want %q", c.mode, got, c.want)
+		}
+	}
+}

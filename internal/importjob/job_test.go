@@ -150,23 +150,3 @@ func TestPlanSeriesNumberTitle(t *testing.T) {
 		}
 	}
 }
-
-func TestDropLeadingSequence(t *testing.T) {
-	rec := source.Record{Sequence: 2.5, HasSequence: true}
-	for _, c := range []struct{ in, want string }{
-		{"2.5: Margins", "Margins"},
-		{"2.50 - Margins", "Margins"},
-		{"2.5", "2.5"},                 // bare: placement names it by series or siblings
-		{"2.5: 1", "2.5: 1"},           // nothing of its own after the number
-		{"2.5 Margins", "2.5 Margins"}, // no separator: may be the title's own words
-		{"25: Margins", "25: Margins"},
-		{"Margins", "Margins"},
-	} {
-		if got := dropLeadingSequence(c.in, rec); got != c.want {
-			t.Errorf("%q: got %q, want %q", c.in, got, c.want)
-		}
-	}
-	if got := dropLeadingSequence("2.5: Margins", source.Record{}); got != "2.5: Margins" {
-		t.Errorf("no sequence: got %q", got)
-	}
-}

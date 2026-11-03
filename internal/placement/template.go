@@ -22,7 +22,10 @@ const (
 // (ModeAuto, or an empty template) or by rendering a user template (ModeTemplate).
 // Template mode still resolves {SHORTCODE} and the padding width from the siblings,
 // so "match the existing convention" is available as values a template can consume.
+// Both modes drop the book's own position from the front of its titles first
+// (dropLeadingSequence).
 func SuggestWith(mode Mode, tmpl string, in Input) (Suggestion, error) {
+	in.Title, in.TitleShort = dropLeadingSequence(in.Title, in), dropLeadingSequence(in.TitleShort, in)
 	if mode == ModeAuto || strings.TrimSpace(tmpl) == "" {
 		return Suggest(in), nil
 	}

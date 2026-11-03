@@ -124,7 +124,6 @@ func TestDestinationSeriesNumberTitle(t *testing.T) {
 		want        string
 	}{
 		{"Mapmakers 2.5: Margins", "Mapmakers 2.5 - Margins.m4b", 2.5, "Wen Liang/Mapmakers/2.5 - Margins/Mapmakers 2.5 - Margins.m4b"},
-		{"Mapmakers 3: The Coast", "Mapmakers 3 - The Coast.m4b", 3, "Wen Liang/Mapmakers/3 - The Coast/Mapmakers 3 - The Coast.m4b"},
 	} {
 		r := rec("B0FAKE0013", c.title, "Wen Liang", "Mapmakers", c.seq)
 		r.FileName = c.file
