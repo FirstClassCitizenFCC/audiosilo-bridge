@@ -547,7 +547,8 @@ func TestPushServerWait(t *testing.T) {
 // place is new by its version and place, and its stillness counts from when
 // the Bridge first read it (its own clock), never the row's time. The same
 // row read again, or read again at its place with another version (its finish
-// or length changed), neither restarts the wait nor writes again.
+// or length changed), neither restarts the wait nor writes again, before the
+// push or after it.
 func TestPushRowSentAgain(t *testing.T) {
 	e := newEnv(t)
 	e.list(t, st("B000000001", "A/One", 36000))
@@ -569,9 +570,6 @@ func TestPushRowSentAgain(t *testing.T) {
 	if got := e.sets(); len(got) != 1 || got[0] != "B000000001@600000" {
 		t.Fatalf("sets = %v (a row an hour old by its time, new to the feed)", got)
 	}
-	if x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000001"); x.RowVersion != 50 || x.RowDuration != 36000 {
-		t.Fatalf("the version read again wasn't recorded: %+v", x)
-	}
 	// Written again with its updated_at unchanged and a new place: new, and
 	// still from the Bridge's read of it, not from the hour-old time.
 	e.srv.resend(0, func(r *link.AudibleProgressRow) { r.Version, r.Position = 51, 900 })
@@ -586,12 +584,16 @@ func TestPushRowSentAgain(t *testing.T) {
 	if got := e.sets(); len(got) != 2 || got[1] != "B000000001@900000" {
 		t.Fatalf("a place written again with its old time wasn't pushed: %v", got)
 	}
-	// Read again unchanged: nothing more.
+	// Read again unchanged, then at the same place with a new version (a
+	// finish, a length): no new place, nothing more.
 	e.srv.resend(0, func(r *link.AudibleProgressRow) { r.Version, r.Position = 51, 900 })
-	e.now = e.now.Add(5 * time.Minute)
-	p.Tick(context.Background())
+	e.srv.resend(0, func(r *link.AudibleProgressRow) { r.Version, r.Position, r.Finished = 52, 900, true })
+	for range 2 {
+		e.now = e.now.Add(4 * time.Minute)
+		p.Tick(context.Background())
+	}
 	if got := e.sets(); len(got) != 2 {
-		t.Fatalf("an unchanged row was written again: %v", got)
+		t.Fatalf("a row at the place written was written again: %v", got)
 	}
 }
 
@@ -632,27 +634,24 @@ func TestPushBaselineAcrossPasses(t *testing.T) {
 	}
 }
 
-// Denied: a place on a book whose length disagrees with the title's runtime
-// on Audible (another edition or volume matched, the server's
-// duration_mismatch) is never written; allowed: one whose length agrees, or
-// is unknown, is.
-func TestPushDurationMismatch(t *testing.T) {
+// The push takes the server's feed as the judge of a book's length: the feed
+// leaves out a book whose length disagrees with the title's runtime
+// (duration_mismatch, by the indexed book's length), so a row's own duration
+// (a book rescanned to the right length, a row written before it) never stops
+// a push. Only the place against Audible's runtime does (TestPushGuards).
+func TestPushIgnoresRowDuration(t *testing.T) {
 	e := newEnv(t)
-	e.list(t, st("B000000001", "A/One", 36000), st("B000000002", "A/Two", 36000), st("B000000003", "A/Three", 36000))
-	e.srv.duration = map[string]float64{"A/One": 7200, "A/Two": 36500}
+	e.list(t, st("B000000001", "A/One", 36000), st("B000000002", "A/Two", 36000))
+	e.srv.duration = map[string]float64{"A/One": 7200, "A/Two": 0}
 	p := NewPusher(e.o)
 	e.started(t, p)
 	e.srv.add("A/One", "B000000001", 600, e.now, "web-1")
 	e.srv.add("A/Two", "B000000002", 600, e.now, "web-1")
-	e.srv.add("A/Three", "B000000003", 600, e.now, "web-1")
 	e.read(p)
 	e.now = e.now.Add(4 * time.Minute)
 	p.Tick(context.Background())
-	if got := e.sets(); len(got) != 2 || got[0] != "B000000002@600000" || got[1] != "B000000003@600000" {
+	if got := e.sets(); len(got) != 2 || got[0] != "B000000001@600000" || got[1] != "B000000002@600000" {
 		t.Fatalf("sets = %v", got)
-	}
-	if x, _ := e.db.GetAudiblePush(context.Background(), acctID, "B000000001"); x.WantMs != nil {
-		t.Fatalf("the mismatched place still waits: %+v", x)
 	}
 }
 

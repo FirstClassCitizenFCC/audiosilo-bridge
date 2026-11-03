@@ -13,8 +13,8 @@ import (
 // runtime, the cached content reference, the place last written to Audible
 // (LastMs, -1 none) and when, the Audible place the last sync sent to the
 // server (HeardMs, -1 none), the place waiting to be pushed (WantMs, nil
-// none), and the server row last read for the title (RowVersion, RowMs -1 none,
-// RowDuration) with when this Bridge first read that place (RowSeen).
+// none), and the place of the server row last read for the title (RowMs, -1
+// none) with when this Bridge first read that place (RowSeen).
 type AudiblePush struct {
 	Account   string
 	ASIN      string
@@ -27,21 +27,17 @@ type AudiblePush struct {
 	At        string
 	HeardMs   int64
 	WantMs    *int64
-	// The server row last read: its version, place and book length (seconds,
-	// 0 unknown), and when this Bridge first read that place (its own clock).
-	RowVersion  int64
-	RowMs       int64
-	RowDuration float64
-	RowSeen     string
+	// The server row last read: its place, and when this Bridge first read
+	// that place (its own clock).
+	RowMs   int64
+	RowSeen string
 }
 
-// AudibleRow is a server progress row as the push records it: its version,
-// place (ms), book length (seconds) and when this Bridge first read the place.
+// AudibleRow is a server progress row as the push records it: its place (ms)
+// and when this Bridge first read it.
 type AudibleRow struct {
-	Version  int64
-	Ms       int64
-	Duration float64
-	Seen     time.Time
+	Ms   int64
+	Seen time.Time
 }
 
 // AudibleSyncTitle is one title an audible.sync job lists: the ASIN, the book
@@ -53,14 +49,13 @@ type AudibleSyncTitle struct {
 	RuntimeS  int64
 }
 
-const audiblePushColumns = `account, asin, library_id, path, runtime_s, listed, acr, last_ms, at, heard_ms, want_ms,
-	row_version, row_ms, row_duration, row_seen`
+const audiblePushColumns = `account, asin, library_id, path, runtime_s, listed, acr, last_ms, at, heard_ms, want_ms, row_ms, row_seen`
 
 func scanAudiblePush(row interface{ Scan(...any) error }) (AudiblePush, error) {
 	var p AudiblePush
 	var want sql.NullInt64
 	err := row.Scan(&p.Account, &p.ASIN, &p.LibraryID, &p.Path, &p.RuntimeS, &p.Listed, &p.ACR, &p.LastMs, &p.At, &p.HeardMs,
-		&want, &p.RowVersion, &p.RowMs, &p.RowDuration, &p.RowSeen)
+		&want, &p.RowMs, &p.RowSeen)
 	if want.Valid {
 		p.WantMs = &want.Int64
 	}
@@ -87,9 +82,7 @@ func (db *DB) ListAudibleSync(ctx context.Context, account string, titles []Audi
 		VALUES (?, ?, ?, ?, ?, 1)
 		ON CONFLICT(account, asin) DO UPDATE SET
 			want_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN want_ms ELSE NULL END,
-			row_version = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_version ELSE -1 END,
 			row_ms = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_ms ELSE -1 END,
-			row_duration = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_duration ELSE 0 END,
 			row_seen = CASE WHEN library_id = excluded.library_id AND path = excluded.path THEN row_seen ELSE '' END,
 			library_id = excluded.library_id, path = excluded.path, runtime_s = excluded.runtime_s, listed = 1`)
 	if err != nil {
@@ -149,26 +142,16 @@ func (db *DB) GetAudiblePush(ctx context.Context, account, asin string) (Audible
 // WantAudiblePush records a server place waiting to be pushed: row's place,
 // with the row. Only a listed row takes one.
 func (db *DB) WantAudiblePush(ctx context.Context, account, asin string, row AudibleRow) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = ?1, row_version = ?2, row_ms = ?1, row_duration = ?3,
-		row_seen = ?4 WHERE account = ?5 AND asin = ?6 AND listed = 1`,
-		row.Ms, row.Version, row.Duration, timestamp(row.Seen), account, asin)
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = ?1, row_ms = ?1, row_seen = ?2
+		WHERE account = ?3 AND asin = ?4 AND listed = 1`, row.Ms, timestamp(row.Seen), account, asin)
 	return err
 }
 
 // SeenAudibleRow records a server row that was read and needs no push
 // (history: changed before the feed's baseline): the waiting place goes.
 func (db *DB) SeenAudibleRow(ctx context.Context, account, asin string, row AudibleRow) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, row_version = ?, row_ms = ?, row_duration = ?,
-		row_seen = ? WHERE account = ? AND asin = ?`, row.Version, row.Ms, row.Duration, timestamp(row.Seen), account, asin)
-	return err
-}
-
-// TouchAudibleRow records a server row read again at the same place with
-// another version (its finish, length or device changed, not its place): the
-// waiting place and when the place was first read stay.
-func (db *DB) TouchAudibleRow(ctx context.Context, account, asin string, version int64, duration float64) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET row_version = ?, row_duration = ? WHERE account = ? AND asin = ?`,
-		version, duration, account, asin)
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, row_ms = ?, row_seen = ?
+		WHERE account = ? AND asin = ?`, row.Ms, timestamp(row.Seen), account, asin)
 	return err
 }
 
@@ -184,13 +167,11 @@ func (db *DB) PendAudiblePush(ctx context.Context, account, asin string, library
 	if want {
 		ms = &row.Ms
 	}
-	_, err := db.sql.ExecContext(ctx, `INSERT INTO audible_push (account, asin, library_id, path, listed, want_ms,
-			row_version, row_ms, row_duration, row_seen)
-		VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+	_, err := db.sql.ExecContext(ctx, `INSERT INTO audible_push (account, asin, library_id, path, listed, want_ms, row_ms, row_seen)
+		VALUES (?, ?, ?, ?, 0, ?, ?, ?)
 		ON CONFLICT(account, asin) DO UPDATE SET library_id = excluded.library_id, path = excluded.path, listed = 0,
-			want_ms = excluded.want_ms, row_version = excluded.row_version, row_ms = excluded.row_ms,
-			row_duration = excluded.row_duration, row_seen = excluded.row_seen`,
-		account, asin, libraryID, path, ms, row.Version, row.Ms, row.Duration, timestamp(row.Seen))
+			want_ms = excluded.want_ms, row_ms = excluded.row_ms, row_seen = excluded.row_seen`,
+		account, asin, libraryID, path, ms, row.Ms, timestamp(row.Seen))
 	return err
 }
 

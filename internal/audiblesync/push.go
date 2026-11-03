@@ -189,9 +189,9 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 // (the Bridge's clock: the stillness is counted from it). The feed pages in
 // the order the server wrote rows, and may give a row again with its
 // updated_at unchanged (an edit, a diverged place applied), so a row is new by
-// its version and place, never its time: one read again at the same place
-// with another version (its finish, length or device changed) only records
-// the version. Audible's own rows (the server leaves them out too) are left,
+// its place, never its time: one read again at the same place (whatever else
+// changed: its version, finish, length or device) is no new place and doesn't
+// restart the wait. Audible's own rows (the server leaves them out too) are left,
 // and history (changed before cutoff, the baseline's only) is recorded with no
 // waiting place. A row on a title the last sync didn't list for that book (the
 // server's feed already syncs it: a new match, a re-match, a title synced
@@ -207,14 +207,6 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 	x, known := titles[row.ASIN]
 	sameBook := known && x.LibraryID == row.LibraryID && x.Path == row.Path
 	if sameBook && x.RowMs == place {
-		if x.RowVersion != row.Version || x.RowDuration != row.Duration {
-			if err := p.o.DB.TouchAudibleRow(ctx, a.ID, row.ASIN, row.Version, row.Duration); err != nil {
-				p.o.Log.Warn("audible: recording a server place failed", "account", a.ID, "err", err)
-				return false
-			}
-			x.RowVersion, x.RowDuration = row.Version, row.Duration
-			titles[row.ASIN] = x
-		}
 		return true
 	}
 	history := false
@@ -222,7 +214,7 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 		updated, err := time.Parse(time.RFC3339Nano, row.UpdatedAt)
 		history = err != nil || updated.Before(cutoff)
 	}
-	rec := store.AudibleRow{Version: row.Version, Ms: place, Duration: row.Duration, Seen: now}
+	rec := store.AudibleRow{Ms: place, Seen: now}
 	var err error
 	switch {
 	case !sameBook || !x.Listed:
@@ -240,7 +232,7 @@ func (p *Pusher) row(ctx context.Context, a store.AudibleAccount, titles map[str
 		p.o.Log.Warn("audible: recording a server place failed", "account", a.ID, "err", err)
 		return false
 	}
-	x.RowVersion, x.RowMs, x.RowDuration, x.RowSeen = rec.Version, rec.Ms, rec.Duration, store.Timestamp(now)
+	x.RowMs, x.RowSeen = rec.Ms, store.Timestamp(now)
 	titles[row.ASIN] = x
 	return true
 }
@@ -310,18 +302,15 @@ func movedOn(audibleMs int64, x store.AudiblePush) bool {
 // dropped drops x's waiting place, and reports so, when it is never written: a
 // place at the start, one within echoMs of the last one written (the debounce)
 // or of the last one heard from Audible (Audible's own place coming back), or
-// one past the title's runtime, or one on a book whose length disagrees with
-// the title's runtime (a wrong match, as the server's duration_mismatch: never
-// written to the real account).
+// one past the title's runtime (a wrong match: never written to the real
+// account). A book whose length disagrees with the title's runtime never
+// reaches the push: the server's feed leaves it out (duration_mismatch).
 func (p *Pusher) dropped(ctx context.Context, a store.AudibleAccount, x store.AudiblePush) bool {
 	want := *x.WantMs
 	switch {
 	case want < 1000, near(want, x.LastMs), near(want, x.HeardMs):
 	case pastRuntime(float64(want)/1000, x.RuntimeS):
 		p.o.Log.Warn("audible: a place on the server is past the title's runtime on Audible, so its match looks wrong; not written",
-			"account", a.ID, "asin", x.ASIN)
-	case !runtimeAgrees(x.RuntimeS, x.RowDuration):
-		p.o.Log.Warn("audible: the server's book is another length than the title on Audible, so its match looks wrong; not written",
 			"account", a.ID, "asin", x.ASIN)
 	default:
 		return false

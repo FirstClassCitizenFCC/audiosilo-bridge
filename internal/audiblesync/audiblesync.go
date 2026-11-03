@@ -90,17 +90,6 @@ func pastRuntime(placeS float64, runtimeS int64) bool {
 	return runtimeS > 0 && placeS > float64(runtimeS)*runtimeSlackPct+runtimeSlackS
 }
 
-// runtimeAgrees reports whether an Audible title's runtime and a book's
-// length (seconds) are one recording's: within 5% of the longer plus 2
-// minutes, or either unknown (the server's rule for duration_mismatch).
-func runtimeAgrees(runtimeS int64, durationS float64) bool {
-	if runtimeS <= 0 || durationS <= 0 {
-		return true
-	}
-	rt := float64(runtimeS)
-	return math.Abs(rt-durationS) <= max(rt, durationS)*(runtimeSlackPct-1)+runtimeSlackS
-}
-
 // atBookEnd reports whether a place (seconds) is at the end of a book of
 // runtimeS seconds; false when the runtime is unknown.
 func atBookEnd(placeS float64, runtimeS int64) bool {
@@ -148,7 +137,6 @@ type Store interface {
 	AudibleWaiting(ctx context.Context, account string) ([]store.AudiblePush, error)
 	WantAudiblePush(ctx context.Context, account, asin string, row store.AudibleRow) error
 	SeenAudibleRow(ctx context.Context, account, asin string, row store.AudibleRow) error
-	TouchAudibleRow(ctx context.Context, account, asin string, version int64, duration float64) error
 	PendAudiblePush(ctx context.Context, account, asin string, libraryID int64, path string, want bool, row store.AudibleRow) error
 	AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time) error
 	DropAudiblePush(ctx context.Context, account, asin string) error

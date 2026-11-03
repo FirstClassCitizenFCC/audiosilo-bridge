@@ -9,12 +9,12 @@
 -- to Audible (last_ms, -1 none) and when (at), the Audible place the last sync
 -- sent to the server (heard_ms, -1 none: a server row at that place is
 -- Audible's own coming back, never pushed), the place waiting to be pushed
--- (want_ms, NULL none), and the server row last read for the title: its
--- version, place (row_ms, -1 none) and book length (row_duration, seconds, 0
--- unknown), and when this Bridge first read that place (row_seen, the
--- Bridge's clock: a place is pushed once it has been still for 3 minutes; the
--- feed pages in write order, so a row's updated_at says nothing about when it
--- changed here). No credential, no title.
+-- (want_ms, NULL none), and the place of the server row last read for the
+-- title (row_ms, -1 none: a row read again at that place is no new place,
+-- whatever else changed) with when this Bridge first read that place
+-- (row_seen, the Bridge's clock: a place is pushed once it has been still for
+-- 3 minutes; the feed pages in write order, so a row's updated_at says
+-- nothing about when it changed here). No credential, no title.
 CREATE TABLE audible_push (
     account      TEXT NOT NULL,
     asin         TEXT NOT NULL,
@@ -27,9 +27,7 @@ CREATE TABLE audible_push (
     at           TEXT NOT NULL DEFAULT '',
     heard_ms     INTEGER NOT NULL DEFAULT -1,
     want_ms      INTEGER,
-    row_version  INTEGER NOT NULL DEFAULT -1,
     row_ms       INTEGER NOT NULL DEFAULT -1,
-    row_duration REAL NOT NULL DEFAULT 0,
     row_seen     TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (account, asin)
 );

@@ -1337,9 +1337,8 @@ internal/
             named, pending until a sync lists it (PendAudiblePush), runtime_s, listed, the cached acr,
             last_ms/at written to Audible, heard_ms sent from it (each clears the other: AudiblePushed,
             and AudibleHeard for a write before the job began), want_ms waiting, the feed row last
-            read: row_version/row_ms/row_duration and row_seen, when this Bridge first read that place;
-            TouchAudibleRow a new version at the same place; a sync listing the title for another book
-            forgets them) and on audible_accounts
+            read: row_ms and row_seen, when this Bridge first read that place; a sync listing the
+            title for another book forgets them) and on audible_accounts
             push_cursor/push_from (push_from '' until a read reaches the feed's end; started again by a mapping to another server, person or
             library), sync_at/sync_error/sync_retry_at (AudibleSyncFailed and AudibleSyncOK never shorten a
             wait still ahead) and refusal_kind (bridge#46: 'sign_in' | 'device'
@@ -2424,15 +2423,15 @@ internal/
             per account mapped here, not refused, not waiting, not paused (in memory: sync_off 5 min,
             user_unavailable or unknown 15 min, the server's 429/503 its Retry-After, at least 2 min,
             this loop only): reads the feed from push_cursor (it pages in the server's write order, change_seq, and
-            may give a row again with updated_at unchanged, so a row is new by its version and place,
+            may give a row again with updated_at unchanged, so a row is new by its place alone (a new version at the same place is none),
             never its time; the baseline, every read until one reaches the feed's end, takes only rows
             of the last 10 min by updated_at, history after it is none; a row it fails to record keeps
             the cursor, so the pass reads it again), skips rows by audible:<account>, keeps a
             row on a title the last sync didn't list for that book pending (listed 0,
             store.PendAudiblePush) until a sync lists it; for the places still for StillFor (3 min, since
             row_seen: the Bridge's clock) it drops one under 1 s, within 5 s of last_ms (debounce) or
-            heard_ms (echo), past the runtime, or on a book whose length disagrees with the runtime
-            (runtimeAgrees, the server's duration_mismatch rule), reads Audible's places once (Positions) and drops one Audible moved on from since
+            heard_ms (echo) or past the runtime (a book whose length disagrees with the runtime
+            never reaches it: the feed leaves it out, duration_mismatch), reads Audible's places once (Positions) and drops one Audible moved on from since
             (over 5 s further on and neither last_ms nor heard_ms: furthest wins, the next sync brings
             it in), else writes it: ContentACR once per ASIN (cached; a cached one a write answers
             400/404 for is read again and the write tried once more), SetPosition. A 429/503 keeps the

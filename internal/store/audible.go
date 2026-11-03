@@ -97,8 +97,8 @@ func remapAudible(ctx context.Context, tx *sql.Tx, a AudibleAccount) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = '', push_from = '' WHERE id = ?`, a.ID); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, listed = 0, row_version = -1, row_ms = -1,
-		row_duration = 0, row_seen = '' WHERE account = ?`, a.ID)
+	_, err = tx.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, listed = 0, row_ms = -1, row_seen = ''
+		WHERE account = ?`, a.ID)
 	return err
 }
 

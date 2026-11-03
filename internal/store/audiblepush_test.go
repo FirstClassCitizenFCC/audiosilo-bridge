@@ -27,10 +27,10 @@ func TestAudiblePushRows(t *testing.T) {
 	if _, err := db.GetAudiblePush(ctx, a.ID, "B000000009"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown asin = %v", err)
 	}
-	if err := db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Version: 1, Ms: 60_000, Seen: at}); err != nil {
+	if err := db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Ms: 60_000, Seen: at}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.WantAudiblePush(ctx, a.ID, "B000000002", AudibleRow{Version: 1, Ms: 90_000, Seen: at}); err != nil {
+	if err := db.WantAudiblePush(ctx, a.ID, "B000000002", AudibleRow{Ms: 90_000, Seen: at}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SetAudibleACR(ctx, a.ID, "B000000001", "CR!ACR1"); err != nil {
@@ -40,7 +40,7 @@ func TestAudiblePushRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, err := db.GetAudiblePush(ctx, a.ID, "B000000001")
-	if err != nil || !p.Listed || p.WantMs == nil || *p.WantMs != 60_000 || p.RowMs != 60_000 || p.RowVersion != 1 || p.RowSeen != Timestamp(at) || p.LastMs != -1 ||
+	if err != nil || !p.Listed || p.WantMs == nil || *p.WantMs != 60_000 || p.RowMs != 60_000 || p.RowSeen != Timestamp(at) || p.LastMs != -1 ||
 		p.ACR != "CR!ACR1" || p.HeardMs != 30_000 || p.RuntimeS != 3600 || p.Path != "A/One" {
 		t.Fatalf("push = %+v, %v", p, err)
 	}
@@ -57,7 +57,7 @@ func TestAudiblePushRows(t *testing.T) {
 	if two, _ := db.GetAudiblePush(ctx, a.ID, "B000000002"); two.WantMs != nil || two.LastMs != -1 {
 		t.Fatalf("a drop wrote a push: %+v", two)
 	}
-	_ = db.WantAudiblePush(ctx, a.ID, "B000000002", AudibleRow{Version: 1, Ms: 90_000, Seen: at})
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000002", AudibleRow{Ms: 90_000, Seen: at})
 	if err := db.AudiblePushed(ctx, a.ID, "B000000001", 60_000, at.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestAudiblePushRows(t *testing.T) {
 	if two.Listed || two.WantMs != nil {
 		t.Fatalf("an unlisted title kept its place: %+v", two)
 	}
-	if err := db.WantAudiblePush(ctx, a.ID, "B000000002", AudibleRow{Version: 1, Ms: 1, Seen: at}); err != nil {
+	if err := db.WantAudiblePush(ctx, a.ID, "B000000002", AudibleRow{Ms: 1, Seen: at}); err != nil {
 		t.Fatal(err)
 	}
 	if two, _ = db.GetAudiblePush(ctx, a.ID, "B000000002"); two.WantMs != nil {
@@ -86,29 +86,19 @@ func TestAudiblePushRows(t *testing.T) {
 		t.Fatalf("a listing forgot the push state: %+v", p)
 	}
 	// A title whose book moved forgets its waiting place.
-	_ = db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Version: 1, Ms: 5, Seen: at})
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Ms: 5, Seen: at})
 	_ = db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000001", LibraryID: 1, Path: "A/One (moved)", RuntimeS: 3600}})
 	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.WantMs != nil || p.Path != "A/One (moved)" {
 		t.Fatalf("a moved book kept its waiting place: %+v", p)
 	}
 	// Seen: the waiting place goes, the row stays.
-	_ = db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Version: 1, Ms: 5, Seen: at})
-	if err := db.SeenAudibleRow(ctx, a.ID, "B000000001", AudibleRow{Version: 4, Ms: 7, Duration: 3600, Seen: at.Add(time.Hour)}); err != nil {
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Ms: 5, Seen: at})
+	if err := db.SeenAudibleRow(ctx, a.ID, "B000000001", AudibleRow{Ms: 7, Seen: at.Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.WantMs != nil || p.RowVersion != 4 || p.RowMs != 7 || p.RowDuration != 3600 ||
+	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.WantMs != nil || p.RowMs != 7 ||
 		p.RowSeen != Timestamp(at.Add(time.Hour)) {
 		t.Fatalf("seen = %+v", p)
-	}
-	// Touched: the row read again at its place with another version keeps
-	// the waiting place and when the place was first read.
-	_ = db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Version: 5, Ms: 9, Seen: at})
-	if err := db.TouchAudibleRow(ctx, a.ID, "B000000001", 6, 3700); err != nil {
-		t.Fatal(err)
-	}
-	if p, _ = db.GetAudiblePush(ctx, a.ID, "B000000001"); p.WantMs == nil || *p.WantMs != 9 || p.RowVersion != 6 || p.RowMs != 9 ||
-		p.RowDuration != 3700 || p.RowSeen != Timestamp(at) {
-		t.Fatalf("touched = %+v", p)
 	}
 	list, err := db.AudiblePushes(ctx, a.ID)
 	if err != nil || len(list) != 2 || list[0].ASIN != "B000000001" {
@@ -151,7 +141,7 @@ func TestAudiblePushMarkers(t *testing.T) {
 	// The push wrote 60 s an hour ago; a job starting now hears 90 s: the
 	// write is no longer Audible's place. Not applied: the waiting place stays.
 	_ = db.AudiblePushed(ctx, a.ID, "B000000001", 60_000, at.Add(-time.Hour))
-	_ = db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Version: 1, Ms: 70_000, Seen: at})
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Ms: 70_000, Seen: at})
 	snap := get()
 	if err := db.AudibleHeard(ctx, snap, 90_000, false, at); err != nil {
 		t.Fatal(err)
@@ -169,7 +159,7 @@ func TestAudiblePushMarkers(t *testing.T) {
 	// The push wrote again and read a newer row while the job ran: both stay.
 	snap = get()
 	_ = db.AudiblePushed(ctx, a.ID, "B000000001", 100_000, at.Add(time.Minute))
-	_ = db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Version: 1, Ms: 110_000, Seen: at.Add(time.Minute)})
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Ms: 110_000, Seen: at.Add(time.Minute)})
 	if err := db.AudibleHeard(ctx, snap, 120_000, true, at); err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +167,7 @@ func TestAudiblePushMarkers(t *testing.T) {
 		t.Fatalf("a push during the job was undone: %+v", p)
 	}
 	// Pending: a place on a title the feed syncs but the last job didn't list.
-	row := AudibleRow{Version: 1, Ms: 5_000, Seen: at}
+	row := AudibleRow{Ms: 5_000, Seen: at}
 	if err := db.PendAudiblePush(ctx, a.ID, "B000000002", 1, "A/Two", true, row); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +176,7 @@ func TestAudiblePushMarkers(t *testing.T) {
 	}
 	// A re-match: the listed title's book changes on the server first.
 	if err := db.PendAudiblePush(ctx, a.ID, "B000000001", 1, "A/One (right)", true,
-		AudibleRow{Version: 2, Ms: 5_000, Seen: at.Add(2 * time.Minute)}); err != nil {
+		AudibleRow{Ms: 5_000, Seen: at.Add(2 * time.Minute)}); err != nil {
 		t.Fatal(err)
 	}
 	if p := get(); p.Listed || p.Path != "A/One (right)" || p.WantMs == nil || p.RowSeen != Timestamp(at.Add(2*time.Minute)) ||
@@ -218,7 +208,7 @@ func TestAudiblePushMarkers(t *testing.T) {
 	// behind the place the server took: it goes (Audible is still there).
 	later := at.Add(2 * time.Hour)
 	snap, _ = db.GetAudiblePush(ctx, a.ID, "B000000003")
-	_ = db.WantAudiblePush(ctx, a.ID, "B000000003", AudibleRow{Version: 2, Ms: 130_000, Seen: later.Add(time.Minute)})
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000003", AudibleRow{Ms: 130_000, Seen: later.Add(time.Minute)})
 	if err := db.AudibleHeard(ctx, snap, 140_000, true, later); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +217,7 @@ func TestAudiblePushMarkers(t *testing.T) {
 	}
 	// One further on than the place heard stays.
 	snap, _ = db.GetAudiblePush(ctx, a.ID, "B000000003")
-	_ = db.WantAudiblePush(ctx, a.ID, "B000000003", AudibleRow{Version: 3, Ms: 150_000, Seen: later.Add(2 * time.Minute)})
+	_ = db.WantAudiblePush(ctx, a.ID, "B000000003", AudibleRow{Ms: 150_000, Seen: later.Add(2 * time.Minute)})
 	if err := db.AudibleHeard(ctx, snap, 145_000, true, later); err != nil {
 		t.Fatal(err)
 	}
@@ -236,8 +226,7 @@ func TestAudiblePushMarkers(t *testing.T) {
 	}
 	// A job listing the title for another book forgets the row last read.
 	_ = db.ListAudibleSync(ctx, a.ID, []AudibleSyncTitle{{ASIN: "B000000003", LibraryID: 1, Path: "A/Elsewhere", RuntimeS: 60}})
-	if p, _ := db.GetAudiblePush(ctx, a.ID, "B000000003"); p.WantMs != nil || p.RowMs != -1 || p.RowVersion != -1 ||
-		p.RowSeen != "" || p.RowDuration != 0 {
+	if p, _ := db.GetAudiblePush(ctx, a.ID, "B000000003"); p.WantMs != nil || p.RowMs != -1 || p.RowSeen != "" {
 		t.Fatalf("re-listed for another book = %+v", p)
 	}
 }
@@ -259,7 +248,7 @@ func TestAudiblePushCursorRemap(t *testing.T) {
 		if err := db.SetAudiblePushCursor(ctx, a.ID, "c42", at); err != nil {
 			t.Fatal(err)
 		}
-		_ = db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Version: 1, Ms: 5, Seen: at})
+		_ = db.WantAudiblePush(ctx, a.ID, "B000000001", AudibleRow{Ms: 5, Seen: at})
 	}
 	// A baseline still under way (no from) leaves the start unset.
 	if err := db.SetAudiblePushCursor(ctx, a.ID, "c41", time.Time{}); err != nil {
