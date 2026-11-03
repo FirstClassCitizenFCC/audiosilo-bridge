@@ -933,6 +933,13 @@ type Reporter struct {
 // handler's tests).
 func LocalReporter() *Reporter { return &Reporter{} }
 
+// CancelContext returns a child of parent and a func that ends it as an
+// admin's cancel does (Resumes is false after it): a handler's tests.
+func CancelContext(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	return ctx, func() { cancel(errCancelRequested) }
+}
+
 // Path is the job's book path as the server's last answer to a report gave it,
 // "" when no answer carried one: a book the server saw move since the claim is
 // at this path now.
