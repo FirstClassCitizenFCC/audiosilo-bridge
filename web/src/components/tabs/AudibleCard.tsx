@@ -514,14 +514,10 @@ function MappingForm({
           the Audible account card.
         </p>
       )}
-      <label className="flex items-center gap-2 text-sm text-body">
-        <input
-          type="checkbox"
-          checked={m.sync}
-          onChange={(e) => setM({ ...m, sync: e.target.checked })}
-        />
-        Keep the listening place in step with Audible (once places sync)
-      </label>
+      <p className="text-sm text-dim">
+        Keeping the listening place in step with Audible is turned on in the server&apos;s console,
+        on the Audible account card.
+      </p>
       <Field
         label="Name (optional)"
         htmlFor="audible-label"

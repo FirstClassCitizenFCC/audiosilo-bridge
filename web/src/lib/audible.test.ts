@@ -40,7 +40,7 @@ describe('audible', () => {
         users: [{ id: 3, name: 'Chris', admin: true }],
         libraries: [{ id: 1, name: 'Books' }],
       }),
-    ).toEqual({ label: '', user_id: 3, library_id: 1, policy: 'manual', sync: true });
+    ).toEqual({ label: '', user_id: 3, library_id: 1, policy: 'manual', sync: false });
     const two = defaultMapping({
       users: [
         { id: 3, name: 'Chris', admin: true },

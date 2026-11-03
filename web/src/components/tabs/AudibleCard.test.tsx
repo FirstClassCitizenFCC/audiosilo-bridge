@@ -71,6 +71,9 @@ describe('AudibleCard', () => {
     // The only person and library are picked already.
     expect(within(card).getByLabelText('Belongs to')).toHaveValue('3');
     expect(within(card).getByLabelText('Library')).toHaveValue('1');
+    // Sync is turned on in the console: no switch here.
+    expect(within(card).queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(within(card).getByText(/turned on in the server's console/)).toBeInTheDocument();
     await userEvent.selectOptions(within(card).getByLabelText('Back up'), 'series');
     await userEvent.click(within(card).getByRole('button', { name: 'Finish the sign-in' }));
     expect(await within(card).findByText('Signed in to Audible.')).toBeInTheDocument();
@@ -81,7 +84,7 @@ describe('AudibleCard', () => {
       user_id: 3,
       library_id: 1,
       policy: 'series',
-      sync: true,
+      sync: false,
     });
     const row = within(card).getByRole('region', { name: 'Chris (UK)' });
     expect(within(row).getByText('Not checked yet')).toBeInTheDocument();
