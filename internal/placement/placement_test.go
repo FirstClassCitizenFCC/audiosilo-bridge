@@ -278,10 +278,18 @@ func TestDropLeadingSequence(t *testing.T) {
 		{"2.5: 1", "2.5: 1"},           // nothing of its own after the number
 		{"2.5 Margins", "2.5 Margins"}, // no separator: may be the title's own words
 		{"25: Margins", "25: Margins"},
+		{"2.5 \u2013 Margins", "Margins"},
+		{"2.5-Margins Redux", "2.5-Margins Redux"}, // a dash glued to both sides is the title's own
 		{"Margins", "Margins"},
 	} {
 		if got := dropLeadingSequence(c.in, in); got != c.want {
 			t.Errorf("%q: got %q, want %q", c.in, got, c.want)
+		}
+	}
+	one := Input{Sequence: 1, HasSequence: true}
+	for _, c := range []string{"1-3: Box Set", "1,000 Ships", "1\u20133: Box Set"} {
+		if got := dropLeadingSequence(c, one); got != c {
+			t.Errorf("%q: a range or a thousands separator is not a separator, got %q", c, got)
 		}
 	}
 	if got := dropLeadingSequence("2.5: Margins", Input{}); got != "2.5: Margins" {
@@ -290,7 +298,8 @@ func TestDropLeadingSequence(t *testing.T) {
 }
 
 // SuggestWith drops the book's own position from {Title} and {TitleShort} in
-// both modes, so "2.5: Margins" never doubles the folder code's number.
+// Auto mode and in a template that renders the position, so "2.5: Margins"
+// never doubles the folder code's number; a template without it keeps it.
 func TestSuggestWithLeadingSequence(t *testing.T) {
 	in := Input{
 		Author: "Wen Liang", Title: "2.5: Margins", TitleShort: "2.5: Margins", SeriesName: "Mapmakers",
@@ -303,6 +312,9 @@ func TestSuggestWithLeadingSequence(t *testing.T) {
 	}{
 		{ModeAuto, "", "Wen Liang/Mapmakers/2.5 - Margins/Mapmakers 2.5 - Margins.m4b"},
 		{ModeTemplate, "{Author}/{Series}/{Seq} - {Title}/{TitleShort}{Ext}", "Wen Liang/Mapmakers/2.5 - Margins/Margins.m4b"},
+		{ModeTemplate, "{Author}/{Series}/{ {PaddedSeq} - }{Title}/{OriginalFilename}", "Wen Liang/Mapmakers/2.5 - Margins/Mapmakers 2.5 - Margins.m4b"},
+		// No position in the template: the title keeps its number.
+		{ModeTemplate, "{Author}/{Series}/{Title}/{OriginalFilename}", "Wen Liang/Mapmakers/2.5 - Margins/Mapmakers 2.5 - Margins.m4b"},
 	} {
 		sug, err := SuggestWith(c.mode, c.tmpl, in)
 		if err != nil {

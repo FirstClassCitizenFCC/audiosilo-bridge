@@ -183,8 +183,10 @@ func bareTitle(t string) bool {
 
 // leadingSequence is a title that opens with a number and a separator ("2.5:
 // Margins", "3 - The Coast"), the shape CleanTitle leaves of "<Series> N:
-// Subtitle" once it strips the series name.
-var leadingSequence = regexp.MustCompile(`^(\d+(?:\.\d+)?)\s*[:\-\x{2013}\x{2014},]\s*(.+)$`)
+// Subtitle" once it strips the series name. A dash or comma needs a space on
+// one side, so a range ("1-3: Box Set") or a thousands separator ("1,000
+// Ships") is not read as a separator.
+var leadingSequence = regexp.MustCompile(`^(\d+(?:\.\d+)?)(?:\s*:|\s*,\s|\s*[-\x{2013}\x{2014}]\s|\s+[-\x{2013}\x{2014}])\s*(.+)$`)
 
 // dropLeadingSequence removes the book's own series position from the front of
 // a cleaned title: "Mapmakers 2.5: Margins" cleans to "2.5: Margins", which
