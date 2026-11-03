@@ -769,11 +769,20 @@ func TestSweepTmp(t *testing.T) {
 	}
 }
 
-// One import per account at a time: a second waits for the first.
+// One import per account at a time: a second waits for the first. Every wait
+// is bounded, and a failure releases the held download and cancels the runs,
+// so the test fails fast rather than hanging.
 func TestImportOnePerAccount(t *testing.T) {
 	e := newImportEnv(t)
+	// started is closed (never sent on: a dropped signal hung CI) by the first
+	// download to begin.
 	started := make(chan struct{})
+	var startOnce sync.Once
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); releaseAll() })
 	var mu sync.Mutex
 	running, most := 0, 0
 	e.accts.download = func(_ context.Context, _, dest string, _ audible.DownloadOptions) error {
@@ -781,10 +790,7 @@ func TestImportOnePerAccount(t *testing.T) {
 		running++
 		most = max(most, running)
 		mu.Unlock()
-		select {
-		case started <- struct{}{}:
-		default:
-		}
+		startOnce.Do(func() { close(started) })
 		<-release
 		mu.Lock()
 		running--
@@ -805,22 +811,33 @@ func TestImportOnePerAccount(t *testing.T) {
 	for _, asin := range []string{"B0FAKE0002", "B0FAKE0003"} {
 		params := e.params(func(p *ImportParams) { p.ASIN = asin; p.DestPath = "Imports/" + asin })
 		go func() {
-			_, err := h.Run(context.Background(), jobs.Job{Kind: ImportKind, Params: params}, jobs.LocalReporter())
+			_, err := h.Run(ctx, jobs.Job{Kind: ImportKind, Params: params}, jobs.LocalReporter())
 			errs <- err
 		}()
 	}
-	<-started
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no import started its download")
+	}
 	select {
 	case <-waiting: // the second waits while the first downloads
 	case <-time.After(10 * time.Second):
 		t.Fatal("the second import never waited for the first")
 	}
-	close(release)
+	releaseAll()
 	for range 2 {
-		if err := <-errs; err != nil {
-			t.Fatal(err)
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("an import never finished")
 		}
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	if most != 1 {
 		t.Fatalf("%d imports of one account ran at once", most)
 	}
