@@ -2086,8 +2086,8 @@ internal/
             device and the account as it was. A sign-in of an Amazon account already
             here (customer_hash + marketplace) replaces it: same id, the old device
             deregistered after (an earlier sign-in that can't be opened is logged:
-            its device stays). Finish runs one at a time from the lookup on
-            (finishMu), so two sign-ins of one Amazon account finishing together
+            its device stays). Finish runs one at a time from the lookup until
+            the row is stored (finishMu), so two sign-ins of one Amazon account finishing together
             end as a sign-in again, not two accounts (the unique index backs it). A name the Bridge made ("<person> (<STORE>)") follows
             the person when Map or a sign-in again changes it; a typed one stays.
             Map records a new mapping on the server, then here. Remove forgets

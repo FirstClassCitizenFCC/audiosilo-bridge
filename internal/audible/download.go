@@ -40,11 +40,10 @@ type DownloadOptions struct {
 // earlier attempt with a Range request: a 206 that starts where dest ends is
 // appended; any other answer (a 200, a 206 from elsewhere) starts dest again.
 // A failure part way leaves what arrived in dest (a refusal for size removes
-// it); Download itself never decides whether that partial is safe to reuse. In
-// 4a nothing calls Download again with a partial: before 4b's acquisition
-// resumes one under a new license's URL, it must check the partial is the same
-// file (an If-Range validator, or the expected size), since a Range against
-// another file would append the wrong bytes.
+// it); Download itself never decides whether that partial is safe to reuse. A
+// caller resuming one under another URL (a new license's) must first check
+// the partial is the same file (an If-Range validator, or the expected size),
+// since a Range against another file would append the wrong bytes.
 //
 // The content-delivery URL is served by Audible's CDS and validates the same
 // device RSA signature as the API - audible-cli downloads it with the

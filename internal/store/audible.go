@@ -81,8 +81,9 @@ func (db *DB) AudibleAccountByCustomer(ctx context.Context, hash, marketplace st
 	if hash == "" {
 		return AudibleAccount{}, ErrNotFound
 	}
+	// customer_hash <> '' lets SQLite use the partial unique index.
 	a, err := scanAudibleAccount(db.sql.QueryRowContext(ctx, `SELECT `+audibleColumns+` FROM audible_accounts
-		WHERE customer_hash = ? AND marketplace = ? ORDER BY created_at LIMIT 1`, hash, marketplace))
+		WHERE customer_hash = ? AND customer_hash <> '' AND marketplace = ?`, hash, marketplace))
 	if errors.Is(err, sql.ErrNoRows) {
 		return AudibleAccount{}, ErrNotFound
 	}

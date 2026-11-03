@@ -20,8 +20,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -282,9 +282,9 @@ func (h *Handler) fail(ctx context.Context, account, why string) error {
 
 // matchable reports whether p is a book path the server takes in a match and
 // an enrichment: "." (a library that is one book, at its root) or a clean path
-// below the root (no "..", not absolute).
+// below the root, which is fs.ValidPath's rule.
 func matchable(p string) bool {
-	return p == "." || (p != "" && strings.Trim(path.Clean("/"+p), "/") == p)
+	return fs.ValidPath(p)
 }
 
 // allBooks reads every page of the library's books.

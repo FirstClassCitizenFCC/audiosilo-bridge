@@ -155,9 +155,12 @@ type Manager struct {
 
 	mu     sync.Mutex
 	logins map[string]login
-	// finishMu serialises the part of Finish after the registration: two
-	// sign-ins of the same Amazon account finishing at once would both find no
-	// account and make two. Held across network calls; sign-ins are rare.
+	// finishMu serialises Finish from the account lookup until the row is
+	// stored: two sign-ins of the same Amazon account finishing at once would
+	// otherwise both find no account and make two (the later now replaces the
+	// earlier, as any sign-in again does; the store's unique index on
+	// (customer_hash, marketplace) backs it). Held across the server call;
+	// sign-ins are rare.
 	finishMu sync.Mutex
 }
 
@@ -339,12 +342,10 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 				"step", why, "err", derr)
 		}
 	}
-	// One sign-in at a time from the lookup on: the later of two of the same
-	// Amazon account finds the earlier's account and replaces it (its device
-	// deregistered), as any sign-in again does. The store's unique index on
-	// (customer_hash, marketplace) refuses a second row should anything else race.
+	// See finishMu: held from the lookup until the row is stored.
 	m.finishMu.Lock()
-	defer m.finishMu.Unlock()
+	unlock := sync.OnceFunc(m.finishMu.Unlock)
+	defer unlock()
 	hash := customerHash(creds.CustomerID)
 	prev, perr := m.o.DB.AudibleAccountByCustomer(ctx, hash, l.mp.Code)
 	switch {
@@ -422,6 +423,9 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 		rollback("store")
 		return store.AudibleAccount{}, fmt.Errorf("could not keep the sign-in: %w", err)
 	}
+	// Stored: a later sign-in of this Amazon account now finds this one (and
+	// its new device in the vault), so the old device's removal needs no lock.
+	unlock()
 	switch {
 	case old != nil && old.DeviceSerial != creds.DeviceSerial:
 		if derr := m.o.Service.Deregister(context.WithoutCancel(ctx), *old); derr != nil {
