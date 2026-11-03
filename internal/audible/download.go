@@ -16,11 +16,6 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/progress"
 )
 
-// userAgent mimics the Audible iOS app, matching the reference clients
-// (audible-cli sets the same on its session). Some Audible/CDN endpoints reject
-// the default Go user agent.
-const userAgent = "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0"
-
 // DefaultMaxDownloadBytes caps one book's download when the caller sets no cap.
 // The longest high-quality AAXC files are around 2 GB.
 const DefaultMaxDownloadBytes int64 = 4 << 30

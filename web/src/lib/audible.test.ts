@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   accountState,
+  needsSignIn,
   defaultMapping,
   mappingOf,
   mappingProblem,
@@ -60,6 +61,11 @@ describe('audible', () => {
     expect(pollSummary({ ...a, last_titles: 1 })).toBe('1 title, 12 already in the library');
     expect(accountState({ ...a, other_server: true })).toBe('other_server');
     expect(accountState({ ...a, refused: true, other_server: true })).toBe('refused');
+    expect(accountState({ ...a, old_profile: true, other_server: true })).toBe('old_profile');
+    expect(accountState({ ...a, refused: true, old_profile: true })).toBe('refused');
+    expect(needsSignIn(a)).toBe(false);
+    expect(needsSignIn({ ...a, old_profile: true })).toBe(true);
+    expect(needsSignIn({ ...a, refused: true })).toBe(true);
     expect(mappingOf(a)).toEqual({
       label: 'Chris (US)',
       user_id: 3,

@@ -86,24 +86,71 @@ type AudibleMatch struct {
 }
 
 // ReasonContested is an available title's Reason when it matched a book
-// another title claimed with a better (or the same) score: the book is
-// probably here under the other title, so a backup of everything skips it.
+// another title claimed with a better (or the same) score, and its series
+// number doesn't say it is another volume: the book is probably here under the
+// other title, so a backup of everything skips it. ContestedPath names that
+// book.
 const ReasonContested = "contested"
+
+// The kinds of a planned destination (AudiblePlan.Kind): beside the series'
+// books the library has, as the first of its series there, or on its own.
+const (
+	PlanSeriesExisting = "series_existing"
+	PlanSeriesNew      = "series_new"
+	PlanStandalone     = "standalone"
+)
+
+// The states of a planned destination (AudiblePlan.State): a new folder, one
+// that joins folders the library has (the series' or the author's), one taken
+// already (Conflict says by what), or no destination (Conflict says why).
+const (
+	PlanNew    = "new"
+	PlanJoins  = "joins"
+	PlanExists = "exists"
+	PlanError  = "error"
+)
+
+// The conflicts of a PlanExists destination: a file is at the path, its folder
+// is a book the library lists, or its folder already holds audio.
+const (
+	ConflictFile  = "file"
+	ConflictBook  = "book"
+	ConflictAudio = "audio"
+)
+
+// AudiblePlan is where a backup of an unmatched title would go, worked out at
+// the poll: the library, the file's path in it and its name, the placement's
+// kind and how many of the series' books the library has, the state and its
+// conflict, and the account's template the plan used ("" for Auto). Path and
+// File are "" when State is PlanError.
+type AudiblePlan struct {
+	LibraryID int64  `json:"library_id"`
+	Path      string `json:"path"`
+	File      string `json:"file"`
+	Kind      string `json:"kind"`
+	Siblings  int    `json:"siblings"`
+	State     string `json:"state"`
+	Conflict  string `json:"conflict"`
+	Template  string `json:"template"`
+}
 
 // AudibleTitle is one title of an account's library as a poll reports it.
 // ReleaseDate is YYYY-MM-DD or ""; Reason says why an unavailable title can't
-// be downloaded, or ReasonContested for an available one; Match is nil when no
-// book matched.
+// be downloaded, or ReasonContested for an available one (ContestedPath the
+// book it lost); Match is nil when no book matched, and Planned then says
+// where a backup would go (nil for a matched title).
 type AudibleTitle struct {
-	ASIN        string        `json:"asin"`
-	Title       string        `json:"title"`
-	Authors     []string      `json:"authors"`
-	Series      []SeriesRef   `json:"series"`
-	ReleaseDate string        `json:"release_date"`
-	RuntimeS    int64         `json:"runtime_s"`
-	State       string        `json:"state"`
-	Reason      string        `json:"reason"`
-	Match       *AudibleMatch `json:"match"`
+	ASIN          string        `json:"asin"`
+	Title         string        `json:"title"`
+	Authors       []string      `json:"authors"`
+	Series        []SeriesRef   `json:"series"`
+	ReleaseDate   string        `json:"release_date"`
+	RuntimeS      int64         `json:"runtime_s"`
+	State         string        `json:"state"`
+	Reason        string        `json:"reason"`
+	Match         *AudibleMatch `json:"match"`
+	ContestedPath string        `json:"contested_path,omitempty"`
+	Planned       *AudiblePlan  `json:"planned"`
 }
 
 // AudibleTitles is one PUT .../titles call: a page of one poll's titles (at

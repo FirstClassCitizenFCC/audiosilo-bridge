@@ -108,18 +108,18 @@ func CleanRel(rel string) (string, error) {
 // normalization-insensitive filesystem (APFS, SMB, NTFS) finds under rel's,
 // takes the name its folder lists, since the server indexes a path only as it
 // is spelled on disk. What doesn't exist yet keeps rel's spelling.
-func OnDisk(root *os.Root, rel string) (string, error) {
+func OnDisk(fsys LibraryFS, rel string) (string, error) {
 	segs := strings.Split(rel, "/")
 	dir := "."
 	for i, seg := range segs {
-		st, err := root.Lstat(path.Join(dir, seg))
+		st, err := fsys.Lstat(path.Join(dir, seg))
 		if errors.Is(err, fs.ErrNotExist) {
 			return path.Join(append([]string{dir}, segs[i:]...)...), nil
 		}
 		if err != nil {
 			return "", err
 		}
-		name, err := listedName(root, dir, seg, st)
+		name, err := listedName(fsys, dir, seg, st)
 		if err != nil {
 			return "", err
 		}
@@ -130,8 +130,8 @@ func OnDisk(root *os.Root, rel string) (string, error) {
 
 // listedName is the name dir lists for the entry found as seg (st): seg when
 // it is listed as is, else the listed entry that is the same file.
-func listedName(root *os.Root, dir, seg string, st fs.FileInfo) (string, error) {
-	entries, err := fs.ReadDir(root.FS(), dir)
+func listedName(fsys LibraryFS, dir, seg string, st fs.FileInfo) (string, error) {
+	entries, err := fsys.ReadDir(dir)
 	if err != nil {
 		return "", err
 	}
@@ -140,13 +140,30 @@ func listedName(root *os.Root, dir, seg string, st fs.FileInfo) (string, error) 
 			return seg, nil
 		}
 	}
-	for _, e := range entries {
-		if info, err := e.Info(); err == nil && os.SameFile(info, st) {
-			return e.Name(), nil
+	// The same name folded first: each entry looked at is a stat, and a
+	// library's root may list thousands.
+	for _, folded := range []bool{true, false} {
+		for _, e := range entries {
+			if strings.EqualFold(e.Name(), seg) != folded {
+				continue
+			}
+			if info, err := e.Info(); err == nil && os.SameFile(info, st) {
+				return e.Name(), nil
+			}
 		}
 	}
 	return seg, nil
 }
+
+// LibraryFS is a library's mount as OnDisk reads it: RootFS, or a view over it
+// (one that lists each folder once, say).
+type LibraryFS interface {
+	fs.ReadLinkFS
+	fs.ReadDirFS
+}
+
+// RootFS is root's files as a LibraryFS.
+func RootFS(root *os.Root) LibraryFS { return root.FS().(LibraryFS) }
 
 // Place copies SrcPath to RelPath under Root and never replaces anything:
 //   - the destination holding the same bytes already is AlreadyPresent (an

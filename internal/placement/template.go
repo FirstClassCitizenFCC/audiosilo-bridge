@@ -49,12 +49,14 @@ func SuggestWith(mode Mode, tmpl string, in Input) (Suggestion, error) {
 	return Suggestion{
 		RelPath:  strings.TrimSuffix(dir, "/"),
 		Filename: file,
-		Kind:     kindForInput(in),
+		Kind:     KindFor(in),
 		Note:     "rendered from the library template",
 	}, nil
 }
 
-func kindForInput(in Input) Kind {
+// KindFor is the Kind a suggestion for in has: standalone without a series,
+// else series_existing when the library has siblings, else series_new.
+func KindFor(in Input) Kind {
 	switch {
 	case in.SeriesName == "":
 		return Standalone

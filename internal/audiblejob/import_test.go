@@ -44,6 +44,7 @@ const (
 type stubImportAccounts struct {
 	mu       sync.Mutex
 	acct     store.AudibleAccount
+	acctThen []store.AudibleAccount // each Account read after the first answers the next
 	acctErr  error
 	title    source.Record
 	titleErr error
@@ -66,7 +67,11 @@ func (s *stubImportAccounts) Account(_ context.Context, id string) (store.Audibl
 	if id != s.acct.ID {
 		return store.AudibleAccount{}, audibleacct.ErrNotFound
 	}
-	return s.acct, nil
+	a := s.acct
+	if len(s.acctThen) > 0 {
+		s.acct, s.acctThen = s.acctThen[0], s.acctThen[1:]
+	}
+	return a, nil
 }
 
 func (s *stubImportAccounts) Title(context.Context, string, string) (source.Record, error) {
@@ -442,6 +447,52 @@ func TestImportEnrichRefusedIsNotAFailure(t *testing.T) {
 	}
 }
 
+// A failure's library path and title stay whole (the redactor's shapes would
+// read "Basic Economics" as a Basic credential, "Password: A Novel" as a
+// password), while an error it quotes is still redacted of Amazon's ids.
+func TestFailRedactsOnlyQuotedErrors(t *testing.T) {
+	t.Parallel()
+	const rel = "Thomas Sowell/Basic Economics/Basic Economics.m4b"
+	if f := fail(CodeExists, "A file is already at %s: %q", rel, "Password: A Novel"); f.Message !=
+		`A file is already at `+rel+`: "Password: A Novel"` {
+		t.Fatalf("message = %s", f.Message)
+	}
+	f := fail(CodeNoRights, "At %s: %v", rel, errors.New(amazonRefusal))
+	if strings.Contains(f.Message, "A1B2C3D4E5F6G7") || !strings.Contains(f.Message, rel) ||
+		!strings.Contains(f.Message, "being throttled") {
+		t.Fatalf("message = %s", f.Message)
+	}
+}
+
+// Denied: Amazon's text reaching the import unredacted (belt and braces: the
+// client redacts it first) leaves the customer id out of the job's error,
+// result, progress and logs, as a coded failure and as a plain error; the ASIN
+// and the reason stay.
+func TestImportErrorsRedactAccountIDs(t *testing.T) {
+	for name, licErr := range map[string]error{
+		"coded":   fmt.Errorf("%w: B0FAKE0002 (%s)", audible.ErrNoRights, amazonRefusal),
+		"uncoded": errors.New(amazonRefusal),
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newImportEnv(t)
+			e.accts.licErr = []error{licErr}
+			res, err := e.run(context.Background(), e.params(nil))
+			if err == nil {
+				t.Fatal("expected a failure")
+			}
+			pb, _ := json.Marshal(e.progress)
+			for _, s := range []string{err.Error(), mustJSON(t, res), string(pb), e.logs.String()} {
+				if strings.Contains(s, "A1B2C3D4E5F6G7") {
+					t.Fatalf("customer id leaked: %.400s", s)
+				}
+			}
+			if msg := err.Error(); !strings.Contains(msg, "B00H3R0B0W") || !strings.Contains(msg, "being throttled") {
+				t.Fatalf("the reason was lost: %s", msg)
+			}
+		})
+	}
+}
+
 // Each refusal answers its code, leaves nothing in the library or the temp
 // folder, and says nothing secret.
 func TestImportCodes(t *testing.T) {
@@ -474,6 +525,10 @@ func TestImportCodes(t *testing.T) {
 			e.accts.licErr = []error{fmt.Errorf("%w: B0FAKE0002 (Throttled)", audible.ErrDenied)}
 		}, code: CodeRefused},
 		{name: "license: refused", setup: func(e *importEnv) { e.accts.licErr = []error{audibleacct.ErrRefused} }, code: CodeRefused},
+		// A device on an older profile: the account's to fix, not the title's.
+		{name: "license: throttled device", setup: func(e *importEnv) {
+			e.accts.licErr = []error{fmt.Errorf("%w: B0FAKE0002 (%s)", audible.ErrThrottled, amazonRefusal)}
+		}, code: CodeRefused},
 		{name: "exists", setup: func(e *importEnv) {
 			p := filepath.Join(e.root, filepath.FromSlash(copperGrove))
 			_ = os.MkdirAll(filepath.Dir(p), 0o755)
@@ -535,6 +590,47 @@ func TestImportCodes(t *testing.T) {
 			e.tmpEmpty(t)
 			e.noSecrets(t, res, err)
 		})
+	}
+}
+
+// A refused account's import fails before asking Audible anything: a device
+// denied licenses with the throttled advice, a refused sign-in with its own.
+// Allowed: an account with only a poll's error still imports.
+func TestImportOfARefusedAccountFailsFast(t *testing.T) {
+	for _, c := range []struct {
+		name, why, msg string
+	}{
+		{"throttled", audibleacct.ThrottledText, ThrottledText},
+		{"sign-in refused", audibleacct.RefusedText, refusedSignIn().Message},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newImportEnv(t)
+			e.accts.acct.RefusedAt, e.accts.acct.LastError = "2026-11-03T10:00:00Z", c.why
+			_, err := e.run(context.Background(), e.params(nil))
+			var f *Failure
+			if !errors.As(err, &f) || f.Code != CodeRefused || f.Message != c.msg {
+				t.Fatalf("err = %v", err)
+			}
+			if e.accts.licenses != 0 || e.accts.downloads != 0 {
+				t.Fatalf("licenses %d, downloads %d", e.accts.licenses, e.accts.downloads)
+			}
+			e.tmpEmpty(t)
+		})
+	}
+	// A sign-in again that ended the refusal after the job's first read
+	// (while it waited for the library's mapping) imports.
+	e := newImportEnv(t)
+	signedIn := e.accts.acct
+	e.accts.acct.RefusedAt, e.accts.acct.LastError = "2026-11-03T10:00:00Z", audibleacct.ThrottledText
+	e.accts.acctThen = []store.AudibleAccount{signedIn}
+	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.licenses != 1 {
+		t.Fatalf("an account signed in again meanwhile: %v (licenses %d)", err, e.accts.licenses)
+	}
+
+	e = newImportEnv(t)
+	e.accts.acct.LastError = "could not list the Audible library: connection reset"
+	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.licenses != 1 {
+		t.Fatalf("an account with a poll error: %v (licenses %d)", err, e.accts.licenses)
 	}
 }
 

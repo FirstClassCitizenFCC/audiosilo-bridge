@@ -3,9 +3,15 @@ package audibleacct
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +51,7 @@ type stubService struct {
 	deregErr     error
 	customer     string
 	barrier      *sync.WaitGroup // when set, each Register waits on it after its Done
+	oldProfile   bool            // Register answers a sign-in with no profile recorded (an earlier Bridge's)
 }
 
 func (s *stubService) AuthorizeURL(mp audible.Marketplace, pkce audible.PKCE, serial string) string {
@@ -69,8 +76,12 @@ func (s *stubService) Register(_ context.Context, mp audible.Marketplace, code s
 	if cust == "" {
 		cust = stubCust
 	}
+	profile := audible.ProfileVersion
+	if s.oldProfile {
+		profile = ""
+	}
 	return audible.Credentials{AccessToken: stubAccess, RefreshToken: stubRefresh, ADPToken: stubADP, DevicePrivateKey: stubKey,
-		DeviceSerial: serial, CustomerID: cust, Marketplace: mp.Code, ExpiresAt: time.Now().Add(time.Hour).Unix()}, nil
+		DeviceSerial: serial, CustomerID: cust, Marketplace: mp.Code, ExpiresAt: time.Now().Add(time.Hour).Unix(), Profile: profile}, nil
 }
 
 func (s *stubService) Deregister(ctx context.Context, creds audible.Credentials) error {
@@ -377,6 +388,31 @@ func TestSignInAgainReplacesTheDevice(t *testing.T) {
 	}
 }
 
+// An account whose device registered on an older profile (or before the
+// profile was recorded) is flagged; signing in again records the current
+// profile, ends the flag and deregisters the old device.
+func TestSignInAgainEndsAnOldProfile(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.svc.oldProfile = true
+	a := e.signIn(t)
+	if a.DeviceProfile != "" || !OldProfile(a) {
+		t.Fatalf("an earlier Bridge's sign-in = %+v", a)
+	}
+	first, _ := e.m.credentials(a.ID)
+	e.svc.oldProfile = false
+	b := e.signIn(t)
+	if b.ID != a.ID || b.DeviceProfile != audible.ProfileVersion || OldProfile(b) {
+		t.Fatalf("signed in again = %+v", b)
+	}
+	if len(e.svc.deregistered) != 1 || e.svc.deregistered[0] != first.DeviceSerial {
+		t.Fatalf("deregistered = %v, want the old device", e.svc.deregistered)
+	}
+	if !OldProfile(store.AudibleAccount{DeviceProfile: "3.56.2/17.0/35602678"}) {
+		t.Fatal("an older recorded profile reads as current")
+	}
+}
+
 // Two sign-ins of one Amazon account finishing at once (both past Amazon's
 // registration before either looks for the account) make one account: the
 // later replaces the earlier, whose device is deregistered.
@@ -643,6 +679,66 @@ func TestLibraryAfterASignInAgainIsNoRefusal(t *testing.T) {
 	}
 }
 
+// A refusal whose device another sign-in again replaced by the time it would be
+// recorded (here: during the retry) isn't recorded on the account.
+func TestRefusalOfAReplacedDeviceIsNotRecorded(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	calls := 0
+	e.svc.library = func(c audible.Credentials) ([]source.Record, error) {
+		calls++
+		next := c
+		next.DeviceSerial = fmt.Sprintf("SERIAL-NEW-%d", calls)
+		raw, err := next.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		if err := e.vault.Set(secrets.AudibleName(a.ID), raw); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w (HTTP 401)", ErrRefused)
+	}
+	if _, err := e.m.Library(context.Background(), a.ID); !errors.Is(err, ErrRefused) || calls != 2 {
+		t.Fatalf("library = %v (calls %d)", err, calls)
+	}
+	if got, _ := e.m.Account(context.Background(), a.ID); got.RefusedAt != "" {
+		t.Fatalf("a replaced device's refusal was recorded: %+v", got)
+	}
+}
+
+// A call Audible answers ends a sign-in refusal (a transient 401/403), never a
+// device's throttling.
+func TestAnAnsweredCallEndsOnlyASignInRefusal(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	ctx := context.Background()
+	e.svc.libraryErr = fmt.Errorf("%w (HTTP 401)", ErrRefused)
+	if _, err := e.m.Title(ctx, a.ID, "B0FAKE0003"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("refused title = %v", err)
+	}
+	e.svc.libraryErr = nil
+	if _, err := e.m.Title(ctx, a.ID, "B0FAKE0003"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.m.Account(ctx, a.ID); got.RefusedAt != "" || got.LastError != "" {
+		t.Fatalf("an answered call kept the sign-in refusal: %+v", got)
+	}
+
+	e.svc.libraryErr = fmt.Errorf("license denied: %w", audible.ErrThrottled)
+	if _, err := e.m.License(ctx, a.ID, "B0FAKE0003"); !errors.Is(err, audible.ErrThrottled) {
+		t.Fatalf("throttled license = %v", err)
+	}
+	e.svc.libraryErr = nil
+	if _, err := e.m.Title(ctx, a.ID, "B0FAKE0003"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.m.Account(ctx, a.ID); !Throttled(got) {
+		t.Fatalf("an answered call ended the throttling: %+v", got)
+	}
+}
+
 // An import's title read and license use the account's sign-in, and a refusal
 // on either marks the account refused as a poll's does.
 func TestImportCallsAndTheirRefusal(t *testing.T) {
@@ -671,4 +767,93 @@ func TestImportCallsAndTheirRefusal(t *testing.T) {
 		t.Fatalf("an unknown account's title = %v", err)
 	}
 	e.noSecrets(t)
+}
+
+// A license denied to the device (audible.ErrThrottled) marks the account
+// refused with ThrottledText and answers the denial; a poll (its library still
+// lists) keeps it and a poll's error doesn't hide it; a sign-in again ends it.
+// Denied: another denial, or a title's, leaves the account alone.
+func TestThrottledLicenseRefusesTheAccountUntilASignIn(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	ctx := context.Background()
+	changed := 0
+	e.m.o.OnChange = func() { changed++ }
+
+	for _, denial := range []error{audible.ErrNoRights, audible.ErrDenied, audible.ErrNotReleased} {
+		e.svc.libraryErr = fmt.Errorf("license denied: %w", denial)
+		if _, err := e.m.License(ctx, a.ID, "B0FAKE0003"); !errors.Is(err, denial) {
+			t.Fatalf("license = %v, want %v", err, denial)
+		}
+		if got, _ := e.m.Account(ctx, a.ID); got.RefusedAt != "" || Throttled(got) || changed != 0 {
+			t.Fatalf("%v marked the account: %+v", denial, got)
+		}
+	}
+
+	e.svc.libraryErr = fmt.Errorf("license denied: %w", audible.ErrThrottled)
+	if _, err := e.m.License(ctx, a.ID, "B0FAKE0003"); !errors.Is(err, audible.ErrThrottled) || errors.Is(err, ErrRefused) {
+		t.Fatalf("throttled license = %v", err)
+	}
+	got, _ := e.m.Account(ctx, a.ID)
+	if got.RefusedAt == "" || got.LastError != ThrottledText || !Throttled(got) || changed != 1 {
+		t.Fatalf("after a throttled license = %+v (changed %d)", got, changed)
+	}
+
+	if err := e.m.Failed(ctx, a.ID, "could not read the library's books on the server"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.m.Polled(ctx, a.ID, 30, 4); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = e.m.Account(ctx, a.ID); !Throttled(got) || got.LastTitles != 30 {
+		t.Fatalf("a poll ended the throttling: %+v", got)
+	}
+
+	e.svc.libraryErr = nil
+	if b := e.signIn(t); b.ID != a.ID || b.RefusedAt != "" || b.LastError != "" || Throttled(b) {
+		t.Fatalf("signed in again = %+v", b)
+	}
+	if _, err := e.m.License(ctx, a.ID, "B0FAKE0003"); err != nil {
+		t.Fatalf("license after the sign-in again = %v", err)
+	}
+	e.noSecrets(t)
+}
+
+// Denied: the real Service's errors carry neither the account's customer id
+// nor its device serial, even in shapes no pattern knows (Amazon's answer
+// quoting them back), while errors.Is still sees the cause.
+func TestServiceRedactsTheAccountByValue(t *testing.T) {
+	t.Parallel()
+	const customer, serial = "odd-cust-value", "odd-serial-value"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/licenserequest") {
+			_, _ = fmt.Fprintf(w, `{"content_license":{"status_code":"Denied","license_denial_reasons":[
+				{"validationType":"Ownership","rejectionReason":"CustomerThrottled","message":"%s on %s being throttled"}]}}`, customer, serial)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprintf(w, `{"message":"no such customer %s for device %s"}`, customer, serial)
+	}))
+	defer ts.Close()
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	creds := audible.Credentials{ADPToken: "ADP", DevicePrivateKey: keyPEM, DeviceType: "A2CZJZGLK2JJVM", DeviceSerial: serial,
+		CustomerID: customer, Marketplace: "us"}
+	svc := Audible(audible.WithEndpoints(audible.Endpoints{Amazon: ts.URL, AmazonAPI: ts.URL, API: ts.URL}))
+	ctx := context.Background()
+	_, libErr := svc.Library(ctx, creds)
+	_, titleErr := svc.Title(ctx, creds, "B0FAKE0001")
+	_, licErr := svc.License(ctx, creds, "B0FAKE0001")
+	if !errors.Is(licErr, audible.ErrThrottled) {
+		t.Fatalf("license = %v, want ErrThrottled", licErr)
+	}
+	for _, err := range []error{libErr, titleErr, licErr} {
+		if err == nil || strings.Contains(err.Error(), customer) || strings.Contains(err.Error(), serial) {
+			t.Fatalf("err = %v", err)
+		}
+	}
 }

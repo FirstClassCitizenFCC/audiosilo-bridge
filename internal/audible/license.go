@@ -70,6 +70,11 @@ var (
 	// ErrNoRights: the account may not download the title (not owned, no
 	// download rights, a periodical or show).
 	ErrNoRights = errors.New("the account has no download rights for the title")
+	// ErrThrottled: Audible denied the license to this device
+	// (CustomerThrottled), as it does every license to a device registered
+	// with the older profile (see ProfileVersion): signing in again registers
+	// a device it licenses. Not the title's: the account's device.
+	ErrThrottled = errors.New("audible refused this device a license (customer throttled): sign in again")
 	// ErrDenied: Audible denied it for another reason.
 	ErrDenied = errors.New("audible refused a download license")
 	// ErrDRMFree: Audible granted the title only as a DRM-free MP3 (drm_type
@@ -77,9 +82,14 @@ var (
 	ErrDRMFree = errors.New("audible offers the title only as a DRM-free MP3")
 )
 
-// denialKind sorts a denied license into ErrNotReleased, ErrNoRights or
-// ErrDenied by Audible's reasons (their validation type, rejection reason and
-// message). Audible doesn't document them: the owner's real run checks this.
+// denialKind sorts a denied license into ErrThrottled, ErrNotReleased,
+// ErrNoRights or ErrDenied by Audible's reasons (their validation type,
+// rejection reason and message). Audible doesn't document them. A throttled
+// device is checked first: its denial also carries an Ownership validation
+// and two RequesterEligibility reasons (the owner's real run, Libation's
+// classifier), which would otherwise read as no rights. Only the customer's
+// throttling is: another "Throttled" (a rate limit, say) is ErrDenied, as
+// signing in again wouldn't help it.
 func denialKind(lr licenseResp) error {
 	var words []string
 	for _, r := range lr.ContentLicense.DenialReasons {
@@ -87,6 +97,8 @@ func denialKind(lr licenseResp) error {
 	}
 	all := strings.Join(words, " ")
 	switch {
+	case strings.Contains(all, "customerthrottled") || strings.Contains(all, "being throttled"):
+		return ErrThrottled
 	case strings.Contains(all, "releas") || strings.Contains(all, "preorder") || strings.Contains(all, "pre-order"):
 		return ErrNotReleased
 	case strings.Contains(all, "ownership") || strings.Contains(all, "notowned") || strings.Contains(all, "not owned") ||
@@ -97,8 +109,10 @@ func denialKind(lr licenseResp) error {
 }
 
 // denialDetail summarizes why a license was denied, for the import error message
-// ("" when Audible sent no usable detail).
-func denialDetail(lr licenseResp) string {
+// ("" when Audible sent no usable detail), its account identifiers redacted
+// (Audible's reasons quote the customer id), known ones (the account's own
+// customer id and serial) by value too.
+func denialDetail(lr licenseResp, known ...string) string {
 	var parts []string
 	for _, r := range lr.ContentLicense.DenialReasons {
 		s := strings.TrimSpace(firstNonEmptyStr(r.Message, r.ValidationType+" "+r.RejectionReason))
@@ -109,11 +123,11 @@ func denialDetail(lr licenseResp) string {
 	if len(parts) == 0 && lr.ContentLicense.StatusCode != "" && lr.ContentLicense.StatusCode != "Granted" {
 		return "status " + lr.ContentLicense.StatusCode
 	}
-	return strings.Join(parts, "; ")
+	return RedactKnown(strings.Join(parts, "; "), known...)
 }
 
 // License requests a download license for an owned book and unwraps the
-// voucher. A denial wraps ErrNotReleased, ErrNoRights or ErrDenied with
+// voucher. A denial wraps ErrThrottled, ErrNotReleased, ErrNoRights or ErrDenied with
 // Audible's reasons; a 401/403 is the account's refusal (IsRefused).
 func (c *Client) License(ctx context.Context, asin string) (License, error) {
 	body, _ := json.Marshal(map[string]any{
@@ -131,7 +145,7 @@ func (c *Client) License(ctx context.Context, asin string) (License, error) {
 	}
 	if lr.ContentLicense.LicenseResponse == "" {
 		kind := denialKind(lr)
-		if detail := denialDetail(lr); detail != "" {
+		if detail := denialDetail(lr, c.creds.CustomerID, c.creds.DeviceSerial); detail != "" {
 			return License{}, fmt.Errorf("%w: %s (%s)", kind, asin, detail)
 		}
 		return License{}, fmt.Errorf("%w: no license voucher returned for %s", kind, asin)

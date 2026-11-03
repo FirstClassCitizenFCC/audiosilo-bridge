@@ -81,14 +81,25 @@ export function mappingOf(a: AudibleAccount): AudibleMapping {
   };
 }
 
-export type AudibleState = 'refused' | 'other_server' | 'checked' | 'waiting';
+export type AudibleState = 'refused' | 'old_profile' | 'other_server' | 'checked' | 'waiting';
 
 // accountState is what an account's badge says.
 export function accountState(a: AudibleAccount): AudibleState {
   if (a.refused) return 'refused';
+  if (a.old_profile) return 'old_profile';
   if (a.other_server) return 'other_server';
   return a.last_poll_at ? 'checked' : 'waiting';
 }
+
+// needsSignIn reports whether an account must sign in again: Audible refused
+// it, or its device is on an older profile that gets no downloads.
+export function needsSignIn(a: AudibleAccount): boolean {
+  return a.refused || a.old_profile;
+}
+
+// OLD_PROFILE_TEXT explains an account on an older device profile.
+export const OLD_PROFILE_TEXT =
+  'Sign in again to keep backups working. This AudioSilo device was registered by an earlier version of the Bridge, and Audible no longer allows downloads to it. Signing in again replaces it with a new device.';
 
 // pollSummary words the last complete poll ("" before the first).
 export function pollSummary(a: AudibleAccount): string {

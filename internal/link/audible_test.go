@@ -99,11 +99,39 @@ func TestAudibleWireMirror(t *testing.T) {
 			ReleaseDate: "2026-11-20", RuntimeS: 36000, State: AudibleAvailable,
 			Match: &AudibleMatch{LibraryID: 1, Path: "A/One", How: MatchASIN}},
 		{ASIN: "B000000002", State: AudiblePreorder},
+		{ASIN: "B000000003", State: AudibleAvailable, Reason: ReasonContested, ContestedPath: "Ben Aar/LT02 - Moon over Tidewater",
+			Planned: &AudiblePlan{LibraryID: 1, Path: "Ben Aar/Lanterns/LT01 - Lanterns/Lanterns.m4b", File: "Lanterns.m4b",
+				Kind: PlanSeriesExisting, Siblings: 7, State: PlanJoins, Template: "{Author}/{Title}"}},
 	}})
 	if err != nil || n != 2 {
 		t.Fatalf("titles = %d, %v", n, err)
 	}
 	raw := calls[len(calls)-1].body
+	// The server decodes the titles strictly: every field by its exact name.
+	var sent struct {
+		Titles []map[string]json.RawMessage `json:"titles"`
+	}
+	if err := json.Unmarshal([]byte(raw), &sent); err != nil || len(sent.Titles) != 3 {
+		t.Fatalf("titles body %s: %v", raw, err)
+	}
+	if _, ok := sent.Titles[0]["contested_path"]; ok {
+		t.Errorf("an uncontested title sends contested_path: %s", raw)
+	}
+	if got := string(sent.Titles[0]["planned"]); got != "null" {
+		t.Errorf("a matched title's planned = %s, want null", got)
+	}
+	if got := string(sent.Titles[2]["contested_path"]); got != `"Ben Aar/LT02 - Moon over Tidewater"` {
+		t.Errorf("contested_path = %s", got)
+	}
+	if got, want := string(sent.Titles[2]["planned"]), `{"library_id":1,"path":"Ben Aar/Lanterns/LT01 - Lanterns/Lanterns.m4b",`+
+		`"file":"Lanterns.m4b","kind":"series_existing","siblings":7,"state":"joins","conflict":"","template":"{Author}/{Title}"}`; got != want {
+		t.Errorf("planned = %s\nwant      %s", got, want)
+	}
+	var back AudibleTitle
+	if err := json.Unmarshal(mustJSON(t, sent.Titles[2]), &back); err != nil || back.Planned == nil || back.Planned.Siblings != 7 ||
+		back.ContestedPath != "Ben Aar/LT02 - Moon over Tidewater" {
+		t.Errorf("round trip = %+v, %v", back, err)
+	}
 	for _, want := range []string{`"poll_id":"p1"`, `"final":true`, `"release_date":"2026-11-20"`, `"runtime_s":36000`,
 		`"state":"available"`, `"match":{"library_id":1,"path":"A/One","how":"asin"}`, `"match":null`, `"series":[{"name":"S","position":"1"}]`} {
 		if !strings.Contains(raw, want) {
@@ -196,4 +224,13 @@ func TestRateLimitedRetryAfter(t *testing.T) {
 			t.Errorf("Retry-After %q: wait %v, want %v..%v", tc.header, apiErr.RetryAfter, tc.min, tc.max)
 		}
 	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

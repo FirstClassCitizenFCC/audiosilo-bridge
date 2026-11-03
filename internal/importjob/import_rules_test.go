@@ -1,6 +1,7 @@
 package importjob
 
 import (
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -94,60 +95,145 @@ func TestMatcherOverMissShapes(t *testing.T) {
 	}
 }
 
+// claimsOf is the matcher's claims for recs, as the poll makes them.
+func claimsOf(books []link.LibraryBook, recs []source.Record) []Claim {
+	m := NewBookMatcher(books)
+	claims := make([]Claim, len(recs))
+	for i, r := range recs {
+		if b, score, ok := m.MatchScored(r); ok {
+			agrees, disagrees := PositionAgrees(r, b)
+			claims[i] = Claim{Path: b.Path, Score: score, Work: WorkKey(r), Agrees: agrees, Disagrees: disagrees}
+		}
+	}
+	return claims
+}
+
 // TestMatcherContestedVolumes: sub-series volumes land on the one volume the
-// library holds; KeepBest leaves it to none of them when they tie, and to the
-// best when one scores higher.
+// library holds; KeepBest leaves it to none of them when they tie and nothing
+// tells them apart, to the best when one scores higher, and to the volume
+// whose number is the book's when the book has one (a folder code's on its
+// main series included, whatever that series is called). A title whose
+// number is another volume's is plainly not here: no contest.
 func TestMatcherContestedVolumes(t *testing.T) {
 	books := []link.LibraryBook{
 		{Path: "Yrs/Fate Cycle/FC04 - Strands of Fate - Volume 1", Title: "Strands of Fate - Volume 1", Authors: []string{"Yrs Ill"}, Series: series("Fate Cycle", "4")},
 		{Path: "Val/Road to Craft/RC03", Title: "Road to Craft 3", Authors: []string{"Val Erio"}, Series: series("Road to Craft", "3")},
+		// The Rivers of London shape: the folder code's series ("L-T") is not
+		// the one Audible names, and the title names the series.
+		{Path: "Ben Aar/LT02 - Moon over Tidewater", Title: "Moon over Tidewater: Lanterns of London, Book 2", Authors: []string{"Ben Aar"},
+			Series: series("L-T", "2")},
+		// The System Universe shape: the series' opening title (named for the
+		// series) and the eighth both match the eighth's folder equally.
+		{Path: "Kai Orr/GU08 - Grid Clash", Title: "Grid Universe: Grid Clash", Authors: []string{"Kai Orr"}, Series: series("G-U", "8")},
+		// No number on the book: nothing tells two volumes apart.
+		{Path: "Ann Vey/Harbor Street/Moon over Harbor", Title: "Moon over Harbor: Lights of Harbor, Book 2", Authors: []string{"Ann Vey"},
+			Series: series("Harbor Street", "")},
 	}
 	recs := []source.Record{
 		audibleRec("B0SYN00061", "Strands of Fate: Volume 1", "Yrs Ill", "Fate Cycle", "4"),
 		audibleRec("B0SYN00062", "Strands of Fate: Volume 3", "Yrs Ill", "Fate Cycle", "6"),
 		audibleRec("B0SYN00071", "Road to Craft", "Val Erio", "Road to Craft", "1"),
 		audibleRec("B0SYN00073", "Road to Craft 3", "Val Erio", "Road to Craft", "3"),
+		audibleRec("B0SYN00081", "Lanterns of London", "Ben Aar", "Lanterns of London", "1"),
+		audibleRec("B0SYN00082", "Moon over Tidewater", "Ben Aar", "Lanterns of London", "2"),
+		audibleRec("B0SYN00091", "Grid Universe", "Kai Orr", "Grid Universe", "1"),
+		audibleRec("B0SYN00098", "Grid Clash", "Kai Orr", "Grid Universe", "8"),
+		audibleRec("B0SYN00101", "Lights of Harbor", "Ann Vey", "Lights of Harbor", "1"),
+		audibleRec("B0SYN00102", "Moon over Harbor", "Ann Vey", "Lights of Harbor", "2"),
 	}
-	m := NewBookMatcher(books)
-	claims := make([]Claim, len(recs))
-	for i, r := range recs {
-		if b, score, ok := m.MatchScored(r); ok {
-			claims[i] = Claim{Path: b.Path, Score: score, Work: WorkKey(r)}
+	claims := claimsOf(books, recs)
+	for i, c := range claims {
+		if c.Path == "" {
+			t.Fatalf("%q matched nothing (claims %+v)", recs[i].Title, claims)
 		}
 	}
-	keep := KeepBest(claims)
-	for i, want := range []bool{true, false, false, true} {
-		if keep[i] != want {
-			t.Errorf("%q: kept %v, want %v (claims %+v)", recs[i].Title, keep[i], want, claims)
+	keep, contested := KeepBest(claims)
+	for i, want := range []struct{ keep, contested bool }{
+		{true, false}, {false, false}, // FC04: volume 1 agrees, volume 3 is another number
+		{false, false}, {true, false}, // RC03
+		{false, false}, {true, false}, // LT02: book 2 by the folder code's number
+		{false, false}, {true, false}, // GU08
+		{false, true}, {false, true}, // Harbor: no number on the book, a tie
+	} {
+		if keep[i] != want.keep || contested[i] != want.contested {
+			t.Errorf("%q: kept %v contested %v, want %v %v (claims %+v)", recs[i].Title, keep[i], contested[i], want.keep, want.contested, claims)
 		}
 	}
 }
 
 func TestKeepBest(t *testing.T) {
 	cases := []struct {
-		name   string
-		claims []Claim
-		want   []bool
+		name      string
+		claims    []Claim
+		want      []bool
+		contested []bool
 	}{
-		{"one claim each", []Claim{{Path: "a", Score: 1}, {Path: "b", Score: 1.2}}, []bool{true, true}},
-		{"best score keeps", []Claim{{Path: "a", Score: 1.5, Work: "x"}, {Path: "a", Score: 2.5, Work: "y"}, {Path: "a", Score: 1, Work: "z"}}, []bool{false, true, false}},
-		{"a tie keeps none", []Claim{{Path: "a", Score: 2.5, Work: "x"}, {Path: "a", Score: 2.5, Work: "y"}}, []bool{false, false}},
-		{"a tie below the best is no matter", []Claim{{Path: "a", Score: 1, Work: "x"}, {Path: "a", Score: 1, Work: "y"}, {Path: "a", Score: 3, Work: "z"}}, []bool{false, false, true}},
-		{"the same work twice keeps both", []Claim{{Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 3, Work: "w"}}, []bool{true, true}},
-		{"the same work tied with another keeps none", []Claim{{Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 3, Work: "v"}}, []bool{false, false, false}},
-		{"no work key is never a duplicate", []Claim{{Path: "a", Score: 3}, {Path: "a", Score: 3}}, []bool{false, false}},
-		{"an ASIN match beats a title match", []Claim{{Path: "a", Score: 3, Work: "x"}, {Path: "a", Score: 10, Work: "y"}}, []bool{false, true}},
-		{"the same work below the best keeps it too", []Claim{{Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 10, Work: "w"}, {Path: "a", Score: 2, Work: "v"}}, []bool{true, true, false}},
-		{"no keeper, no same work below it", []Claim{{Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 3, Work: "v"}, {Path: "a", Score: 1, Work: "w"}}, []bool{false, false, false}},
-		{"no claim", []Claim{{}, {Path: "a", Score: 1}}, []bool{false, true}},
+		{"one claim each", []Claim{{Path: "a", Score: 1}, {Path: "b", Score: 1.2}}, []bool{true, true}, []bool{false, false}},
+		{"best score keeps", []Claim{{Path: "a", Score: 1.5, Work: "x"}, {Path: "a", Score: 2.5, Work: "y"}, {Path: "a", Score: 1, Work: "z"}}, []bool{false, true, false}, []bool{true, false, true}},
+		{"a tie keeps none", []Claim{{Path: "a", Score: 2.5, Work: "x"}, {Path: "a", Score: 2.5, Work: "y"}}, []bool{false, false}, []bool{true, true}},
+		{"a tie below the best is no matter", []Claim{{Path: "a", Score: 1, Work: "x"}, {Path: "a", Score: 1, Work: "y"}, {Path: "a", Score: 3, Work: "z"}}, []bool{false, false, true}, nil},
+		{"the same work twice keeps both", []Claim{{Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 3, Work: "w"}}, []bool{true, true}, []bool{false, false}},
+		{"the same work tied with another keeps none", []Claim{{Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 3, Work: "v"}}, []bool{false, false, false}, nil},
+		{"no work key is never a duplicate", []Claim{{Path: "a", Score: 3}, {Path: "a", Score: 3}}, []bool{false, false}, nil},
+		{"an ASIN match beats a title match", []Claim{{Path: "a", Score: 3, Work: "x"}, {Path: "a", Score: 10, Work: "y"}}, []bool{false, true}, nil},
+		{"the same work below the best keeps it too", []Claim{{Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 10, Work: "w"}, {Path: "a", Score: 2, Work: "v"}}, []bool{true, true, false}, nil},
+		{"no keeper, no same work below it", []Claim{{Path: "a", Score: 3, Work: "w"}, {Path: "a", Score: 3, Work: "v"}, {Path: "a", Score: 1, Work: "w"}}, []bool{false, false, false}, nil},
+		{"no claim", []Claim{{}, {Path: "a", Score: 1}}, []bool{false, true}, []bool{false, false}},
+		// The series position tells volumes apart.
+		{"agreeing beats a tie", []Claim{{Path: "a", Score: 2.5, Work: "x", Agrees: true}, {Path: "a", Score: 2.5, Work: "y"}}, []bool{true, false}, []bool{false, true}},
+		{"agreeing beats a higher score", []Claim{{Path: "a", Score: 3, Work: "x", Disagrees: true}, {Path: "a", Score: 2, Work: "y", Agrees: true}}, []bool{false, true}, []bool{false, false}},
+		{"an ASIN match beats agreeing", []Claim{{Path: "a", Score: 2, Work: "x", Agrees: true}, {Path: "a", Score: 10, Work: "y", Disagrees: true}}, []bool{false, true}, []bool{true, false}},
+		{"two agreeing works still contest", []Claim{{Path: "a", Score: 2, Work: "x", Agrees: true}, {Path: "a", Score: 2, Work: "y", Agrees: true}, {Path: "a", Score: 3, Work: "z", Disagrees: true}}, []bool{false, false, false}, []bool{true, true, false}},
+		{"the better of two agreeing keeps", []Claim{{Path: "a", Score: 2, Work: "x", Agrees: true}, {Path: "a", Score: 2.5, Work: "y", Agrees: true}, {Path: "a", Score: 3, Work: "z"}}, []bool{false, true, false}, []bool{true, false, true}},
+		{"a disagreeing loser is no contest", []Claim{{Path: "a", Score: 2, Work: "x", Disagrees: true}, {Path: "a", Score: 2, Work: "y", Disagrees: true}}, []bool{false, false}, []bool{false, false}},
+		{"one claim keeps whatever its number", []Claim{{Path: "a", Score: 2, Work: "x", Disagrees: true}}, []bool{true}, []bool{false}},
+		{"the agreeing work owned twice keeps both", []Claim{{Path: "a", Score: 2, Work: "w", Agrees: true}, {Path: "a", Score: 2, Work: "w", Agrees: true}, {Path: "a", Score: 2.5, Work: "v"}}, []bool{true, true, false}, []bool{false, false, true}},
 	}
 	for _, tc := range cases {
-		got := KeepBest(tc.claims)
-		for i := range tc.want {
-			if got[i] != tc.want[i] {
-				t.Errorf("%s: keep = %v, want %v", tc.name, got, tc.want)
-				break
+		keep, contested := KeepBest(tc.claims)
+		if fmt.Sprint(keep) != fmt.Sprint(tc.want) {
+			t.Errorf("%s: keep = %v, want %v", tc.name, keep, tc.want)
+		}
+		want := tc.contested
+		if want == nil { // every loser contests
+			for _, k := range tc.want {
+				want = append(want, !k)
 			}
+		}
+		if fmt.Sprint(contested) != fmt.Sprint(want) {
+			t.Errorf("%s: contested = %v, want %v", tc.name, contested, want)
+		}
+	}
+}
+
+// TestPositionAgrees: the title's number against the book's in the title's
+// series, else the book's main series (a folder code's number); a range, or
+// no number on either side, is neither.
+func TestPositionAgrees(t *testing.T) {
+	cases := []struct {
+		name            string
+		pos             string
+		book            []link.SeriesRef
+		agree, disagree bool
+	}{
+		{"the same number", "2", series("Lanterns of London", "2"), true, false},
+		{"another number", "1", series("Lanterns of London", "2"), false, true},
+		{"2 is 2.0", "2", series("Lanterns of London", "2.0"), true, false},
+		{"the main series' number", "2", series("L-T", "2"), true, false},
+		{"the main series' other number", "3", series("L-T", "2"), false, true},
+		{"the named series over the main one", "4", []link.SeriesRef{{Name: "Universe", Position: "9"}, {Name: "lanterns of london", Position: "4"}}, true, false},
+		{"the named series without a number", "4", []link.SeriesRef{{Name: "Universe", Position: "4"}, {Name: "Lanterns of London", Position: ""}}, false, false},
+		{"a range on the book", "5", series("Lanterns of London", "5-6"), false, false},
+		{"a range on the title", "5-6", series("Lanterns of London", "5"), false, false},
+		{"no number on the title", "", series("Lanterns of London", "2"), false, false},
+		{"no number on the book", "2", series("Lanterns of London", ""), false, false},
+		{"no series on the book", "2", nil, false, false},
+	}
+	for _, tc := range cases {
+		rec := audibleRec("B0POS00001", "Moon over Tidewater", "Ben Aar", "Lanterns of London", tc.pos)
+		a, d := PositionAgrees(rec, link.LibraryBook{Path: "x", Series: tc.book})
+		if a != tc.agree || d != tc.disagree {
+			t.Errorf("%s: agrees %v disagrees %v, want %v %v", tc.name, a, d, tc.agree, tc.disagree)
 		}
 	}
 }
@@ -256,7 +342,7 @@ func TestWorkKey(t *testing.T) {
 	if k := WorkKey(blank); k != "" {
 		t.Errorf("a wordless title's key = %q, want none", k)
 	}
-	if keep := KeepBest([]Claim{{Path: "a", Score: 2, Work: WorkKey(blank)}, {Path: "a", Score: 2, Work: WorkKey(blank)}}); keep[0] || keep[1] {
+	if keep, _ := KeepBest([]Claim{{Path: "a", Score: 2, Work: WorkKey(blank)}, {Path: "a", Score: 2, Work: WorkKey(blank)}}); keep[0] || keep[1] {
 		t.Errorf("two wordless titles tied on one book kept %v", keep)
 	}
 }

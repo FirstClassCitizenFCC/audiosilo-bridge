@@ -31,12 +31,13 @@ import (
 func (b *Bridge) newAudible(vault secrets.Store, db *store.DB, log *slog.Logger, server func() *link.Client,
 	serverID func() string) (*audibleacct.Manager, *audiblejob.Handler, *audiblejob.Importer) {
 	m := audibleacct.New(audibleacct.Options{Vault: vault, DB: db, Log: log, OnChange: b.Kick})
-	h := audiblejob.New(audiblejob.Options{Accounts: m, ServerID: serverID, Log: log, Server: func() audiblejob.Server {
-		if cl := server(); cl != nil {
-			return cl
-		}
-		return nil
-	}})
+	h := audiblejob.New(audiblejob.Options{Accounts: m, ServerID: serverID, Log: log, Libraries: b.libs, Mount: b.mount,
+		Server: func() audiblejob.Server {
+			if cl := server(); cl != nil {
+				return cl
+			}
+			return nil
+		}})
 	tmp := filepath.Join(b.dataDir, "audible", "tmp")
 	if err := audiblejob.SweepTmp(tmp, time.Now()); err != nil {
 		log.Warn("audible: sweeping the import's temp folder failed", "err", err)
@@ -96,7 +97,7 @@ func (b *Bridge) Audible(ctx context.Context) api.AudibleAccounts {
 			UserID: a.UserID, UserName: a.UserName, LibraryID: a.LibraryID, LibraryName: library,
 			Policy: a.Policy, Sync: a.Sync, CreatedAt: a.CreatedAt, LastOKAt: a.LastOKAt, LastPollAt: a.LastPollAt,
 			LastTitles: a.LastTitles, LastMatched: a.LastMatched, Refused: a.RefusedAt != "", RefusedAt: a.RefusedAt,
-			LastError: a.LastError, OtherServer: other})
+			LastError: a.LastError, OtherServer: other, OldProfile: audibleacct.OldProfile(a)})
 	}
 	cl := b.conn.Client()
 	out.Paired = cl != nil
@@ -220,8 +221,11 @@ func (b *Bridge) audibleSetup(ctx context.Context) setup.Audible {
 	}
 	out := setup.Audible{Accounts: len(accts)}
 	for _, a := range accts {
-		if a.RefusedAt != "" {
+		switch {
+		case a.RefusedAt != "":
 			out.Refused++
+		case audibleacct.OldProfile(a):
+			out.OldProfile++
 		}
 	}
 	return out

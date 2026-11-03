@@ -19,6 +19,12 @@ import (
 // library already holds it is the caller's question (BookMatcher).
 type PlannedItem struct {
 	RelPath string // suggested destination (folder + filename), library-relative
+	// Kind is how the book is placed: beside its series' books in the library
+	// (SeriesExisting), as the first of its series there (SeriesNew), or on its
+	// own (Standalone); Siblings is how many of its series' books the library
+	// has.
+	Kind     placement.Kind
+	Siblings int
 }
 
 // PlanOptions configures Plan.
@@ -35,41 +41,91 @@ type PlanOptions struct {
 // it mirrors the established folder/shortcode convention.
 func Plan(recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
 	items := make([]PlannedItem, 0, len(recs))
-	// authorFolders (normalized author -> existing folder spelling) so a
-	// differently-spaced author reuses its existing folder. See AuthorFolders.
-	authorFolders := AuthorFolders(opts.Books)
+	p := NewPlanner(opts.Books)
 	for _, rec := range recs {
-		var siblings []placement.Sibling
-		if strings.TrimSpace(rec.Series) != "" {
-			for _, b := range SiblingsFromBooks(opts.Books, rec.Author, rec.Series) {
-				idx, _ := SeriesPosition(b, rec.Series)
-				siblings = append(siblings, placement.Sibling{RelPath: b.Path, SeriesIndex: idx})
-			}
-		}
-		// Name by the clean book title - strip the series prefix and "(Book N)" /
-		// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
-		// Truth", not "... - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
-		clean := match.CleanTitle(rec.Title, seriesAsTitled(rec.Title, rec.Series))
-		sug, err := placement.SuggestWith(opts.Mode, opts.Template, placement.Input{
-			Author:       rec.Author,
-			Title:        clean,
-			TitleShort:   clean,
-			SeriesName:   rec.Series,
-			Sequence:     rec.Sequence,
-			HasSequence:  rec.HasSequence,
-			Filename:     rec.FileName,
-			ASIN:         rec.ASIN,
-			Narrator:     rec.Narrator,
-			Year:         rec.Year,
-			Siblings:     siblings,
-			AuthorFolder: authorFolders[match.Normalize(rec.Author)],
-		})
+		item, err := p.Plan(rec, opts.Mode, opts.Template)
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, PlannedItem{RelPath: path.Join(sug.RelPath, sug.Filename)})
+		items = append(items, item)
 	}
 	return items, nil
+}
+
+// Planner is Plan over one library's books for many records: the author
+// folders (AuthorFolders) are found once, and the books indexed by series, so
+// a record's siblings (SiblingsFromBooks, the same books in the same order)
+// cost its series' books only. Not safe for concurrent use.
+type Planner struct {
+	books         []link.LibraryBook
+	authorFolders map[string]string
+	bySeries      map[string][]int // match.NormalizeSeries(name) -> books in it, in order
+}
+
+// NewPlanner indexes books (nil is an empty library).
+func NewPlanner(books []link.LibraryBook) *Planner {
+	p := &Planner{books: books, authorFolders: AuthorFolders(books), bySeries: map[string][]int{}}
+	for i, b := range books {
+		for _, s := range b.Series {
+			k := match.NormalizeSeries(s.Name)
+			if at := p.bySeries[k]; len(at) == 0 || at[len(at)-1] != i {
+				p.bySeries[k] = append(at, i)
+			}
+		}
+	}
+	return p
+}
+
+// siblings is SiblingsFromBooks(p.books, author, series) through the index.
+func (p *Planner) siblings(author, series string) []link.LibraryBook {
+	if strings.TrimSpace(series) == "" {
+		return nil
+	}
+	var out []link.LibraryBook
+	for _, i := range p.bySeries[match.NormalizeSeries(series)] {
+		if b := p.books[i]; sameAuthor(Credit(b.Authors), author) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// Plan is rec's destination (mode and template as PlanOptions'). A template
+// that can't place it is the error, and the item still carries rec's Kind and
+// Siblings.
+func (p *Planner) Plan(rec source.Record, mode placement.Mode, template string) (PlannedItem, error) {
+	var siblings []placement.Sibling
+	for _, b := range p.siblings(rec.Author, rec.Series) {
+		idx, _ := SeriesPosition(b, rec.Series)
+		siblings = append(siblings, placement.Sibling{RelPath: b.Path, SeriesIndex: idx})
+	}
+	// Name by the clean book title - strip the series prefix and "(Book N)" /
+	// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
+	// Truth", not "... - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
+	clean := match.CleanTitle(rec.Title, seriesAsTitled(rec.Title, rec.Series))
+	in := placement.Input{
+		Author:       rec.Author,
+		Title:        clean,
+		TitleShort:   clean,
+		SeriesName:   rec.Series,
+		Sequence:     rec.Sequence,
+		HasSequence:  rec.HasSequence,
+		Filename:     rec.FileName,
+		ASIN:         rec.ASIN,
+		Narrator:     rec.Narrator,
+		Year:         rec.Year,
+		Siblings:     siblings,
+		AuthorFolder: p.authorFolders[match.Normalize(rec.Author)],
+	}
+	// placement's own rule, so a template that fails still says how the book
+	// would have been placed.
+	item := PlannedItem{Kind: placement.KindFor(in), Siblings: len(siblings)}
+	sug, err := placement.SuggestWith(mode, template, in)
+	if err != nil {
+		return item, err
+	}
+	item.RelPath, item.Kind = path.Join(sug.RelPath, sug.Filename), sug.Kind
+	return item, nil
 }
 
 // seriesAsTitled is the series name as the title opens with it, with the
@@ -273,12 +329,42 @@ func (m *BookMatcher) best(q match.Query, isRange bool) (int, float64, bool) {
 	return pass(func(i int) bool { return !m.span[i] })
 }
 
-// Claim is one record's match: the book's path, the match's score and the
-// record's work (WorkKey).
+// Claim is one record's match: the book's path, the match's score, the
+// record's work (WorkKey) and whether the record's series position agrees or
+// disagrees with the book's (PositionAgrees).
 type Claim struct {
-	Path  string
-	Score float64
-	Work  string
+	Path      string
+	Score     float64
+	Work      string
+	Agrees    bool
+	Disagrees bool
+}
+
+// PositionAgrees compares rec's series position with b's: agrees when both are
+// one number and the same, disagrees when both are one number and differ, and
+// neither when either has none (a range is none: a pack is matched by
+// MatchScored's rules). rec's is its SeriesPosition; b's is its position in
+// rec's series, else, when b is not in that series, its main series' (the
+// listing puts a folder code's number there: "PG02 - ..." is 2 whatever the
+// series is called).
+func PositionAgrees(rec source.Record, b link.LibraryBook) (agrees, disagrees bool) {
+	want, ok := parsePosition(rec.SeriesPosition)
+	if !ok || len(b.Series) == 0 {
+		return false, false
+	}
+	pos := b.Series[0].Position
+	target := match.NormalizeSeries(rec.Series)
+	for _, s := range b.Series {
+		if target != "" && match.NormalizeSeries(s.Name) == target {
+			pos = s.Position
+			break
+		}
+	}
+	got, ok := parsePosition(pos)
+	if !ok {
+		return false, false
+	}
+	return got == want, got != want
 }
 
 // WorkKey identifies the work a record is: its title (folded), its authors
@@ -320,48 +406,72 @@ func SpanMismatch(rec source.Record, b link.LibraryBook) bool {
 	})
 }
 
-// KeepBest settles books several records claimed: of the claims on one path,
-// only the single best score keeps its match, and a tie for the best keeps
-// none (the matcher can't tell which is the book, so none is called "on this
-// server"), unless every tied claim is the same work (WorkKey: one book owned
-// twice), which all keep it: dropping it would download it again. A claim of
-// the same work as the one that keeps a book keeps it too, whatever its score
-// (the edition the book's ASIN names scores higher than the other). A path one
-// record claimed keeps it. keep[i] reports whether claims[i] stands; an empty
-// Path is no claim.
-func KeepBest(claims []Claim) []bool {
-	top := map[string][]int{} // path -> the claims at its best score
+// KeepBest settles books several records claimed. Of the claims on one path:
+//   - when the best is no ASIN match (match.ScoreASIN) and some claims' series
+//     position agrees with the book's (Claim.Agrees), only those compete: the
+//     number tells the volumes of a series apart, even against a higher score
+//     (the title words of two volumes often match one folder equally);
+//   - the single best score keeps its match, and a tie for the best keeps none
+//     (the matcher can't tell which is the book, so none is called "on this
+//     server"), unless every tied claim is the same work (WorkKey: one book
+//     owned twice), which all keep it: dropping it would download it again.
+//
+// A claim of the same work as the one that keeps a book keeps it too, whatever
+// its score (the edition the book's ASIN names scores higher than the other).
+// A path one record claimed keeps it. keep[i] reports whether claims[i]
+// stands; contested[i] whether it lost a book it may well be (another title
+// kept it, or none could be told apart), which is every losing claim but one
+// whose position disagrees with the book's: that title is another volume, so
+// it is plainly not here. An empty Path is no claim.
+func KeepBest(claims []Claim) (keep, contested []bool) {
+	byPath := map[string][]int{}
 	for i, c := range claims {
-		if c.Path == "" {
-			continue
-		}
-		at := top[c.Path]
-		switch {
-		case len(at) == 0 || c.Score > claims[at[0]].Score:
-			top[c.Path] = []int{i}
-		case c.Score == claims[at[0]].Score:
-			top[c.Path] = append(at, i)
+		if c.Path != "" {
+			byPath[c.Path] = append(byPath[c.Path], i)
 		}
 	}
-	winner := map[string]int{} // path -> the claim that keeps it, -1 for none
-	for path, at := range top {
-		winner[path] = at[0]
+	keep, contested = make([]bool, len(claims)), make([]bool, len(claims))
+	for _, at := range byPath {
+		w := keeper(claims, at)
+		for _, i := range at {
+			c := claims[i]
+			keep[i] = w == i || (w >= 0 && c.Work != "" && c.Work == claims[w].Work)
+			contested[i] = !keep[i] && !c.Disagrees
+		}
+	}
+	return keep, contested
+}
+
+// keeper is the claim of at (claims on one path) that keeps the book, or -1
+// when a tie between two works keeps none (KeepBest).
+func keeper(claims []Claim, at []int) int {
+	best := func(at []int) int {
+		b := at[0]
 		for _, i := range at[1:] {
-			if claims[i].Work == "" || claims[i].Work != claims[at[0]].Work {
-				winner[path] = -1 // a tie between two works: none keeps it
-				break
+			if claims[i].Score > claims[b].Score {
+				b = i
 			}
 		}
+		return b
 	}
-	keep := make([]bool, len(claims))
-	for i, c := range claims {
-		if c.Path == "" {
-			continue
+	if claims[best(at)].Score < match.ScoreASIN {
+		var agree []int
+		for _, i := range at {
+			if claims[i].Agrees {
+				agree = append(agree, i)
+			}
 		}
-		w := winner[c.Path]
-		keep[i] = w == i || (w >= 0 && c.Work != "" && c.Work == claims[w].Work)
+		if len(agree) > 0 {
+			at = agree
+		}
 	}
-	return keep
+	b := best(at)
+	for _, i := range at {
+		if i != b && claims[i].Score == claims[b].Score && (claims[i].Work == "" || claims[i].Work != claims[b].Work) {
+			return -1 // a tie between two works: none keeps it
+		}
+	}
+	return b
 }
 
 // MatchInBooks is a one-shot match over books. For repeated matching against the

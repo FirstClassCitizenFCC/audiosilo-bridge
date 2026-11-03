@@ -1326,7 +1326,13 @@ internal/
             refused_at, last_error; NO credential (the vault's audible_<id>).
             Unique on (customer_hash, marketplace) where the hash isn't empty.
             SignInAudibleAccount upserts (a sign-in again keeps created_at and the
-            counts, clears a refusal); AudiblePolled clears refusal and error. 0007 adds podcast_shows, a credential-free cache keyed by
+            counts, clears a refusal, records device_profile); AudiblePolled clears
+            refusal and error, except a refusal whose last_error is its keep
+            argument (audibleacct.ThrottledText: a throttled device still lists);
+            AudibleAccountError leaves a refused account's reason alone; AudibleAccepted
+            ends a refusal only of the reason given (audibleacct.RefusedText). 0010 (4b owner fixes) adds audible_accounts.device_profile
+            (audible.ProfileVersion at the sign-in; '' for one made before it was
+            kept, which reads as the older profile). 0007 adds podcast_shows, a credential-free cache keyed by
             (server_id, show_id), indexed by server/library/feed hash. An empty
             library cache is rebuilt from feed.json before subscription dedupe.
             0008 adds podcast_artwork_state keyed by server/library/show, storing
@@ -1798,7 +1804,11 @@ internal/
             PutAudibleAccount / DeleteAudibleAccount (PUT/DELETE
             /bridge/audible/accounts/{account}; the delete is 204 known or not),
             PutAudibleTitles (<= MaxAudibleTitles 500 per call, poll_id + final; a
-            nil list sent as []; 404 unknown_account -> ErrUnknownAccount),
+            nil list sent as []; 404 unknown_account -> ErrUnknownAccount; each
+            AudibleTitle also carries contested_path (omitempty) and planned
+            (AudiblePlan {library_id, path, file, kind, siblings, state, conflict,
+            template}, null when matched; the Plan*/Conflict* constants), 4b owner
+            fixes, unreleased on both sides so no capability gate),
             LibraryBooks (limit <= MaxLibraryBooks 500) and Enrich (PUT
             .../enrichment?path= {"asin"}: 409 asin_set -> ErrASINSet, any 404 ->
             ErrNoBook). The server decodes titles and accounts strictly: send only
@@ -2058,6 +2068,26 @@ internal/
             reasons (a voucher that won't parse says so without its bytes),
             ErrDRMFree for a title granted only as a DRM-free MP3 (drm_type Mpeg,
             no voucher: not a denial);
+            4b owner fixes, the DEVICE PROFILE (profile.go): since about September
+            2026 Amazon denies every license (Membership/RequesterEligibility,
+            Ownership/CustomerThrottled, Client/RequesterEligibility, the customer id
+            quoted) to a device registered with the older iPhone profile (app 3.56.2,
+            iOS 15/17, software 35602678, a 32-hex serial) and grants one registered
+            with app 4.60, os 26.2, software 46000856 and a 40-character [A-Za-z0-9]
+            serial (mkb79/Audible#909 and PR #910, Libation agrees; listing still
+            works on the old one). One constant set (appVersion, osVersion,
+            softwareVersion) serves register, the token refresh and deregister;
+            NewDeviceSerial draws 40 letters and digits from crypto/rand;
+            ProfileVersion ("4.60/26.2/46000856") is recorded in Credentials.Profile
+            at Register (IsCurrentProfile; "" is an earlier sign-in). Changing the set
+            flags every account registered before it. userAgent (every signed call
+            and download) is built from the same set: "Audible/<softwareVersion>
+            CFNetwork/<cfNetworkVersion> Darwin/<darwinVersion>" (iOS 26.2's
+            3860.300.31 and 25.2.0, pinned beside osVersion and changed with it),
+            never audible-cli's old Darwin/20.6 one (mkb79/Audible
+            0.13.1 sets none on API calls). denialKind checks the
+            customer's throttling (customerthrottled, "being throttled") FIRST, as
+            ErrThrottled (a bare "Throttled", a rate limit, stays ErrDenied);
             Client.Title(asin) (GET /1.0/library/{asin}, ErrNotInLibrary on 404);
             Decrypt(ctx, ffmpeg, in, out, lic): ffmpeg -audible_key/-audible_iv -c
             copy -f ipod, its stderr redacted of key and iv (case-insensitive: ffmpeg
@@ -2098,7 +2128,19 @@ internal/
             real ones. CREDENTIALS ARE FULL AMAZON ACCOUNT ACCESS: they live only in
             the vault (sealed Credentials.Marshal JSON), never in the store, job
             params or results, logs, the heartbeat or agent staging; errors carry
-            Audible's answer, never a request body or token. The per-book key/iv are
+            Audible's answer, never a request body or token. That answer passes
+            RedactAccountIDs (redact.go) as it becomes an error (snippet, a
+            license's denial reasons): customer ids (labelled, or A + 10 or more
+            capitals with a digit), amzn1.* ids, device serials, emails and tokens
+            go (a serial: labelled, 32+ hex, or 40 letters and digits), the ASIN
+            (B0..., 10 digits) and the reason stay; RedactKnown and
+            Credentials.Redact also remove the account's own customer id and serial
+            BY VALUE (a license's denial detail; audibleacct's Service wraps every
+            error it answers with creds.Redact); audiblejob's job
+            errors and recorded poll failures pass it again, and a Failure
+            message the errors it quotes (and an unavailable reason), never its
+            library paths or titles, which the shapes would cut words out of
+            ("Basic Economics") (RedactedError keeps errors.Is). The per-book key/iv are
             in ffmpeg's argv (visible in the container's process table): accepted.
             Deps: stdlib + progress + source.
             Build tag audiblefake (never in a release build or image; fake_off.go /
@@ -2114,7 +2156,14 @@ internal/
             /auth/token; /auth/deregister (this device only, recorded); signed calls
             verified against the issued key (unknown or deregistered 401, Refuse()
             403); library paging; lastpositions 400 over LastPositionsMax (10);
-            PUT lastpositions recorded. Phase 4b (content.go): GET /1.0/library/{asin};
+            PUT lastpositions recorded. 4b owner fixes: register records each
+            device's profile (Registration: serial, app/os/software versions) and
+            licenses only the current one (ProfileApp/OS/Software, its own copy so a
+            one-sided change fails the tests, and a 40-alnum serial); any other
+            device lists its library but every license is Denied with the three
+            throttled reasons (its customer id quoted, to prove the redaction);
+            OldProfile() and POST /_fake/old-profile age every device registered so
+            far. Phase 4b (content.go): GET /1.0/library/{asin};
             POST /1.0/content/{asin}/licenserequest (Denied for not owned, a preorder
             not released, no download rights; else Granted with a voucher sealed
             from the device type + serial + customer id + asin, the key and iv
@@ -2165,13 +2214,30 @@ internal/
             through the same signed path (Manager.signed: open the sign-in, call, on
             a refusal retry once with a newer sign-in, else record it); Download
             only opens the sign-in (its 401/403 is an expired URL, the import's to
-            license again, never the account's refusal). Errors carry Amazon's or the
+            license again, never the account's refusal). 4b owner fixes: a license
+            denied as audible.ErrThrottled is a refusal too (signed retries it with a
+            newer sign-in, else records refused_at with ThrottledText and answers the
+            denial, not ErrRefused); Throttled(a) reads it; a poll keeps it, only a
+            sign-in again ends it (no new wire field: the page's refused). A refusal
+            is recorded under finishMu and only while the refused device is still the
+            account's (a sign-in again that stored a new one meanwhile isn't marked);
+            any answered signed call ends a sign-in refusal (RefusedText, a transient
+            401/403), never ThrottledText. Finish
+            records the device's profile (store device_profile from
+            Credentials.Profile); OldProfile(a) (not audible.ProfileVersion, or none)
+            flags an account that must sign in again ("Sign in again to keep
+            backups working"): the page's old_profile and the setup item
+            ("N account(s) need signing in again to keep backups working", not done;
+            optional as ever). A sign-in again of the same Amazon account replaces
+            the device and deregisters the old one (as before). Errors carry Amazon's or the
             server's answer, never a token;
             tests walk the data dir and the log for every stub secret, and the
             tagged tests run the whole life against the fake. Deps: audible, link,
             secrets, source, store.
-  audiblejob/ Phase 4a: audible.poll (light lane; params exactly {"account"}, strict;
-            the server claims it with no library). Checks the account is this
+  audiblejob/ Phase 4a: audible.poll (light lane; params {"account", "template"}
+            strict (template, the account's path template, optional, <= 1024
+            bytes; an unknown field is refused); the server claims it with no
+            library). Checks the account is this
             Bridge's and was mapped on the paired server (else fails asking to map
             it again), lists the Audible library (a refusal is the account's, the
             job just fails), reads the account's books library on the server page
@@ -2181,11 +2247,30 @@ internal/
             importjob.BookMatcher (how = asin when the book's ASIN is the title's,
             else fuzzy; a book path goes out only as "." (a library that is one
             book) or a clean path below the root, as the server takes); a book
-            several titles claimed keeps the match on the best score only
-            (importjob.KeepBest: a tie keeps none unless it is one work owned
-            twice, which all keep: dropping it would download it again), the
-            others go out unmatched with Reason link.ReasonContested ("contested",
-            on an available title; 4b's back-up-everything skips them); cuts a title's authors to 20 (the
+            several titles claimed keeps the match on the one whose series number
+            is the book's, else the best score (importjob.KeepBest, each claim's
+            Agrees/Disagrees from importjob.PositionAgrees: a tie keeps none unless
+            it is one work owned twice, which all keep: dropping it would download
+            it again), the others go out unmatched, with Reason
+            link.ReasonContested ("contested", on an available title; 4b's
+            back-up-everything skips them) and ContestedPath (the book's path,
+            contested_path, omitted otherwise), except a title whose number
+            DISAGREES with the book's (another volume: plainly not here, no
+            reason). Each unmatched title (contested included; never a matched
+            one) carries Planned (plan.go, titlePlanner): where a backup would go,
+            the import's own destination() for the same record, books and the
+            params' template (no dest_path: the console's override is checked
+            when the backup starts), {library_id, path (after spelled), file, kind
+            series_existing|series_new|standalone (the placement's), siblings
+            (the series' books listed), state new|joins|exists|error, conflict
+            (exists: file|book|audio, vacant's refusal; error: the message, path
+            and file ""), template (as the params gave it)}; joins = siblings, or
+            the path's top folder is a listed book's or (mapped) a folder at the
+            mount. Disk checks (spelled, vacant) run only when Options.Libraries
+            reports the library mapped (writable or not) at Options.Mount's path,
+            through a per-poll dirCache (each folder listed once, a folder that
+            doesn't exist never read); otherwise the books listing alone (a
+            listed book's folder is exists/book). No Amazon request. Cuts a title's authors to 20 (the
             server refuses a whole call over more), PUTs the titles in calls of 500
             under ONE poll id (job, attempt and a random suffix), the last final (an
             empty library sends one empty final call, so the server marks every
@@ -2215,7 +2300,19 @@ internal/
             not_writable (progress.park.code, Reporter.Park) and waits for it to
             come back, then runs on unparked. Then the title (preorder
             not_released, no rights / not in the library no_rights, a refusal
-            audible_refused) and the destination (Destination: dest_path FIRST, the
+            audible_refused; a license denied as audible.ErrThrottled, the device on
+            an older profile, is audible_refused with ThrottledText: "Audible
+            refused this device. Sign in to Audible again on the Bridge (Accounts):
+            that registers a new AudioSilo device Audible allows downloads to, and
+            removes this one." (never "remove it at Amazon": the new device has the
+            same name), never no_rights; the account then reads refused, and every
+            later import of it fails audible_refused at once, before the title read
+            or a license (ThrottledText for a throttled account, else the sign-in
+            refusal's; the account read again first, since a sign-in may have ended it
+            while the job waited for the mapping), after a marker's rescan-only resume,
+            until a sign-in again) and the destination (Destination, a wrapper over
+            destination(), which also returns the plan's kind and siblings and
+            which the poll's plans share: dest_path FIRST, the
             template not consulted, else the template, else Auto from the paged
             books listing's siblings, an empty author folder dropped; a last
             segment ending .m4b, .m4a or .mp4 names the file, another audio
@@ -2229,7 +2326,10 @@ internal/
             destination exists, and so is a destination inside a book the
             library already has (its folder is a listed book's, or already
             holds audio: a backup is a book of its own, and the server refuses a
-            done import whose book isn't the title's). License (denials mapped as the title's; a title
+            done import whose book isn't the title's). spelled and vacant are free
+            functions over a transfer.LibraryFS (the import's methods open the
+            mount's os.Root and call them; vacant also returns the conflict:
+            link.ConflictFile|Book|Audio; listedBook is its books-listing part). License (denials mapped as the title's; a title
             only offered as a DRM-free MP3 fails without a code: not backed up
             yet), download to <data>/audible/tmp/<acct>-<asin>.aaxc.part (free
             space: the tmp folder 2.2x the size less what the partial holds, the
@@ -2291,9 +2391,23 @@ internal/
             none, unless every tied claim is one WorkKey: folded title, folded
             author set and position, the same book owned twice, and a claim of the
             keeper's work keeps it at any score; a title that folds to nothing has
-            no key), SpanMismatch (a range record on a book with no
+            no key; 4b owner fixes: when the best is no ASIN match and some claims'
+            position agrees with the book's (Claim.Agrees), only those compete, so
+            the volume whose number is the book's keeps it even over a higher
+            score; KeepBest also returns contested: every losing claim but one
+            whose position disagrees (Claim.Disagrees)), PositionAgrees(rec, b)
+            (agrees/disagrees: rec's SeriesPosition as one number against b's
+            position in rec's series, else b's main series' (the listing puts a
+            folder code's number there, whatever that series is called); a range
+            or no number on either side is neither; MatchScored is not gated by
+            it), SpanMismatch (a range record on a book with no
             range: no enrichment), Plan(records, {Mode, Template, Books}) (destinations
-            only, each item's RelPath: siblings by tolerant author + series, AuthorFolders reusing an
+            only, each item's RelPath, Kind (placement.Kind) and Siblings (the
+            series' books listed); Planner (NewPlanner(books), Plan(rec, mode,
+            template)) is Plan for many records over one library: AuthorFolders
+            once and the books indexed by normalized series, the same siblings in
+            the same order as SiblingsFromBooks; a template error keeps the
+            item's Kind and Siblings: siblings by tolerant author + series, AuthorFolders reusing an
             existing author folder spelling; the name is match.CleanTitle with
             the series as the title opens it, article included (seriesAsTitled:
             "The Orchard Cycle: Books 1-3" is "Books 1-3", not "The  - Books 1-3"); no per-record server query; whether
@@ -2314,8 +2428,10 @@ internal/
             imported).
   transfer/ Local only (SFTP and Index were not kept): CleanRel (mapping.SafeJoin's
             rules, no empty path, no hidden (dot) segment anywhere: the server
-            never indexes one), OnDisk(root, rel) (rel as the disk spells the
-            folders of it that exist, by an exact name or os.SameFile in a listing,
+            never indexes one), OnDisk(fsys, rel) over a LibraryFS
+            (fs.ReadLinkFS + fs.ReadDirFS: RootFS(root), or the poll's caching
+            view) (rel as the disk spells the
+            folders of it that exist, by an exact name or os.SameFile in a listing (same name folded first),
             the rest as given; an Lstat error other than not-exist is an error) and
             Place (Phase 4b, hardened before it writes a library): the mapping's
             root opened first (a missing root, or a file, fails before the source

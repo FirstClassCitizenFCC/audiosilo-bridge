@@ -375,6 +375,14 @@ func TestRegisterParse(t *testing.T) {
 		if !strings.HasSuffix(sent.RegistrationData["device_name"], "%AudioSilo") {
 			t.Errorf("device_name = %q, want the AudioSilo name", sent.RegistrationData["device_name"])
 		}
+		// The current iPhone profile (mkb79/Audible PR #910): Amazon denies
+		// licenses to a device registered with the older 3.56.2 one.
+		for k, want := range map[string]string{"app_version": "4.60", "os_version": "26.2", "software_version": "46000856",
+			"device_type": "A2CZJZGLK2JJVM", "device_serial": "SER"} {
+			if got := sent.RegistrationData[k]; got != want {
+				t.Errorf("registration_data[%s] = %q, want %q", k, got, want)
+			}
+		}
 		resp := map[string]any{"response": map[string]any{"success": map[string]any{
 			"tokens": map[string]any{
 				"bearer":  map[string]any{"access_token": "AT", "refresh_token": "RT", "expires_in": "3600"},
@@ -397,8 +405,8 @@ func TestRegisterParse(t *testing.T) {
 	if creds.ADPToken != "ADP" || creds.RefreshToken != "RT" || creds.CustomerID != "amzn1.account.X" {
 		t.Fatalf("creds = %+v", creds)
 	}
-	if creds.DeviceSerial != "DS" || creds.Marketplace != "us" {
-		t.Fatalf("creds device/marketplace: %+v", creds)
+	if creds.DeviceSerial != "DS" || creds.Marketplace != "us" || creds.Profile != "4.60/26.2/46000856" || !IsCurrentProfile(creds.Profile) {
+		t.Fatalf("creds device/marketplace/profile: %+v", creds)
 	}
 	if _, err := creds.PrivateKey(); err != nil {
 		t.Fatalf("registered key not parseable: %v", err)

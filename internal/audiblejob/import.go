@@ -48,7 +48,7 @@ const (
 const (
 	CodeNotReleased    = "not_released"        // a preorder, or Audible says it isn't out
 	CodeNoRights       = "no_rights"           // not owned, no download rights, a show or periodical
-	CodeRefused        = "audible_refused"     // Audible refused the sign-in, or the license for another reason
+	CodeRefused        = "audible_refused"     // Audible refused the sign-in, the device (throttled), or the license for another reason
 	CodeNotWritable    = "not_writable"        // not the account's library, not a checked writable mapping, or no valid path there
 	CodeExists         = "exists"              // a different file is at the destination
 	CodeDiskFull       = "disk_full"           // the Bridge's temp space or the library is short of room
@@ -75,7 +75,9 @@ const downloadAttempts = 3
 const mappingPoll = time.Second
 
 // Failure is a failed import's result and error: a code from the list above
-// and a sentence for the console. It never holds a key, an iv or a URL.
+// and a sentence for the console. It never holds a key, an iv or a URL, nor an
+// Amazon account identifier (fail redacts the errors it quotes; Amazon's other
+// text, an unavailable reason, is redacted where it is quoted).
 type Failure struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -83,9 +85,33 @@ type Failure struct {
 
 func (f *Failure) Error() string { return f.Message }
 
+// fail is a coded failure. An error among args (where Amazon's answer reaches
+// a message: a license's denial, an HTTP error) passes audible.RedactedError;
+// the rest (library paths, book titles, names, counts) are the Bridge's own
+// and stay whole, since the redactor's shapes would cut words out of a title
+// ("Basic Economics" reads as a Basic credential).
 func fail(code, format string, args ...any) *Failure {
-	return &Failure{Code: code, Message: fmt.Sprintf(format, args...)}
+	quoted := make([]any, len(args))
+	for i, a := range args {
+		if err, ok := a.(error); ok {
+			a = audible.RedactedError(err)
+		}
+		quoted[i] = a
+	}
+	return &Failure{Code: code, Message: fmt.Sprintf(format, quoted...)}
 }
+
+// ThrottledText is an import's message (code audible_refused) when Audible
+// denies the license to the account's device (audible.ErrThrottled), as it
+// does a device registered with an older profile. Signing in again removes the
+// old device itself (audibleacct.Finish), and the new one carries the same
+// name, so the message never asks for one to be removed at Amazon by hand.
+const ThrottledText = "Audible refused this device. Sign in to Audible again on the Bridge (Accounts): " +
+	"that registers a new AudioSilo device Audible allows downloads to, and removes this one."
+
+// throttledDevice is the failure when Audible denies the account's device its
+// licenses (ThrottledText).
+func throttledDevice() *Failure { return fail(CodeRefused, "%s", ThrottledText) }
 
 // refusedSignIn is the failure when Audible refuses the account's sign-in.
 func refusedSignIn() *Failure {
@@ -271,7 +297,9 @@ func (h *Importer) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (a
 		return f, f
 	}
 	if err != nil {
-		return nil, err
+		// Belt and braces: the audible client redacts Amazon's text where it
+		// becomes an error, and the job's error passes the same redactor.
+		return nil, audible.RedactedError(err)
 	}
 	return res, nil
 }
@@ -340,6 +368,23 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, earlier.installed(), marker)
 	}
 
+	// A refused account fails here, before asking Audible anything: each queued
+	// import would only be refused in turn (a device denied licenses, for one,
+	// stays denied) until the owner signs in again, which ends the refusal.
+	// Read again: the job may have waited for the library's mapping, and a
+	// sign-in again meanwhile ended the refusal the first read saw.
+	if acct.RefusedAt != "" {
+		if acct, err = h.o.Accounts.Account(ctx, acct.ID); err != nil {
+			return nil, err
+		}
+	}
+	if acct.RefusedAt != "" {
+		if audibleacct.Throttled(acct) {
+			return nil, throttledDevice()
+		}
+		return nil, refusedSignIn()
+	}
+
 	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Reading the title from Audible"})
 	rec, err := h.o.Accounts.Title(ctx, acct.ID, p.ASIN)
 	switch {
@@ -350,9 +395,9 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	case err != nil:
 		return nil, fmt.Errorf("reading the title from Audible: %w", err)
 	case rec.Preorder:
-		return nil, fail(CodeNotReleased, "The title isn't released yet (%s).", rec.UnavailableReason)
+		return nil, fail(CodeNotReleased, "The title isn't released yet (%s).", audible.RedactAccountIDs(rec.UnavailableReason))
 	case strings.TrimSpace(rec.UnavailableReason) != "":
-		return nil, fail(CodeNoRights, "Audible won't let the account download the title: %s.", rec.UnavailableReason)
+		return nil, fail(CodeNoRights, "Audible won't let the account download the title: %s.", audible.RedactAccountIDs(rec.UnavailableReason))
 	}
 	rec.ASIN = p.ASIN
 
@@ -732,7 +777,13 @@ func (h *Importer) spelled(mount, rel string) (string, error) {
 		return "", fail(CodeNotWritable, "The Bridge can't open the library at its mount: %v", err)
 	}
 	defer func() { _ = root.Close() }()
-	got, err := transfer.OnDisk(root, rel)
+	return spelled(transfer.RootFS(root), rel)
+}
+
+// spelled is Importer.spelled over the library's files (a poll's plans read
+// them through a view that lists each folder once).
+func spelled(fsys transfer.LibraryFS, rel string) (string, error) {
+	got, err := transfer.OnDisk(fsys, rel)
 	if err != nil {
 		return "", fail(CodeNotWritable, "The Bridge can't place the book at %s in the library: %v", rel, err)
 	}
@@ -753,35 +804,66 @@ func (h *Importer) vacant(mount, rel string, books []link.LibraryBook) error {
 		return fail(CodeNotWritable, "The Bridge can't open the library at its mount: %v", err)
 	}
 	defer func() { _ = root.Close() }()
-	_, err = root.Lstat(rel)
+	_, err = vacant(transfer.RootFS(root), rel, bookPaths(books))
+	return err
+}
+
+// bookPaths is each listed book's title by its path.
+func bookPaths(books []link.LibraryBook) map[string]string {
+	out := make(map[string]string, len(books))
+	for _, b := range books {
+		if _, ok := out[b.Path]; !ok {
+			out[b.Path] = b.Title
+		}
+	}
+	return out
+}
+
+// listedBook is the listed book (books: bookPaths) a destination rel is in or
+// is: its folder's, or rel's own. A file at the library's root is in none.
+func listedBook(rel string, books map[string]string) (at, title string, ok bool) {
+	dir := path.Dir(rel)
+	if dir == "." {
+		return "", "", false // loose files at the library's root are books of their own
+	}
+	for _, at := range []string{dir, rel} {
+		if title, ok := books[at]; ok {
+			return dir, title, true
+		}
+	}
+	return "", "", false
+}
+
+// vacant is Importer.vacant over the library's files, with the conflict that
+// makes rel exists (link.ConflictFile, ConflictBook or ConflictAudio).
+func vacant(fsys transfer.LibraryFS, rel string, books map[string]string) (string, error) {
+	_, err := fsys.Lstat(rel)
 	switch {
 	case err == nil:
-		return fail(CodeExists, "A file is already at %s: nothing was overwritten. Choose another destination, or move that file.", rel)
+		return link.ConflictFile, fail(CodeExists, "A file is already at %s: nothing was overwritten. Choose another destination, or move that file.", rel)
 	case !errors.Is(err, fs.ErrNotExist):
-		return fail(CodeNotWritable, "The Bridge can't place the book at %s in the library: %v", rel, err)
+		return "", fail(CodeNotWritable, "The Bridge can't place the book at %s in the library: %v", rel, err)
+	}
+	if dir, title, ok := listedBook(rel, books); ok {
+		return link.ConflictBook, fail(CodeExists, "%s is already the library's book %q: a backup goes in a folder of its own. Choose another destination.", dir, title)
 	}
 	dir := path.Dir(rel)
 	if dir == "." {
-		return nil // loose files at the library's root are books of their own
+		return "", nil
 	}
-	for _, b := range books {
-		if b.Path == dir || b.Path == rel {
-			return fail(CodeExists, "%s is already the library's book %q: a backup goes in a folder of its own. Choose another destination.", dir, b.Title)
-		}
-	}
-	entries, err := fs.ReadDir(root.FS(), dir)
+	entries, err := fsys.ReadDir(dir)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return nil
+		return "", nil
 	case err != nil:
-		return fail(CodeNotWritable, "The Bridge can't read the folder %s in the library: %v", dir, err)
+		return "", fail(CodeNotWritable, "The Bridge can't read the folder %s in the library: %v", dir, err)
 	}
 	for _, e := range entries {
 		if ext := strings.ToLower(path.Ext(e.Name())); !e.IsDir() && (mp4Names[ext] || otherAudio[ext]) {
-			return fail(CodeExists, "%s already holds audio (%s), a book of its own: a backup goes in a folder of its own. Choose another destination.", dir, e.Name())
+			return link.ConflictAudio, fail(CodeExists, "%s already holds audio (%s), a book of its own: a backup goes in a folder of its own. Choose another destination.", dir, e.Name())
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // license asks Audible for the title's license, saying why it was denied.
@@ -794,6 +876,9 @@ func (h *Importer) license(ctx context.Context, account, asin string) (audible.L
 		return audible.License{}, ctx.Err()
 	case errors.Is(err, audibleacct.ErrRefused):
 		return audible.License{}, refusedSignIn()
+	case errors.Is(err, audible.ErrThrottled):
+		// The account's device, not the title: the message says how to fix it.
+		return audible.License{}, throttledDevice()
 	case errors.Is(err, audible.ErrNotReleased):
 		return audible.License{}, fail(CodeNotReleased, "Audible says the title isn't released yet: %v", err)
 	case errors.Is(err, audible.ErrNoRights):
@@ -938,31 +1023,45 @@ func (h *Importer) rescan(ctx context.Context, srv ImportServer, libraryID int64
 // An unusable result (a "..", an absolute path, a hidden name) is
 // not_writable.
 func Destination(p ImportParams, rec source.Record, books []link.LibraryBook) (string, error) {
+	item, err := destination(p, rec, importjob.NewPlanner(books))
+	return item.RelPath, err
+}
+
+// destination is Destination over the library's books in a planner (a poll
+// plans many titles over one), with the plan's Kind and Siblings, which an
+// error keeps (RelPath is then ""). A dest_path is no plan: only its RelPath
+// is set.
+func destination(p ImportParams, rec source.Record, planner *importjob.Planner) (importjob.PlannedItem, error) {
+	var item importjob.PlannedItem
 	rel := strings.TrimSpace(p.DestPath)
 	if rel == "" {
 		mode, tmpl := placement.ModeAuto, strings.TrimSpace(p.Template)
 		if tmpl != "" {
 			mode = placement.ModeTemplate
 		}
-		items, err := importjob.Plan([]source.Record{rec}, importjob.PlanOptions{Mode: mode, Template: tmpl, Books: books})
+		planned, err := planner.Plan(rec, mode, tmpl)
 		if err != nil {
-			return "", fail(CodeNotWritable, "The account's path template can't place the title: %v", err)
+			return planned, fail(CodeNotWritable, "The account's path template can't place the title: %v", err)
 		}
 		// A title without an author leaves Auto an empty first folder
 		// ("/Title/Title.m4b"): it goes, as a template's empty folders do.
-		rel = strings.TrimLeft(items[0].RelPath, "/")
+		item, rel = planned, strings.TrimLeft(planned.RelPath, "/")
 		if tmpl == "" {
-			return cleanDest(rel) // Auto names the file
+			item.RelPath, err = cleanDest(rel) // Auto names the file
+			return item, err
 		}
 	}
+	item.RelPath = ""
 	switch ext := strings.ToLower(path.Ext(rel)); {
 	case mp4Names[ext]:
 	case otherAudio[ext]:
-		return "", fail(CodeNotWritable, "The destination %q names a %s file, but the backup is an M4B: end it in .m4b, or name a folder.", rel, ext)
+		return item, fail(CodeNotWritable, "The destination %q names a %s file, but the backup is an M4B: end it in .m4b, or name a folder.", rel, ext)
 	default:
 		rel = path.Join(rel, rec.FileName)
 	}
-	return cleanDest(rel)
+	var err error
+	item.RelPath, err = cleanDest(rel)
+	return item, err
 }
 
 // cleanDest is rel through transfer.CleanRel, refused as not_writable.

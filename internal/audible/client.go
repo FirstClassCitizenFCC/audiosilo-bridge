@@ -107,10 +107,19 @@ func (e *httpError) Error() string {
 	return fmt.Sprintf("%s %s: HTTP %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
 }
 
+// snippet is the start of an Amazon answer for an error, its account
+// identifiers redacted (RedactAccountIDs) before it is cut, so a cut never
+// leaves part of an id behind.
 func snippet(b []byte) string {
 	const max = 200
-	if len(b) > max {
-		return string(b[:max]) + "…"
+	// Redact a bounded head: an error body is small, but the read allows 64 MiB.
+	const head = 4096
+	if len(b) > head {
+		b = b[:head]
 	}
-	return string(b)
+	s := RedactAccountIDs(string(b))
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
 }

@@ -479,7 +479,8 @@ func TestDeregisterRefreshesFirst(t *testing.T) {
 		switch r.URL.Path {
 		case "/auth/token":
 			_ = r.ParseForm()
-			if r.PostForm.Get("source_token") != "RT" || r.PostForm.Get("requested_token_type") != "access_token" {
+			if r.PostForm.Get("source_token") != "RT" || r.PostForm.Get("requested_token_type") != "access_token" ||
+				r.PostForm.Get("app_version") != appVersion {
 				t.Errorf("refresh form = %v", r.PostForm)
 			}
 			_, _ = io.WriteString(w, `{"access_token":"AT2","expires_in":3600}`)

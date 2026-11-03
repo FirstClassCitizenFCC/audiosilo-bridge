@@ -401,3 +401,25 @@ func TestHandlerShape(t *testing.T) {
 		t.Fatalf("poll id %q", id)
 	}
 }
+
+// amazonRefusal is a real refusal's shape with a made-up customer id.
+const amazonRefusal = "Customer is not part of any plans; Customer id [A1B2C3D4E5F6G7] being throttled; " +
+	"urn:cdo:AudibleApiExternalRouterService:Prod:Default[AAA], does not has access to asin[B00H3R0B0W]."
+
+// Denied: Amazon's text reaching the poll unredacted (belt and braces: the
+// client redacts it first) leaves the customer id out of the job's error and
+// the account's recorded failure; the reason stays.
+func TestPollFailureRedactsAccountIDs(t *testing.T) {
+	t.Parallel()
+	accts := &stubAccounts{acct: account(), libErr: errors.New(amazonRefusal)}
+	h := setup(t, &fakeServer{pageSize: 500}, accts)
+	_, err := run(t, h, "acct0001")
+	if err == nil || len(accts.failed) != 1 {
+		t.Fatalf("a failure = %v, %v", err, accts.failed)
+	}
+	for _, s := range []string{err.Error(), accts.failed[0]} {
+		if strings.Contains(s, "A1B2C3D4E5F6G7") || !strings.Contains(s, "being throttled") || !strings.Contains(s, "B00H3R0B0W") {
+			t.Fatalf("not redacted, or the reason lost: %s", s)
+		}
+	}
+}
