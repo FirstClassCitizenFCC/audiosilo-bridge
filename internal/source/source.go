@@ -1,14 +1,11 @@
-// Package source discovers importable audiobooks and normalizes their metadata.
-// A Source yields Records that point at local files (a folder walk or drag-drop);
-// a Source that must fetch bytes first (Audible) also implements Acquirer.
+// Package source holds Record, the normalized metadata of one importable
+// audiobook (an Audible title), which matching and placement read.
 package source
-
-import "context"
 
 // Record is normalized metadata for one importable audiobook file.
 type Record struct {
-	SrcPath    string // absolute path on this machine ("" until Acquire for fetch sources)
-	FileName   string // destination file name (for fetch sources where SrcPath is empty)
+	SrcPath    string // a local file's path ("" for an Audible title; FileName names it)
+	FileName   string // destination file name (Plan falls back to SrcPath's base)
 	Title      string
 	TitleShort string
 	Author     string
@@ -34,29 +31,10 @@ type Record struct {
 	Key        string // dedup/resume key: ASIN if present, else the basename
 	// UnavailableReason, when non-empty, says why this record can't be acquired
 	// (e.g. an Audible periodical or a title without download rights). File-based
-	// sources leave it empty; importjob.Run fails such records with the reason
-	// instead of attempting them.
+	// sources leave it empty; audible.import fails such a title with the reason
+	// instead of asking for a license.
 	UnavailableReason string
 	// Preorder: the record is unavailable because it isn't released yet (its
 	// UnavailableReason says so in words).
 	Preorder bool
-}
-
-// Source discovers importable audiobooks.
-type Source interface {
-	Name() string
-	Discover(ctx context.Context) ([]Record, error)
-}
-
-// ProgressFunc reports sub-progress of an Acquire. stage is "downloading" (copied /
-// total bytes; total is -1 when unknown) or "decrypting" (removing DRM; copied/total
-// are 0, it has no byte progress). It may be called many times; nil is allowed.
-type ProgressFunc func(stage string, copied, total int64)
-
-// Acquirer fetches a record's bytes to a local path before transfer, returning a
-// cleanup to remove the temp file afterward. File-based sources don't implement it
-// (their Record.SrcPath already points at a local file). onProgress (may be nil)
-// reports the download/decrypt sub-stages.
-type Acquirer interface {
-	Acquire(ctx context.Context, r Record, onProgress ProgressFunc) (localPath string, cleanup func(), err error)
 }
