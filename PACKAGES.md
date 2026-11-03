@@ -2203,7 +2203,12 @@ internal/
             offline_url_expired), decrypt (audible.Decrypt to .m4b), install
             (transfer.Local.Place), rescan (the placed file; the server answers the
             book path, retried 3 times; failing says the book is placed), enrich
-            (the ASIN; asin_set is enriched false, no failure). Result {library_id,
+            (the ASIN; asin_set is enriched false, no failure; 429s waited out as
+            the poll's enrichment does, limitWait, then enriched false; a file
+            that joins a book the library had, rel inside its folder, enriches it
+            only when the BookMatcher picks it for the title and not SpanMismatch,
+            so a pack placed as a pack is enriched but never a single volume it
+            joined; the verdict rides in the placement marker as no_enrich). Result {library_id,
             path (the book's, from the rescan), files [{path, size}], bytes,
             enriched}; a failure is Failure {code, message} as both result and
             error. The license's key and iv live in memory and ffmpeg's argv only:

@@ -327,7 +327,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	// job goes on from the rescan instead of failing exists.
 	marker := h.markerPath(acct.ID, p.ASIN)
 	if m, ok := readPlaced(marker, lib.ID, mount); ok {
-		return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, m.Path, m.Size, true, marker)
+		return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, m.Path, m.Size, true, !m.NoEnrich, marker)
 	}
 
 	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Reading the title from Audible"})
@@ -357,6 +357,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	if err := h.vacant(mount, rel); err != nil {
 		return nil, err
 	}
+	enrich := enrichable(rec, books, rel)
 
 	lic, err := h.license(ctx, acct.ID, p.ASIN)
 	if err != nil {
@@ -400,32 +401,59 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		return nil, fmt.Errorf("copying the book into the library: %w", err)
 	}
 
-	if err := writePlaced(marker, lib.ID, mount, placed.RelPath); err != nil {
+	if err := writePlaced(marker, lib.ID, mount, placed.RelPath, !enrich); err != nil {
 		h.o.Log.Warn("audible: recording an imported book's placement failed", "account", acct.ID, "asin", p.ASIN, "err", err)
 	}
-	return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, placed.RelPath, placed.Size, placed.AlreadyPresent, marker)
+	return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, placed.RelPath, placed.Size, placed.AlreadyPresent, enrich, marker)
 }
 
-// finish is the steps after the install: the rescan, the ASIN and the result.
-// The placement marker goes once the result is made.
+// enrichable reports whether the book the title's file lands in at rel may
+// take the title's ASIN. A new book is the title itself (a pack placed as a
+// pack included). A file that joins a book the library already had (rel is
+// inside its folder) gives it the ASIN only under the poll's rule: the
+// matcher over the library picks that book for the title, and the title
+// doesn't span books the book doesn't (importjob.SpanMismatch), so an omnibus
+// never names a single volume and a title never names another book.
+func enrichable(rec source.Record, books []link.LibraryBook, rel string) bool {
+	joined, ok := bookAt(books, path.Dir(rel))
+	if !ok {
+		return true
+	}
+	b, matched := importjob.NewBookMatcher(books).Match(rec)
+	return matched && b.Path == joined.Path && !importjob.SpanMismatch(rec, joined)
+}
+
+// bookAt is the library's book whose folder is dir or holds it (the deepest).
+func bookAt(books []link.LibraryBook, dir string) (link.LibraryBook, bool) {
+	var best link.LibraryBook
+	found := false
+	for _, b := range books {
+		if (b.Path == dir || strings.HasPrefix(dir, b.Path+"/")) && (!found || len(b.Path) > len(best.Path)) {
+			best, found = b, true
+		}
+	}
+	return best, found
+}
+
+// finish is the steps after the install: the rescan, the ASIN (when enrich)
+// and the result. The placement marker goes once the result is made.
 func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportServer, account, asin string, libraryID int64,
-	rel string, size int64, already bool, marker string) (*ImportResult, error) {
+	rel string, size int64, already, enrich bool, marker string) (*ImportResult, error) {
 	h.report(rep, jobs.Progress{Step: StepRescan, Message: "Asking the server to index the book"})
 	bookPath, err := h.rescan(ctx, srv, libraryID, rel)
 	if err != nil {
 		return nil, h.quiet(ctx, fmt.Errorf("the book is in the library at %s, but the server couldn't index it: %w", rel, err))
 	}
 
-	h.report(rep, jobs.Progress{Step: StepEnrich, Message: "Adding the title's ASIN to the book"})
 	enriched := false
-	switch err := srv.Enrich(ctx, libraryID, bookPath, asin); {
-	case err == nil:
-		enriched = true
-	case errors.Is(err, link.ErrASINSet), errors.Is(err, link.ErrNoBook):
-	case ctx.Err() != nil:
-		return nil, ctx.Err()
-	default:
-		h.o.Log.Warn("audible: adding an imported book's ASIN failed", "account", account, "library", libraryID, "err", err)
+	if enrich {
+		h.report(rep, jobs.Progress{Step: StepEnrich, Message: "Adding the title's ASIN to the book"})
+		if enriched, err = h.enrichPlaced(ctx, rep, srv, account, libraryID, bookPath, asin); err != nil {
+			return nil, err
+		}
+	} else {
+		h.o.Log.Info("audible: the imported file joined a book that isn't the title: its ASIN isn't added",
+			"account", account, "asin", asin, "library", libraryID, "path", bookPath)
 	}
 	h.o.Log.Info("audible: imported", "account", account, "asin", asin, "library", libraryID, "path", bookPath,
 		"bytes", size, "already_there", already, "enriched", enriched)
@@ -434,14 +462,50 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 		Bytes: size, Enriched: enriched}, nil
 }
 
+// enrichPlaced gives the imported book its title's ASIN, waiting out the
+// server's 429s as the poll's enrichment does (limitWait); a 429 it gives up
+// on, an ASIN set meanwhile or a moved book is no failure, only no ASIN.
+func (h *Importer) enrichPlaced(ctx context.Context, rep *jobs.Reporter, srv ImportServer, account string, libraryID int64,
+	bookPath, asin string) (bool, error) {
+	for limited := 0; ; {
+		err := srv.Enrich(ctx, libraryID, bookPath, asin)
+		if retry, ok := rateLimited(err); ok {
+			limited++
+			wait, ok := limitWait(retry, limited)
+			if !ok {
+				h.o.Log.Info("audible: the server kept refusing an imported book's ASIN (429): the book is placed without it",
+					"account", account, "library", libraryID, "path", bookPath)
+				return false, nil
+			}
+			h.report(rep, jobs.Progress{Step: StepEnrich, Message: "The server asked the Bridge to slow down: waiting"})
+			if err := h.o.Wait(ctx, wait); err != nil {
+				return false, err
+			}
+			continue
+		}
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, link.ErrASINSet), errors.Is(err, link.ErrNoBook):
+		case ctx.Err() != nil:
+			return false, ctx.Err()
+		default:
+			h.o.Log.Warn("audible: adding an imported book's ASIN failed", "account", account, "library", libraryID, "err", err)
+		}
+		return false, nil
+	}
+}
+
 // placedMarker is what an install recorded: the file it placed, with the size
 // and modification time it had, so a retry knows the library still holds
-// exactly that file (and nothing an administrator put there since).
+// exactly that file (and nothing an administrator put there since), and
+// whether the book it landed in may take the title's ASIN (enrichable).
 type placedMarker struct {
 	LibraryID int64  `json:"library_id"`
 	Path      string `json:"path"`
 	Size      int64  `json:"size"`
 	ModTime   int64  `json:"mtime_ns"`
+	NoEnrich  bool   `json:"no_enrich,omitempty"`
 }
 
 // markerPath is the job's placement marker, beside its temp files.
@@ -453,12 +517,12 @@ func (h *Importer) markerPath(account, asin string) string {
 const placedSuffix = ".placed.json"
 
 // writePlaced records the file an install placed at rel.
-func writePlaced(marker string, libraryID int64, mount, rel string) error {
+func writePlaced(marker string, libraryID int64, mount, rel string, noEnrich bool) error {
 	st, err := placedStat(mount, rel)
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(placedMarker{LibraryID: libraryID, Path: rel, Size: st.Size(), ModTime: st.ModTime().UnixNano()})
+	b, err := json.Marshal(placedMarker{LibraryID: libraryID, Path: rel, Size: st.Size(), ModTime: st.ModTime().UnixNano(), NoEnrich: noEnrich})
 	if err != nil {
 		return err
 	}

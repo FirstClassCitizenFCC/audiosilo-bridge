@@ -418,7 +418,9 @@ against the partial's state file; 2.2x free there, 1.1x in the library, else
 `disk_full`; one new license on an expired URL, then `offline_url_expired`),
 decrypted by ffmpeg `-c copy` to .m4b, placed (Auto from the server's books
 listing, or the template / `dest_path`), installed with `transfer.Local` (never
-replacing: `exists`), a rescan and the ASIN enriched. A stop keeps the partial for
+replacing: `exists`), a rescan and the ASIN enriched (paced on 429 like the poll; a
+file that joins an existing book enriches it only under the poll's matcher and
+`SpanMismatch` rule). A stop keeps the partial for
 the next start (swept after 7 days), a cancel or failure deletes it. The fake
 serves a plain .m4b as the AAXC (ffmpeg passes an unencrypted MP4 through with the
 key set) with Range, a cut and an expiry. No migration.

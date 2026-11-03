@@ -128,6 +128,8 @@ type stubImportServer struct {
 	rescanned []string
 	enriched  []string
 	enrichErr error
+	// enrichErrs answer the enrichment PUTs in turn before enrichErr does.
+	enrichErrs []error
 }
 
 func (s *stubImportServer) LibraryBooks(_ context.Context, _ int64, _ string, _ int) (*link.LibraryBooks, error) {
@@ -152,6 +154,11 @@ func (s *stubImportServer) Enrich(_ context.Context, _ int64, p, asin string) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.enriched = append(s.enriched, p+"="+asin)
+	if len(s.enrichErrs) > 0 {
+		err := s.enrichErrs[0]
+		s.enrichErrs = s.enrichErrs[1:]
+		return err
+	}
 	return s.enrichErr
 }
 
