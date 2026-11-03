@@ -62,12 +62,29 @@ func TestDenialKind(t *testing.T) {
 		{reason("Ownership", "ContentEligibility", ""), ErrNoRights},
 		{reason("", "NotOwned", ""), ErrNoRights},
 		{reason("Consumption", "Throttled", "slow down"), ErrDenied},
+		// A throttled device (an older profile): its Ownership and eligibility
+		// reasons don't make it no_rights.
+		{reason("Ownership", "CustomerThrottled", ""), ErrThrottled},
+		{reason("", "", "Customer id [A1B2C3D4E5F6G7] being throttled"), ErrThrottled},
+		{throttled(), ErrThrottled},
 		{licenseResp{}, ErrDenied},
 	} {
 		if got := denialKind(c.lr); !errors.Is(got, c.want) {
 			t.Errorf("%+v = %v, want %v", c.lr.ContentLicense.DenialReasons, got, c.want)
 		}
 	}
+}
+
+// throttled is the denial Amazon sends a device on the older profile: three
+// reasons, one quoting the customer id (edge jobs 594/595, Libation's
+// classifier tests).
+func throttled() licenseResp {
+	var lr licenseResp
+	_ = json.Unmarshal([]byte(`{"content_license":{"status_code":"Denied","license_denial_reasons":[
+		{"validationType":"Membership","rejectionReason":"RequesterEligibility","message":"Customer is not part of any plans"},
+		{"validationType":"Ownership","rejectionReason":"CustomerThrottled","message":"Customer id [A1B2C3D4E5F6G7] being throttled"},
+		{"validationType":"Client","rejectionReason":"RequesterEligibility","message":"urn:cdo:AudibleApiExternalRouterService:Prod:Default[AAA], does not has access to asin[B00H3R0B0W]"}]}}`), &lr)
+	return lr
 }
 
 // ffmpeg echoes an option's value when it refuses it: the error carries

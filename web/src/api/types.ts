@@ -476,6 +476,9 @@ export interface AudibleAccount {
   last_error: string;
   // The mapping was recorded on another server than the one paired now.
   other_server: boolean;
+  // The account's device registered with an older device profile, so Audible
+  // refuses its downloads: sign in again to keep backups working.
+  old_profile: boolean;
 }
 
 // api.AudibleUser: who an account may be mapped to.

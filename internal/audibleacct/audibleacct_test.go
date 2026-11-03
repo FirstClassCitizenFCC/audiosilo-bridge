@@ -3,9 +3,15 @@ package audibleacct
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +51,7 @@ type stubService struct {
 	deregErr     error
 	customer     string
 	barrier      *sync.WaitGroup // when set, each Register waits on it after its Done
+	oldProfile   bool            // Register answers a sign-in with no profile recorded (an earlier Bridge's)
 }
 
 func (s *stubService) AuthorizeURL(mp audible.Marketplace, pkce audible.PKCE, serial string) string {
@@ -69,8 +76,12 @@ func (s *stubService) Register(_ context.Context, mp audible.Marketplace, code s
 	if cust == "" {
 		cust = stubCust
 	}
+	profile := audible.ProfileVersion
+	if s.oldProfile {
+		profile = ""
+	}
 	return audible.Credentials{AccessToken: stubAccess, RefreshToken: stubRefresh, ADPToken: stubADP, DevicePrivateKey: stubKey,
-		DeviceSerial: serial, CustomerID: cust, Marketplace: mp.Code, ExpiresAt: time.Now().Add(time.Hour).Unix()}, nil
+		DeviceSerial: serial, CustomerID: cust, Marketplace: mp.Code, ExpiresAt: time.Now().Add(time.Hour).Unix(), Profile: profile}, nil
 }
 
 func (s *stubService) Deregister(ctx context.Context, creds audible.Credentials) error {
@@ -377,6 +388,31 @@ func TestSignInAgainReplacesTheDevice(t *testing.T) {
 	}
 }
 
+// An account whose device registered on an older profile (or before the
+// profile was recorded) is flagged; signing in again records the current
+// profile, ends the flag and deregisters the old device.
+func TestSignInAgainEndsAnOldProfile(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.svc.oldProfile = true
+	a := e.signIn(t)
+	if a.DeviceProfile != "" || !OldProfile(a) {
+		t.Fatalf("an earlier Bridge's sign-in = %+v", a)
+	}
+	first, _ := e.m.credentials(a.ID)
+	e.svc.oldProfile = false
+	b := e.signIn(t)
+	if b.ID != a.ID || b.DeviceProfile != audible.ProfileVersion || OldProfile(b) {
+		t.Fatalf("signed in again = %+v", b)
+	}
+	if len(e.svc.deregistered) != 1 || e.svc.deregistered[0] != first.DeviceSerial {
+		t.Fatalf("deregistered = %v, want the old device", e.svc.deregistered)
+	}
+	if !OldProfile(store.AudibleAccount{DeviceProfile: "3.56.2/17.0/35602678"}) {
+		t.Fatal("an older recorded profile reads as current")
+	}
+}
+
 // Two sign-ins of one Amazon account finishing at once (both past Amazon's
 // registration before either looks for the account) make one account: the
 // later replaces the earlier, whose device is deregistered.
@@ -671,4 +707,42 @@ func TestImportCallsAndTheirRefusal(t *testing.T) {
 		t.Fatalf("an unknown account's title = %v", err)
 	}
 	e.noSecrets(t)
+}
+
+// Denied: the real Service's errors carry neither the account's customer id
+// nor its device serial, even in shapes no pattern knows (Amazon's answer
+// quoting them back), while errors.Is still sees the cause.
+func TestServiceRedactsTheAccountByValue(t *testing.T) {
+	t.Parallel()
+	const customer, serial = "odd-cust-value", "odd-serial-value"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/licenserequest") {
+			_, _ = fmt.Fprintf(w, `{"content_license":{"status_code":"Denied","license_denial_reasons":[
+				{"validationType":"Ownership","rejectionReason":"CustomerThrottled","message":"%s on %s being throttled"}]}}`, customer, serial)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprintf(w, `{"message":"no such customer %s for device %s"}`, customer, serial)
+	}))
+	defer ts.Close()
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+	creds := audible.Credentials{ADPToken: "ADP", DevicePrivateKey: keyPEM, DeviceType: "A2CZJZGLK2JJVM", DeviceSerial: serial,
+		CustomerID: customer, Marketplace: "us"}
+	svc := Audible(audible.WithEndpoints(audible.Endpoints{Amazon: ts.URL, AmazonAPI: ts.URL, API: ts.URL}))
+	ctx := context.Background()
+	_, libErr := svc.Library(ctx, creds)
+	_, titleErr := svc.Title(ctx, creds, "B0FAKE0001")
+	_, licErr := svc.License(ctx, creds, "B0FAKE0001")
+	if !errors.Is(licErr, audible.ErrThrottled) {
+		t.Fatalf("license = %v, want ErrThrottled", licErr)
+	}
+	for _, err := range []error{libErr, titleErr, licErr} {
+		if err == nil || strings.Contains(err.Error(), customer) || strings.Contains(err.Error(), serial) {
+			t.Fatalf("err = %v", err)
+		}
+	}
 }

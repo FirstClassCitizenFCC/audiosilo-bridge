@@ -48,7 +48,7 @@ const (
 const (
 	CodeNotReleased    = "not_released"        // a preorder, or Audible says it isn't out
 	CodeNoRights       = "no_rights"           // not owned, no download rights, a show or periodical
-	CodeRefused        = "audible_refused"     // Audible refused the sign-in, or the license for another reason
+	CodeRefused        = "audible_refused"     // Audible refused the sign-in, the device (throttled), or the license for another reason
 	CodeNotWritable    = "not_writable"        // not the account's library, not a checked writable mapping, or no valid path there
 	CodeExists         = "exists"              // a different file is at the destination
 	CodeDiskFull       = "disk_full"           // the Bridge's temp space or the library is short of room
@@ -87,6 +87,12 @@ func (f *Failure) Error() string { return f.Message }
 func fail(code, format string, args ...any) *Failure {
 	return &Failure{Code: code, Message: audible.RedactAccountIDs(fmt.Sprintf(format, args...))}
 }
+
+// ThrottledText is an import's message (code audible_refused) when Audible
+// denies the license to the account's device (audible.ErrThrottled), as it
+// does a device registered with an older profile.
+const ThrottledText = "Audible refused this device. Sign in to Audible again on the Bridge (Accounts), " +
+	"then remove the old AudioSilo device at Amazon's Manage Content and Devices."
 
 // refusedSignIn is the failure when Audible refuses the account's sign-in.
 func refusedSignIn() *Failure {
@@ -834,6 +840,9 @@ func (h *Importer) license(ctx context.Context, account, asin string) (audible.L
 		return audible.License{}, ctx.Err()
 	case errors.Is(err, audibleacct.ErrRefused):
 		return audible.License{}, refusedSignIn()
+	case errors.Is(err, audible.ErrThrottled):
+		// The account's device, not the title: the message says how to fix it.
+		return audible.License{}, fail(CodeRefused, "%s", ThrottledText)
 	case errors.Is(err, audible.ErrNotReleased):
 		return audible.License{}, fail(CodeNotReleased, "Audible says the title isn't released yet: %v", err)
 	case errors.Is(err, audible.ErrNoRights):

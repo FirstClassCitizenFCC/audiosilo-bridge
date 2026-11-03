@@ -225,4 +225,18 @@ func TestAudibleItem(t *testing.T) {
 	if a := item(t, Checklist(in), ItemAudible); a.Detail != "1 account needs signing in again" {
 		t.Fatalf("one refused = %+v", a)
 	}
+	// A device on an older profile lists its library but gets no licenses:
+	// the item says so in the words the Accounts tab uses.
+	in.Audible = Audible{Accounts: 2, OldProfile: 1}
+	s = Checklist(in)
+	if a := item(t, s, ItemAudible); a.Done || a.Detail != "1 account needs signing in again to keep backups working" {
+		t.Fatalf("old profile = %+v", a)
+	}
+	if !Complete(s) {
+		t.Fatal("an old-profile Audible account made the setup incomplete")
+	}
+	in.Audible = Audible{Accounts: 3, Refused: 1, OldProfile: 1}
+	if a := item(t, Checklist(in), ItemAudible); a.Detail != "2 accounts need signing in again to keep backups working" {
+		t.Fatalf("refused and old profile = %+v", a)
+	}
 }

@@ -75,6 +75,17 @@ var (
 // RefusedText is an account's last_error after a refusal.
 const RefusedText = "Audible refused the sign-in (the device was removed from the Amazon account, or it expired): sign in again"
 
+// OldProfileText is what the page and the setup checklist say of an account
+// whose device registered with an older profile (OldProfile).
+const OldProfileText = "Sign in again to keep backups working"
+
+// OldProfile reports whether a's device registered with a profile other than
+// the one this build registers with (audible.ProfileVersion), or before the
+// profile was recorded: Amazon denies its licenses (audible.ErrThrottled)
+// until the account signs in again, which registers a new device and removes
+// the old one.
+func OldProfile(a store.AudibleAccount) bool { return a.DeviceProfile != audible.ProfileVersion }
+
 // Service is Audible as the accounts use it: the audible package's calls
 // (Audible returns them), a stub in tests.
 type Service interface {
@@ -95,7 +106,9 @@ type Service interface {
 
 // Audible is the real Service, its calls made with opts (endpoints, an HTTP
 // client; a build with the audiblefake tag points every endpoint at the fake
-// through audible.EndpointsFor).
+// through audible.EndpointsFor). Every error it answers is redacted of the
+// account's own customer id and device serial by value
+// (audible.Credentials.Redact), beside the shapes the audible package redacts.
 func Audible(opts ...audible.Option) Service { return client{opts: opts} }
 
 type client struct{ opts []audible.Option }
@@ -105,11 +118,12 @@ func (c client) AuthorizeURL(mp audible.Marketplace, pkce audible.PKCE, serial s
 }
 
 func (c client) Register(ctx context.Context, mp audible.Marketplace, code string, pkce audible.PKCE, serial string) (audible.Credentials, error) {
-	return audible.Register(ctx, mp, code, pkce, serial, c.opts...)
+	creds, err := audible.Register(ctx, mp, code, pkce, serial, c.opts...)
+	return creds, audible.Credentials{DeviceSerial: serial}.Redact(err)
 }
 
 func (c client) Deregister(ctx context.Context, creds audible.Credentials) error {
-	return audible.Deregister(ctx, creds, c.opts...)
+	return creds.Redact(audible.Deregister(ctx, creds, c.opts...))
 }
 
 func (c client) Library(ctx context.Context, creds audible.Credentials) ([]source.Record, error) {
@@ -118,7 +132,7 @@ func (c client) Library(ctx context.Context, creds audible.Credentials) ([]sourc
 		return nil, err
 	}
 	recs, err := cl.Library(ctx)
-	return recs, refused(err)
+	return recs, refused(creds.Redact(err))
 }
 
 func (c client) Title(ctx context.Context, creds audible.Credentials, asin string) (source.Record, error) {
@@ -127,7 +141,7 @@ func (c client) Title(ctx context.Context, creds audible.Credentials, asin strin
 		return source.Record{}, err
 	}
 	rec, err := cl.Title(ctx, asin)
-	return rec, refused(err)
+	return rec, refused(creds.Redact(err))
 }
 
 func (c client) License(ctx context.Context, creds audible.Credentials, asin string) (audible.License, error) {
@@ -136,7 +150,7 @@ func (c client) License(ctx context.Context, creds audible.Credentials, asin str
 		return audible.License{}, err
 	}
 	lic, err := cl.License(ctx, asin)
-	return lic, refused(err)
+	return lic, refused(creds.Redact(err))
 }
 
 func (c client) Download(ctx context.Context, creds audible.Credentials, url, dest string, opts audible.DownloadOptions) error {
@@ -144,7 +158,7 @@ func (c client) Download(ctx context.Context, creds audible.Credentials, url, de
 	if err != nil {
 		return err
 	}
-	return cl.Download(ctx, url, dest, opts)
+	return creds.Redact(cl.Download(ctx, url, dest, opts))
 }
 
 // refused wraps a 401/403 on a signed API call as ErrRefused.
@@ -399,7 +413,8 @@ func (m *Manager) Finish(ctx context.Context, srv Server, serverID string, f Fin
 		f.Label = ""
 	}
 	acct := store.AudibleAccount{ID: prev.ID, Marketplace: l.mp.Code, CustomerHash: hash, ServerID: serverID,
-		Label: f.label(l.mp.Code), UserID: f.UserID, UserName: f.UserName, LibraryID: f.LibraryID, Policy: f.Policy, Sync: f.Sync}
+		Label: f.label(l.mp.Code), UserID: f.UserID, UserName: f.UserName, LibraryID: f.LibraryID, Policy: f.Policy, Sync: f.Sync,
+		DeviceProfile: creds.Profile}
 	if acct.ID == "" {
 		if acct.ID, err = randomID(); err != nil {
 			undo("id")

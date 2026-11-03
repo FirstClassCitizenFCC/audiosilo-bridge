@@ -67,6 +67,10 @@ type AudibleAccount struct {
 	// OtherServer: the mapping was recorded on another server than the one
 	// paired now; map it again here.
 	OtherServer bool `json:"other_server"`
+	// OldProfile: the account's device registered with an older device
+	// profile, so Amazon denies its licenses: sign in again to keep backups
+	// working (audibleacct.OldProfile).
+	OldProfile bool `json:"old_profile"`
 }
 
 // AudibleUser is one person an account may be mapped to.

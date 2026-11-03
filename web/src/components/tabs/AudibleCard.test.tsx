@@ -126,6 +126,38 @@ describe('AudibleCard', () => {
     });
   });
 
+  it('asks an account on an older device profile to sign in again', async () => {
+    vi.spyOn(window, 'open').mockImplementation(() => null);
+    const { calls } = mockFetch({
+      'GET /api/accounts/audible': {
+        body: audibleFixture({
+          accounts: [audibleAccountFixture({ marketplace: 'uk', old_profile: true })],
+        }),
+      },
+      'POST /api/accounts/audible/sign-in': {
+        body: {
+          login: 'l3',
+          url: 'https://www.amazon.co.uk/ap/signin',
+          marketplace: 'uk',
+          expires_at: '',
+        },
+      },
+    });
+    render(<AudibleCard client={api()} />);
+    const card = await screen.findByRole('region', { name: 'Audible' });
+    const row = within(card).getByRole('region', { name: 'Chris (US)' });
+    expect(within(row).getByText('Sign in again', { selector: 'span' })).toBeInTheDocument();
+    expect(
+      within(row).getByText(/^Sign in again to keep backups working\./, { selector: 'div,p' }),
+    ).toBeInTheDocument();
+    await userEvent.click(within(row).getByRole('button', { name: 'Sign in again' }));
+    expect(within(card).getByLabelText('Audible store')).toHaveValue('uk');
+    await userEvent.click(within(card).getByRole('button', { name: 'Open Amazon sign-in' }));
+    expect(lastCall(calls, 'POST', '/api/accounts/audible/sign-in')?.body).toEqual({
+      marketplace: 'uk',
+    });
+  });
+
   it('opens the same Amazon sign-in again until a finish spends it', async () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
     let n = 0;

@@ -16,6 +16,8 @@ import {
   mappingOf,
   mappingProblem,
   marketplaceName,
+  needsSignIn,
+  OLD_PROFILE_TEXT,
   pollSummary,
   redirectProblem,
 } from '@/lib/audible';
@@ -54,7 +56,7 @@ export function AudibleCard({ client }: { client: ApiClient }) {
         <Loading error={loadError} />
       </Card>
     );
-  const refused = data.accounts.some((a) => a.refused);
+  const refused = data.accounts.some(needsSignIn);
   const badge =
     data.accounts.length === 0 ? (
       <Badge tone="muted">Not signed in</Badge>
@@ -185,6 +187,8 @@ function AccountRow({
         <h3 className="text-sm font-medium text-hi">{a.label}</h3>
         {state === 'refused' ? (
           <Badge tone="bad">Sign in again</Badge>
+        ) : state === 'old_profile' ? (
+          <Badge tone="warn">Sign in again</Badge>
         ) : state === 'other_server' ? (
           <Badge tone="warn">Mapped on another server</Badge>
         ) : state === 'checked' ? (
@@ -196,6 +200,7 @@ function AccountRow({
       {state === 'refused' && (
         <Notice kind="warn">{a.last_error || 'Audible refused the sign-in: sign in again.'}</Notice>
       )}
+      {state === 'old_profile' && <Notice kind="warn">{OLD_PROFILE_TEXT}</Notice>}
       {state === 'other_server' && (
         <Notice kind="warn">
           This account was mapped on another server. Change it to map it on this one.
@@ -256,7 +261,7 @@ function AccountRow({
       ) : (
         !editing && (
           <div className="flex flex-wrap gap-2">
-            {state === 'refused' && data.paired && (
+            {needsSignIn(a) && data.paired && (
               <button type="button" onClick={onSignInAgain} className={primaryButton}>
                 Sign in again
               </button>

@@ -252,6 +252,7 @@ export function audibleAccountFixture(over: Partial<AudibleAccount> = {}): Audib
     refused_at: '',
     last_error: '',
     other_server: false,
+    old_profile: false,
     ...over,
   };
 }

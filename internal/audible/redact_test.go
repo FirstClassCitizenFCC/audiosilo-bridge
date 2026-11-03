@@ -66,6 +66,12 @@ func TestRedactAccountIDs(t *testing.T) {
 			kept: []string{"refresh", "access_token="},
 		},
 		{
+			name: "40-character serial",
+			in:   "device aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dF3hJ5kL7n is throttled",
+			gone: []string{"aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bC1dF3hJ5kL7n"},
+			kept: []string{"device [redacted] is throttled"},
+		},
+		{
 			name: "device serial",
 			in:   "device serial 0123456789ABCDEF0123456789ABCDEF is not registered; device_serial_number=FAKESERIAL1",
 			gone: []string{"0123456789ABCDEF0123456789ABCDEF", "FAKESERIAL1"},
@@ -162,5 +168,61 @@ func TestRedactedError(t *testing.T) {
 	}
 	if RedactedError(err) != err {
 		t.Fatal("wrapping twice")
+	}
+}
+
+// Denied: the account's own customer id and serial go by value, whatever
+// their shape (a short or odd one no pattern knows), and errors.Is still sees
+// the cause; values too short to be an identifier are left alone.
+func TestRedactKnown(t *testing.T) {
+	const customer, serial = "Zq-odd.customer", "short-serial-9"
+	in := "license for B00H3R0B0W denied: " + customer + " on " + serial + "; Customer id [A1B2C3D4E5F6G7]"
+	got := RedactKnown(in, customer, serial, "abc", "")
+	for _, gone := range []string{customer, serial, "A1B2C3D4E5F6G7"} {
+		if strings.Contains(got, gone) {
+			t.Fatalf("%q survived: %s", gone, got)
+		}
+	}
+	if !strings.Contains(got, "B00H3R0B0W") || !strings.Contains(got, "denied") {
+		t.Fatalf("the reason was lost: %s", got)
+	}
+	if RedactKnown("abc def", "abc") != "abc def" {
+		t.Fatal("a value too short to be an identifier was removed")
+	}
+
+	creds := Credentials{CustomerID: customer, DeviceSerial: serial}
+	err := creds.Redact(fmt.Errorf("%w: %s", ErrThrottled, in))
+	if strings.Contains(err.Error(), customer) || strings.Contains(err.Error(), serial) || !errors.Is(err, ErrThrottled) {
+		t.Fatalf("Credentials.Redact = %v", err)
+	}
+	// Redacting an already redacted error adds the values, no second wrapper.
+	plain := RedactedError(errors.New(in))
+	if again := creds.Redact(plain); strings.Contains(again.Error(), customer) || errors.Unwrap(again) != errors.Unwrap(plain) {
+		t.Fatalf("redacting again = %v", again)
+	}
+	if creds.Redact(nil) != nil {
+		t.Fatal("nil must stay nil")
+	}
+}
+
+// Denied: a throttled license denial (the older profile) answers ErrThrottled
+// and carries neither the customer id nor the device serial, even ones no
+// pattern knows; the ASIN and the reason stay.
+func TestLicenseThrottledRedactsTheAccount(t *testing.T) {
+	const customer, serial = "Zq-odd.customer", "short-serial-9"
+	denial := fmt.Sprintf(`{"content_license":{"status_code":"Denied","license_denial_reasons":[
+		{"validationType":"Membership","rejectionReason":"RequesterEligibility","message":"Customer is not part of any plans"},
+		{"validationType":"Ownership","rejectionReason":"CustomerThrottled","message":"Customer id [%s] being throttled on %s"}]}}`, customer, serial)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(denial)) }))
+	defer ts.Close()
+	cl := testClient(t, ts.URL)
+	cl.creds.CustomerID, cl.creds.DeviceSerial = customer, serial
+	_, err := cl.License(context.Background(), "B00H3R0B0W")
+	if !errors.Is(err, ErrThrottled) {
+		t.Fatalf("err = %v, want ErrThrottled", err)
+	}
+	if msg := err.Error(); strings.Contains(msg, customer) || strings.Contains(msg, serial) ||
+		!strings.Contains(msg, "B00H3R0B0W") || !strings.Contains(msg, "being throttled") {
+		t.Fatalf("err = %s", msg)
 	}
 }

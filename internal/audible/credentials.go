@@ -22,7 +22,15 @@ type Credentials struct {
 	CustomerID       string `json:"customer_id"`
 	Marketplace      string `json:"marketplace"` // locale code (see Marketplace)
 	ExpiresAt        int64  `json:"expires_at"`  // unix seconds for AccessToken
+	// Profile is the device profile the device registered with
+	// (ProfileVersion then; "" for a sign-in made before it was recorded).
+	Profile string `json:"profile,omitempty"`
 }
+
+// CurrentProfile reports whether the device registered with the profile this
+// build registers with. One that didn't must sign in again: Amazon denies
+// licenses to devices on the older profile (see ProfileVersion).
+func (c Credentials) CurrentProfile() bool { return c.Profile == ProfileVersion }
 
 // Marshal/ParseCredentials round-trip the credentials for the vault.
 func (c Credentials) Marshal() (string, error) {

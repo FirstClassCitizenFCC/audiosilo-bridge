@@ -30,7 +30,8 @@ func TestAudibleAccounts(t *testing.T) {
 	}
 	got, err := db.GetAudibleAccount(ctx, "abcd1234")
 	if err != nil || got.RefusedAt != Timestamp(at.Add(2*time.Hour)) || got.LastError != "Audible refused" ||
-		got.LastTitles != 30 || got.LastMatched != 12 || got.LastPollAt != Timestamp(at.Add(time.Hour)) || !got.Sync {
+		got.LastTitles != 30 || got.LastMatched != 12 || got.LastPollAt != Timestamp(at.Add(time.Hour)) || !got.Sync ||
+		got.DeviceProfile != "" {
 		t.Fatalf("account = %+v, %v", got, err)
 	}
 	if by, err := db.AudibleAccountByCustomer(ctx, "h1", "us"); err != nil || by.ID != "abcd1234" {
@@ -40,14 +41,15 @@ func TestAudibleAccounts(t *testing.T) {
 		t.Fatalf("another marketplace = %v", err)
 	}
 
-	// A sign-in again forgets the refusal, keeps created_at and the counts.
-	a.Label = "Chris"
+	// A sign-in again forgets the refusal, keeps created_at and the counts,
+	// and records its device's profile.
+	a.Label, a.DeviceProfile = "Chris", "4.60/26.2/46000856"
 	if err := db.SignInAudibleAccount(ctx, a, at.Add(3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = db.GetAudibleAccount(ctx, "abcd1234")
 	if got.RefusedAt != "" || got.LastError != "" || got.CreatedAt != Timestamp(at) || got.LastTitles != 30 ||
-		got.Label != "Chris" || got.LastOKAt != Timestamp(at.Add(3*time.Hour)) {
+		got.Label != "Chris" || got.LastOKAt != Timestamp(at.Add(3*time.Hour)) || got.DeviceProfile != "4.60/26.2/46000856" {
 		t.Fatalf("after a sign-in again = %+v", got)
 	}
 
@@ -63,7 +65,8 @@ func TestAudibleAccounts(t *testing.T) {
 	}
 	list, err := db.AudibleAccounts(ctx)
 	if err != nil || len(list) != 1 || list[0].LibraryID != 2 || list[0].Policy != "all" || list[0].Sync ||
-		list[0].ServerID != "srv-2" || list[0].LastError != "the server could not be reached" {
+		list[0].ServerID != "srv-2" || list[0].LastError != "the server could not be reached" ||
+		list[0].DeviceProfile != "4.60/26.2/46000856" {
 		t.Fatalf("list = %+v, %v", list, err)
 	}
 	if err := db.DeleteAudibleAccount(ctx, "abcd1234"); err != nil {

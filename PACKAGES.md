@@ -1326,7 +1326,10 @@ internal/
             refused_at, last_error; NO credential (the vault's audible_<id>).
             Unique on (customer_hash, marketplace) where the hash isn't empty.
             SignInAudibleAccount upserts (a sign-in again keeps created_at and the
-            counts, clears a refusal); AudiblePolled clears refusal and error. 0007 adds podcast_shows, a credential-free cache keyed by
+            counts, clears a refusal, records device_profile); AudiblePolled clears
+            refusal and error. 0010 (4b owner fixes) adds audible_accounts.device_profile
+            (audible.ProfileVersion at the sign-in; '' for one made before it was
+            kept, which reads as the older profile). 0007 adds podcast_shows, a credential-free cache keyed by
             (server_id, show_id), indexed by server/library/feed hash. An empty
             library cache is rebuilt from feed.json before subscription dedupe.
             0008 adds podcast_artwork_state keyed by server/library/show, storing
@@ -2062,6 +2065,21 @@ internal/
             reasons (a voucher that won't parse says so without its bytes),
             ErrDRMFree for a title granted only as a DRM-free MP3 (drm_type Mpeg,
             no voucher: not a denial);
+            4b owner fixes, the DEVICE PROFILE (profile.go): since about September
+            2026 Amazon denies every license (Membership/RequesterEligibility,
+            Ownership/CustomerThrottled, Client/RequesterEligibility, the customer id
+            quoted) to a device registered with the older iPhone profile (app 3.56.2,
+            iOS 15/17, software 35602678, a 32-hex serial) and grants one registered
+            with app 4.60, os 26.2, software 46000856 and a 40-character [A-Za-z0-9]
+            serial (mkb79/Audible#909 and PR #910, Libation agrees; listing still
+            works on the old one). One constant set (appVersion, osVersion,
+            softwareVersion) serves register, the token refresh and deregister;
+            NewDeviceSerial draws 40 letters and digits from crypto/rand;
+            ProfileVersion ("4.60/26.2/46000856") is recorded in Credentials.Profile
+            at Register (CurrentProfile; "" is an earlier sign-in). Changing the set
+            flags every account registered before it. denialKind checks the
+            customer's throttling (customerthrottled, "being throttled") FIRST, as
+            ErrThrottled (a bare "Throttled", a rate limit, stays ErrDenied);
             Client.Title(asin) (GET /1.0/library/{asin}, ErrNotInLibrary on 404);
             Decrypt(ctx, ffmpeg, in, out, lic): ffmpeg -audible_key/-audible_iv -c
             copy -f ipod, its stderr redacted of key and iv (case-insensitive: ffmpeg
@@ -2106,7 +2124,11 @@ internal/
             RedactAccountIDs (redact.go) as it becomes an error (snippet, a
             license's denial reasons): customer ids (labelled, or A + 10 or more
             capitals with a digit), amzn1.* ids, device serials, emails and tokens
-            go, the ASIN (B0..., 10 digits) and the reason stay; audiblejob's job
+            go (a serial: labelled, 32+ hex, or 40 letters and digits), the ASIN
+            (B0..., 10 digits) and the reason stay; RedactKnown and
+            Credentials.Redact also remove the account's own customer id and serial
+            BY VALUE (a license's denial detail; audibleacct's Service wraps every
+            error it answers with creds.Redact); audiblejob's job
             errors, Failure messages and recorded poll failures pass it again
             (RedactedError keeps errors.Is). The per-book key/iv are
             in ffmpeg's argv (visible in the container's process table): accepted.
@@ -2124,7 +2146,14 @@ internal/
             /auth/token; /auth/deregister (this device only, recorded); signed calls
             verified against the issued key (unknown or deregistered 401, Refuse()
             403); library paging; lastpositions 400 over LastPositionsMax (10);
-            PUT lastpositions recorded. Phase 4b (content.go): GET /1.0/library/{asin};
+            PUT lastpositions recorded. 4b owner fixes: register records each
+            device's profile (Registration: serial, app/os/software versions) and
+            licenses only the current one (ProfileApp/OS/Software, its own copy so a
+            one-sided change fails the tests, and a 40-alnum serial); any other
+            device lists its library but every license is Denied with the three
+            throttled reasons (its customer id quoted, to prove the redaction);
+            OldProfile() and POST /_fake/old-profile age every device registered so
+            far. Phase 4b (content.go): GET /1.0/library/{asin};
             POST /1.0/content/{asin}/licenserequest (Denied for not owned, a preorder
             not released, no download rights; else Granted with a voucher sealed
             from the device type + serial + customer id + asin, the key and iv
@@ -2175,7 +2204,14 @@ internal/
             through the same signed path (Manager.signed: open the sign-in, call, on
             a refusal retry once with a newer sign-in, else record it); Download
             only opens the sign-in (its 401/403 is an expired URL, the import's to
-            license again, never the account's refusal). Errors carry Amazon's or the
+            license again, never the account's refusal). 4b owner fixes: Finish
+            records the device's profile (store device_profile from
+            Credentials.Profile); OldProfile(a) (not audible.ProfileVersion, or none)
+            flags an account that must sign in again (OldProfileText, "Sign in again
+            to keep backups working"): the page's old_profile and the setup item
+            ("N account(s) need signing in again to keep backups working", not done;
+            optional as ever). A sign-in again of the same Amazon account replaces
+            the device and deregisters the old one (as before). Errors carry Amazon's or the
             server's answer, never a token;
             tests walk the data dir and the log for every stub secret, and the
             tagged tests run the whole life against the fake. Deps: audible, link,
@@ -2246,7 +2282,11 @@ internal/
             not_writable (progress.park.code, Reporter.Park) and waits for it to
             come back, then runs on unparked. Then the title (preorder
             not_released, no rights / not in the library no_rights, a refusal
-            audible_refused) and the destination (Destination, a wrapper over
+            audible_refused; a license denied as audible.ErrThrottled, the device on
+            an older profile, is audible_refused with ThrottledText: "Audible
+            refused this device. Sign in to Audible again on the Bridge (Accounts),
+            then remove the old AudioSilo device at Amazon's Manage Content and
+            Devices.", never no_rights) and the destination (Destination, a wrapper over
             destination(), which also returns the plan's kind and siblings and
             which the poll's plans share: dest_path FIRST, the
             template not consulted, else the template, else Auto from the paged

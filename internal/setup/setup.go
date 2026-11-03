@@ -124,10 +124,12 @@ type GitHub struct {
 }
 
 // Audible is the Audible accounts: how many are signed in, how many Audible
-// refuses.
+// refuses, and how many more have a device on an older profile (signed in, but
+// Amazon denies their licenses until they sign in again).
 type Audible struct {
-	Accounts int
-	Refused  int
+	Accounts   int
+	Refused    int
+	OldProfile int
 }
 
 // Inputs are what the checklist is made from.
@@ -231,13 +233,17 @@ func Checklist(in Inputs) link.Setup {
 	add(ItemGitHub, in.GitHub.CanContribute, false, gh)
 
 	audible := ""
-	switch a := in.Audible; {
-	case a.Refused > 0:
-		audible = plural(a.Refused, "account needs", "accounts need") + " signing in again"
+	a := in.Audible
+	switch again := a.Refused + a.OldProfile; {
+	case again > 0:
+		audible = plural(again, "account needs", "accounts need") + " signing in again"
+		if a.OldProfile > 0 {
+			audible += " to keep backups working"
+		}
 	case a.Accounts > 0:
 		audible = plural(a.Accounts, "account", "accounts") + " signed in"
 	}
-	add(ItemAudible, in.Audible.Accounts > 0 && in.Audible.Refused == 0, false, audible)
+	add(ItemAudible, a.Accounts > 0 && a.Refused == 0 && a.OldProfile == 0, false, audible)
 	return out
 }
 

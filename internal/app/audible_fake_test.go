@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/audible"
@@ -175,6 +176,25 @@ func TestAudibleAccountThroughTheBridge(t *testing.T) {
 	}
 	if item := setupItem(b.setup(ctx), setup.ItemAudible); !item.Done || item.Detail != "1 account signed in" {
 		t.Fatalf("setup item = %+v", item)
+	}
+	// An earlier Bridge's sign-in (its device on the older profile, none
+	// recorded): the page and the checklist ask for a sign-in again.
+	if acct.OldProfile {
+		t.Fatalf("a fresh sign-in flagged = %+v", acct)
+	}
+	row.DeviceProfile = ""
+	if err := b.db.SignInAudibleAccount(ctx, row, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if old := b.Audible(ctx).Accounts[0]; !old.OldProfile {
+		t.Fatalf("an old-profile account isn't flagged: %+v", old)
+	}
+	if item := setupItem(b.setup(ctx), setup.ItemAudible); item.Done || item.Detail != "1 account needs signing in again to keep backups working" {
+		t.Fatalf("setup item = %+v", item)
+	}
+	row.DeviceProfile = audible.ProfileVersion
+	if err := b.db.SignInAudibleAccount(ctx, row, time.Now()); err != nil {
+		t.Fatal(err)
 	}
 	if !strings.Contains(strings.Join(b.runner.Kinds(), ","), "audible.poll") {
 		t.Fatalf("kinds = %v", b.runner.Kinds())
