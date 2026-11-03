@@ -1,0 +1,507 @@
+// Package audiblesync keeps an Audible account's places in step with the
+// server, both ways (BRIDGE-PLAN.md Phase 4c):
+//
+//   - audible.sync (a light job the server queues every 15 minutes per account
+//     with sync on, its params the titles to sync): Audible's last-heard
+//     places (lastpositions, 25 ASINs a request, split on a 400 or 414) become
+//     Sync v2 events for the account's person, a listen of no length at the
+//     place (a finish too at the book's end), posted furthest only: the server
+//     never moves a place back for one.
+//   - the push loop (push.go, not a job: no row a minute): every minute it
+//     reads the person's places that changed (GET /bridge/progress, the
+//     account's own rows left out) and writes back to Audible
+//     (SetLastPosition, the content reference cached per ASIN) a place that
+//     has been still for 3 minutes and is more than 5 seconds from the last
+//     one written.
+//
+// Neither touches a title the server didn't list (Not this book, Don't sync
+// this book, no match), nor a place past Audible's runtime (the match looks
+// wrong), nor a refused account (it must sign in again first). A sync error
+// never refuses the account: it backs off (honouring Audible's Retry-After)
+// and shows in the setup item's detail. No credential, title or listening
+// time leaves here; params, results and errors carry ids, ASINs, paths and
+// counts only.
+package audiblesync
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math"
+	"net/http"
+	"regexp"
+	"strconv"
+	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/audible"
+	"github.com/kodestar/audiosilo-bridge/internal/audibleacct"
+	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
+)
+
+// Kind is the job kind.
+const Kind = link.KindAudibleSync
+
+// The failure codes a sync reports ({code, message} as its result and error).
+// The server reads CodeRefused: it marks the account refused and queues no
+// sync until the Bridge maps it again.
+const (
+	CodeRefused         = "audible_refused"  // the account must sign in again on the Bridge
+	CodeUnknownAccount  = "unknown_account"  // not this Bridge's account, or mapped on another server
+	CodeUserUnavailable = "user_unavailable" // the server can't sync for the account's person now
+	CodeAudible         = "audible_error"    // Audible didn't answer the places (backed off)
+)
+
+// Bounds and tolerances.
+const (
+	// finishPct and endRemainingS say a place is at the book's end (the
+	// manager's atBookEnd): 98% in, or within 3 minutes of the end and 90% in.
+	finishPct     = 0.98
+	endRemainingS = 180.0
+	// runtimeSlackPct and runtimeSlackS say a place is past the runtime (the
+	// manager's serverPastRuntime): more than 5% plus 2 minutes past it
+	// (Audible's runtime is minute-rounded), a sign of a wrong match.
+	runtimeSlackPct = 1.05
+	runtimeSlackS   = 120.0
+	// maxEventAge: a place Audible heard longer ago than this isn't sent (the
+	// server rejects events older than 90 days).
+	maxEventAge = 85 * 24 * time.Hour
+	// echoMs: a place within this of the one last written to Audible (or, the
+	// push's way, of the one last heard from it) is the other side's own place
+	// coming back. It is also the push's debounce: a place this close to the
+	// last one written isn't written again.
+	echoMs = 5000
+	// maxTitles bounds a job's titles (the server's params are 1 MiB).
+	maxTitles = 20000
+)
+
+// pastRuntime reports whether a place (seconds) is past a book's runtime by
+// more than the slack; false when the runtime is unknown.
+func pastRuntime(placeS float64, runtimeS int64) bool {
+	return runtimeS > 0 && placeS > float64(runtimeS)*runtimeSlackPct+runtimeSlackS
+}
+
+// atBookEnd reports whether a place (seconds) is at the end of a book of
+// runtimeS seconds; false when the runtime is unknown.
+func atBookEnd(placeS float64, runtimeS int64) bool {
+	if runtimeS <= 0 {
+		return false
+	}
+	rt := float64(runtimeS)
+	return placeS >= rt*finishPct || (rt-placeS <= endRemainingS && placeS >= rt*0.9)
+}
+
+// EventID is a place's event id: "aud-" and the first 32 hex characters of
+// sha256(account|asin|position_ms|last_updated), so an unchanged Audible
+// place is the same event (duplicate on the server) at every sync. kind ""
+// is the listen; another kind ("finish") is appended.
+func EventID(account, asin string, positionMs int64, lastUpdated time.Time, kind string) string {
+	updated := ""
+	if !lastUpdated.IsZero() {
+		updated = lastUpdated.UTC().Format(time.RFC3339Nano)
+	}
+	in := account + "|" + asin + "|" + strconv.FormatInt(positionMs, 10) + "|" + updated
+	if kind != "" {
+		in += "|" + kind
+	}
+	sum := sha256.Sum256([]byte(in))
+	return "aud-" + hex.EncodeToString(sum[:])[:32]
+}
+
+// DeviceID is the server's device id for account's places.
+func DeviceID(account string) string { return "audible:" + account }
+
+// asinPattern is an ASIN as the server takes one.
+var asinPattern = regexp.MustCompile(`^[A-Z0-9]{10}$`)
+
+// Accounts is the part of the account manager the sync uses
+// (*audibleacct.Manager).
+type Accounts interface {
+	Account(ctx context.Context, id string) (store.AudibleAccount, error)
+	Accounts(ctx context.Context) ([]store.AudibleAccount, error)
+	Positions(ctx context.Context, id string, asins []string) (map[string]audible.Position, error)
+	ContentACR(ctx context.Context, id, asin string) (string, error)
+	SetPosition(ctx context.Context, id, asin, acr string, positionMs int64) error
+}
+
+// Store is the part of the store the sync uses (*store.DB).
+type Store interface {
+	ListAudibleSync(ctx context.Context, account string, titles []store.AudibleSyncTitle) error
+	AudiblePushes(ctx context.Context, account string) ([]store.AudiblePush, error)
+	GetAudiblePush(ctx context.Context, account, asin string) (store.AudiblePush, error)
+	WantAudiblePush(ctx context.Context, account, asin string, ms int64, rowUpdated time.Time) error
+	SeenAudibleRow(ctx context.Context, account, asin string, rowUpdated time.Time) error
+	AudiblePushed(ctx context.Context, account, asin string, ms int64, at time.Time, pushed bool) error
+	AudibleHeard(ctx context.Context, account, asin string, ms int64) error
+	SetAudibleACR(ctx context.Context, account, asin, acr string) error
+	SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error
+	AudibleSyncOK(ctx context.Context, id string, at time.Time) error
+	AudibleSyncFailed(ctx context.Context, id, why string, retryAt time.Time) error
+}
+
+// Server is the part of the server link the sync calls (*link.Client).
+type Server interface {
+	PostAudibleListening(ctx context.Context, account string, in link.AudibleListening) (*link.SyncAnswer, error)
+	AudibleProgress(ctx context.Context, account, since string, limit int) (*link.AudibleProgress, error)
+}
+
+// Options wire the job and the push loop.
+type Options struct {
+	Accounts Accounts
+	DB       Store
+	// Server is the link (nil while unpaired); ServerID the pairing's server.
+	Server   func() Server
+	ServerID func() string
+	Log      *slog.Logger
+	// OnChange runs when an account's sync health changes (the heartbeat's
+	// checklist moves).
+	OnChange func()
+	// Now is the clock (tests replace it).
+	Now func() time.Time
+}
+
+func (o *Options) defaults() {
+	if o.Log == nil {
+		o.Log = slog.New(slog.DiscardHandler)
+	}
+	if o.ServerID == nil {
+		o.ServerID = func() string { return "" }
+	}
+	if o.OnChange == nil {
+		o.OnChange = func() {}
+	}
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+}
+
+func (o *Options) server() Server {
+	if o.Server == nil {
+		return nil
+	}
+	return o.Server()
+}
+
+// health records how account a's sync went (err nil: it went through),
+// honouring a wait Audible asked for, and runs OnChange when that changes
+// what the checklist says (an error appears or clears). It never refuses the
+// account.
+func (o *Options) health(ctx context.Context, a store.AudibleAccount, err error, retryAt time.Time) {
+	ctx = context.WithoutCancel(ctx)
+	before := a.SyncError
+	if cur, cerr := o.Accounts.Account(ctx, a.ID); cerr == nil {
+		before = cur.SyncError
+	}
+	if err == nil {
+		if rerr := o.DB.AudibleSyncOK(ctx, a.ID, o.Now()); rerr != nil {
+			o.Log.Warn("audible: recording a sync failed", "account", a.ID, "err", rerr)
+		}
+		if before != "" {
+			o.OnChange()
+		}
+		return
+	}
+	why := audible.RedactedError(err).Error()
+	if rerr := o.DB.AudibleSyncFailed(ctx, a.ID, why, retryAt); rerr != nil {
+		o.Log.Warn("audible: recording a sync failure failed", "account", a.ID, "err", rerr)
+	}
+	if before == "" {
+		o.OnChange()
+	}
+}
+
+// retryAt is when the account may call Audible again after err: Audible's
+// Retry-After (at least minWait) for a 429/503, else zero (no wait).
+func retryAt(err error, now time.Time, minWait time.Duration) time.Time {
+	wait, ok := audible.RetryWait(err)
+	if !ok {
+		var e *link.APIError
+		if !errors.As(err, &e) || (e.Status != http.StatusTooManyRequests && e.Status != http.StatusServiceUnavailable) {
+			return time.Time{}
+		}
+		wait = e.RetryAfter
+	}
+	return now.Add(max(wait, minWait))
+}
+
+// waiting reports whether a asked to wait until after now.
+func waiting(a store.AudibleAccount, now time.Time) (time.Time, bool) {
+	if a.SyncRetryAt == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, a.SyncRetryAt)
+	return t, err == nil && now.Before(t)
+}
+
+// Failure is a failed sync's result and error: a code and a sentence for the
+// console, never a credential or an Amazon account identifier.
+type Failure struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func (f *Failure) Error() string { return f.Message }
+
+func fail(code, format string, args ...any) *Failure {
+	for i, a := range args {
+		if err, ok := a.(error); ok {
+			args[i] = audible.RedactedError(err)
+		}
+	}
+	return &Failure{Code: code, Message: fmt.Sprintf(format, args...)}
+}
+
+// Handler runs audible.sync.
+type Handler struct{ o Options }
+
+// New returns the job handler.
+func New(o Options) *Handler {
+	o.defaults()
+	return &Handler{o: o}
+}
+
+// Kind is audible.sync.
+func (h *Handler) Kind() string { return Kind }
+
+// Lane is the light lane: a sync is a few API calls.
+func (h *Handler) Lane() string { return jobs.LaneLight }
+
+// ParseParams reads the params strictly (an unknown field is refused, as the
+// server checks them): an account id and titles each with an ASIN, a library
+// and a book path, once each ASIN.
+func ParseParams(raw json.RawMessage) (link.AudibleSyncParams, error) {
+	var p link.AudibleSyncParams
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return link.AudibleSyncParams{}, fmt.Errorf("bad params: %w", err)
+	}
+	if !audibleacct.IDPattern.MatchString(p.Account) {
+		return link.AudibleSyncParams{}, errors.New("bad params: account must be an Audible account id")
+	}
+	if len(p.Titles) > maxTitles {
+		return link.AudibleSyncParams{}, errors.New("bad params: too many titles")
+	}
+	seen := make(map[string]bool, len(p.Titles))
+	for _, t := range p.Titles {
+		switch {
+		case !asinPattern.MatchString(t.ASIN) || seen[t.ASIN]:
+			return link.AudibleSyncParams{}, errors.New("bad params: each title's asin must be an ASIN, once")
+		case t.LibraryID <= 0 || t.Path == "" || t.RuntimeS < 0:
+			return link.AudibleSyncParams{}, errors.New("bad params: each title needs a library, a book path and a runtime of 0 or more")
+		}
+		seen[t.ASIN] = true
+	}
+	return p, nil
+}
+
+// Result is what a sync reports: counts, never a title or a credential.
+type Result struct {
+	Account string `json:"account"`
+	Titles  int    `json:"titles"`
+	// Heard: titles Audible has a place for. Sent: the places posted (a
+	// finish counts beside its listen in Finished).
+	Heard    int `json:"heard"`
+	Sent     int `json:"sent"`
+	Finished int `json:"finished"`
+	// The server's answers: applied (the server's place moved), duplicate (the
+	// same Audible place as before), behind (not ahead of the server's),
+	// not_applied for another reason, rejected.
+	Applied    int `json:"applied"`
+	Duplicate  int `json:"duplicate"`
+	Behind     int `json:"behind"`
+	NotApplied int `json:"not_applied"`
+	Rejected   int `json:"rejected"`
+	// Skipped places: Audible's echo of a place the Bridge wrote, a place past
+	// the runtime, one too old for the server, one at the start.
+	SkippedEcho        int `json:"skipped_echo,omitempty"`
+	SkippedPastRuntime int `json:"skipped_past_runtime,omitempty"`
+	SkippedOld         int `json:"skipped_old,omitempty"`
+	SkippedStart       int `json:"skipped_start,omitempty"`
+	// Waiting: Audible asked the Bridge to wait (until WaitUntil), so the sync
+	// didn't call it; SyncOff: the server's sync was off by the time it ran.
+	Waiting   bool   `json:"waiting,omitempty"`
+	WaitUntil string `json:"wait_until,omitempty"`
+	SyncOff   bool   `json:"sync_off,omitempty"`
+}
+
+// Run syncs the account's places on Audible to the server.
+func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
+	res, err := h.run(ctx, job, rep)
+	var f *Failure
+	if errors.As(err, &f) {
+		return f, f
+	}
+	if err != nil {
+		return nil, audible.RedactedError(err)
+	}
+	return res, nil
+}
+
+func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*Result, error) {
+	p, err := ParseParams(job.Params)
+	if err != nil {
+		return nil, err
+	}
+	acct, err := h.o.Accounts.Account(ctx, p.Account)
+	if errors.Is(err, audibleacct.ErrNotFound) {
+		return nil, fail(CodeUnknownAccount, "This Bridge has no Audible account %s: it was removed here, or signed in on another Bridge.", p.Account)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if acct.OnOtherServer(h.o.ServerID()) {
+		return nil, fail(CodeUnknownAccount, "The Audible account is mapped on another server: map it again on the Bridge's Accounts tab.")
+	}
+	if acct.RefusedAt != "" {
+		return nil, fail(CodeRefused, "Audible refused the account: sign in to Audible again on the Bridge (Accounts); its places sync again after that.")
+	}
+	srv := h.o.server()
+	if srv == nil {
+		return nil, errors.New("the Bridge isn't paired with a server")
+	}
+	res := &Result{Account: acct.ID, Titles: len(p.Titles)}
+	now := h.o.Now()
+	if until, ok := waiting(acct, now); ok {
+		res.Waiting, res.WaitUntil = true, until.UTC().Format(time.RFC3339)
+		return res, nil
+	}
+
+	titles := make([]store.AudibleSyncTitle, len(p.Titles))
+	asins := make([]string, len(p.Titles))
+	for i, t := range p.Titles {
+		titles[i] = store.AudibleSyncTitle{ASIN: t.ASIN, LibraryID: t.LibraryID, Path: t.Path, RuntimeS: t.RuntimeS}
+		asins[i] = t.ASIN
+	}
+	if err := h.o.DB.ListAudibleSync(ctx, acct.ID, titles); err != nil {
+		return nil, err
+	}
+	if len(asins) == 0 {
+		h.o.health(ctx, acct, nil, time.Time{})
+		return res, nil
+	}
+
+	rep.Progress(jobs.Progress{Step: "audible", Message: "Reading the places on Audible", Total: len(asins)})
+	places, err := h.o.Accounts.Positions(ctx, acct.ID, asins)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		h.o.health(ctx, acct, fmt.Errorf("reading the places on Audible: %w", err), retryAt(err, now, 0))
+		return nil, fail(CodeAudible, "Audible didn't answer the places: %v", err)
+	}
+
+	pushes := map[string]store.AudiblePush{}
+	if list, err := h.o.DB.AudiblePushes(ctx, acct.ID); err == nil {
+		for _, x := range list {
+			pushes[x.ASIN] = x
+		}
+	}
+	var events []link.AudibleEvent
+	heard := map[string]int64{} // event id -> the place it carries (listens)
+	asinOf := map[string]string{}
+	for _, t := range p.Titles {
+		pl, ok := places[t.ASIN]
+		if !ok {
+			continue
+		}
+		res.Heard++
+		placeS := float64(pl.PositionMs) / 1000
+		switch {
+		case pl.PositionMs < 1000:
+			res.SkippedStart++
+			continue
+		case pastRuntime(placeS, t.RuntimeS):
+			res.SkippedPastRuntime++
+			h.o.Log.Warn("audible: a place on Audible is past the title's runtime, so its match looks wrong; not synced",
+				"account", acct.ID, "asin", t.ASIN)
+			continue
+		case !pl.LastUpdated.IsZero() && now.Sub(pl.LastUpdated) > maxEventAge:
+			res.SkippedOld++
+			continue
+		}
+		if x, ok := pushes[t.ASIN]; ok && x.LastMs >= 0 && abs(pl.PositionMs-x.LastMs) <= echoMs {
+			// The place the push wrote, coming back.
+			res.SkippedEcho++
+			continue
+		}
+		at := pl.LastUpdated
+		if at.IsZero() {
+			at = now
+		}
+		stamp := at.UTC().Format(time.RFC3339)
+		id := EventID(acct.ID, t.ASIN, pl.PositionMs, pl.LastUpdated, "")
+		pos := placeS
+		events = append(events, link.AudibleEvent{ID: id, Kind: link.EventListen, LibraryID: t.LibraryID, Path: t.Path,
+			FromPos: &pos, ToPos: &pos, StartedAt: stamp, EndedAt: stamp, Start: "jump"})
+		heard[id], asinOf[id] = pl.PositionMs, t.ASIN
+		if atBookEnd(placeS, t.RuntimeS) {
+			fid := EventID(acct.ID, t.ASIN, pl.PositionMs, pl.LastUpdated, link.EventFinish)
+			events = append(events, link.AudibleEvent{ID: fid, Kind: link.EventFinish, LibraryID: t.LibraryID, Path: t.Path, At: stamp})
+			res.Finished++
+		}
+	}
+
+	rep.Progress(jobs.Progress{Step: "server", Message: "Sending the places to the server", Total: len(events)})
+	for start := 0; start < len(events); start += link.MaxAudibleEvents {
+		batch := events[start:min(start+link.MaxAudibleEvents, len(events))]
+		ans, err := srv.PostAudibleListening(ctx, acct.ID, link.AudibleListening{SentAt: h.o.Now().UTC().Format(time.RFC3339), Events: batch})
+		switch {
+		case errors.Is(err, link.ErrSyncOff):
+			res.SyncOff = true
+			return res, nil
+		case errors.Is(err, link.ErrUserUnavailable):
+			h.o.health(ctx, acct, err, time.Time{})
+			return nil, fail(CodeUserUnavailable, "%v", err)
+		case errors.Is(err, link.ErrUnknownAccount):
+			return nil, fail(CodeUnknownAccount, "The server has no such Audible account: sign in or map the account again on the Bridge's Accounts tab.")
+		case err != nil:
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			h.o.health(ctx, acct, fmt.Errorf("sending the places to the server: %w", err), retryAt(err, now, 0))
+			return nil, fmt.Errorf("sending the places to the server: %w", err)
+		}
+		res.Sent += len(batch)
+		for _, r := range ans.Results {
+			switch {
+			case r.Status == link.SyncApplied || r.Status == link.SyncDiverged:
+				res.Applied++
+			case r.Status == link.SyncDuplicate:
+				res.Duplicate++
+			case r.Status == link.SyncNotApplied && r.Reason == link.SyncBehind:
+				res.Behind++
+			case r.Status == link.SyncNotApplied:
+				res.NotApplied++
+			default:
+				res.Rejected++
+			}
+			if ms, ok := heard[r.ID]; ok && r.Status != link.SyncRejected {
+				if err := h.o.DB.AudibleHeard(ctx, acct.ID, asinOf[r.ID], ms); err != nil {
+					h.o.Log.Warn("audible: recording a place heard failed", "account", acct.ID, "err", err)
+				}
+			}
+		}
+		rep.Progress(jobs.Progress{Step: "server", Message: "Sending the places to the server", Done: res.Sent, Total: len(events)})
+	}
+	h.o.health(ctx, acct, nil, time.Time{})
+	h.o.Log.Info("audible: places synced", "account", acct.ID, "titles", res.Titles, "heard", res.Heard, "sent", res.Sent,
+		"applied", res.Applied, "behind", res.Behind, "duplicate", res.Duplicate)
+	return res, nil
+}
+
+func abs(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// ms is a place in seconds as whole milliseconds.
+func ms(s float64) int64 { return int64(math.Round(s * 1000)) }

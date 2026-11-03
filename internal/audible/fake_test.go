@@ -290,7 +290,8 @@ func TestFakeLastPositions(t *testing.T) {
 	if err := c.SetLastPosition(context.Background(), "B0FAKE0006", "CR!FAKEACR", 5000); err != nil {
 		t.Fatal(err)
 	}
-	if put := fake.Calls().PutPositions; len(put) != 1 || put[0] != (audiblefake.PutPosition{ASIN: "B0FAKE0006", ACR: "CR!FAKEACR", PositionMs: 5000}) {
+	if put := fake.Calls().PutPositions; len(put) != 1 || put[0].At == "" ||
+		put[0] != (audiblefake.PutPosition{ASIN: "B0FAKE0006", ACR: "CR!FAKEACR", PositionMs: 5000, At: put[0].At}) {
 		t.Fatalf("put = %+v", put)
 	}
 	again, err := c.LastPositions(context.Background(), []string{"B0FAKE0006"}, nil)

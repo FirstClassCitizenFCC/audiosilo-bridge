@@ -32,7 +32,9 @@ func main() {
 		"controls: GET /_fake/calls, POST /_fake/refuse, GET /_fake/titles,\n"+
 		"  POST /_fake/old-profile (every device so far on the older profile: licenses denied as throttled),\n"+
 		"  POST /_fake/cut?after=BYTES (the next download drops part way), POST /_fake/expire (download URLs expire),\n"+
-		"  POST /_fake/release?asin=ASIN (a preorder comes out today)\n", *listen, *listen)
+		"  POST /_fake/release?asin=ASIN (a preorder comes out today),\n"+
+		"  POST /_fake/position?asin=ASIN&ms=MS&ago=SECONDS (a place heard on another device),\n"+
+		"  GET /_fake/positions (every place Audible holds; GET /_fake/calls put_positions are the Bridge's writes)\n", *listen, *listen)
 	srv := &http.Server{Addr: *listen, Handler: fake.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	log.Fatal(srv.ListenAndServe())
 }
