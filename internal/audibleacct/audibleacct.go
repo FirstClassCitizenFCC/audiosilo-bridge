@@ -78,7 +78,9 @@ const RefusedText = "Audible refused the sign-in (the device was removed from th
 // ThrottledText is an account's last_error after Audible denied its device a
 // license (audible.ErrThrottled): the account is refused like a sign-in
 // Audible refused (refused_at), and only a new sign-in ends it, since its
-// library still lists (a poll keeps it, store.AudiblePolled).
+// library still lists (a poll keeps it, store.AudiblePolled). It is stored
+// state as well as copy: Throttled and the poll match it exactly, so a reworded
+// one would turn rows refused with the old text into sign-in refusals.
 const ThrottledText = "Audible refused this device its downloads (customer throttled): sign in again"
 
 // Throttled reports whether a is refused for its device's licenses
@@ -685,8 +687,9 @@ func (m *Manager) signed(ctx context.Context, id string, call func(audible.Crede
 	if !refusal(err) {
 		return err
 	}
+	throttled := errors.Is(err, audible.ErrThrottled)
 	why, msg := RefusedText, "audible: Audible refused the account's sign-in"
-	if errors.Is(err, audible.ErrThrottled) {
+	if throttled {
 		why, msg = ThrottledText, "audible: Audible refused the account's device a license: it must sign in again"
 	}
 	if rerr := m.o.DB.RefuseAudibleAccount(context.WithoutCancel(ctx), id, why, m.o.Now()); rerr != nil {
@@ -694,7 +697,7 @@ func (m *Manager) signed(ctx context.Context, id string, call func(audible.Crede
 	}
 	m.o.Log.Warn(msg, "account", id, "err", err)
 	m.o.OnChange()
-	if errors.Is(err, audible.ErrThrottled) {
+	if throttled {
 		return err
 	}
 	return ErrRefused

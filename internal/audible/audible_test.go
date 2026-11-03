@@ -226,16 +226,7 @@ func TestCredentialsProfile(t *testing.T) {
 // The user agent names the profile's app build and iOS (Darwin 25.2 for iOS
 // 26.2), never the old audible-cli one.
 func TestUserAgentMatchesProfile(t *testing.T) {
-	want := "Audible/46000856 CFNetwork/" + cfNetworkVersion + " Darwin/25.2.0"
-	if userAgent != want {
+	if want := "Audible/46000856 CFNetwork/3860.300.31 Darwin/25.2.0"; userAgent != want {
 		t.Fatalf("userAgent = %q, want %q", userAgent, want)
-	}
-	if !strings.Contains(userAgent, "Audible/"+softwareVersion+" ") || strings.Contains(userAgent, "Darwin/20.") {
-		t.Fatalf("userAgent %q doesn't carry the profile", userAgent)
-	}
-	for in, want := range map[string]string{"26.2": "25.2.0", "27.0": "26.0.0", "17.0": "", "26": "", "x.2": "", "26.x": ""} {
-		if got := darwinVersion(in); got != want {
-			t.Errorf("darwinVersion(%q) = %q, want %q", in, got, want)
-		}
 	}
 }

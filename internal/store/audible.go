@@ -134,7 +134,7 @@ func (db *DB) AudiblePolled(ctx context.Context, id string, titles, matched int,
 	ts := timestamp(at)
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET last_ok_at = ?, last_poll_at = ?, last_titles = ?,
 		last_matched = ?,
-		refused_at = CASE WHEN refused_at <> '' AND last_error = ? THEN refused_at ELSE '' END,
+		refused_at = CASE WHEN last_error = ? THEN refused_at ELSE '' END,
 		last_error = CASE WHEN refused_at <> '' AND last_error = ? THEN last_error ELSE '' END
 		WHERE id = ?`, ts, ts, titles, matched, keep, keep, id)
 	return err

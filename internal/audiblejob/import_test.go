@@ -588,7 +588,6 @@ func TestImportCodes(t *testing.T) {
 	}
 }
 
-// Bad params fail before anything is asked of Audible.
 // A refused account's import fails before asking Audible anything: a device
 // denied licenses with the throttled advice, a refused sign-in with its own.
 // Allowed: an account with only a poll's error still imports.
@@ -620,6 +619,7 @@ func TestImportOfARefusedAccountFailsFast(t *testing.T) {
 	}
 }
 
+// Bad params fail before anything is asked of Audible.
 func TestImportParams(t *testing.T) {
 	for _, raw := range []string{`{}`, `{"account":"BAD","asin":"B0FAKE0002","library_id":1}`,
 		`{"account":"acct0001","asin":"nope","library_id":1}`, `{"account":"acct0001","asin":"B0FAKE0002"}`, `[]`} {

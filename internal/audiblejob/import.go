@@ -109,6 +109,10 @@ func fail(code, format string, args ...any) *Failure {
 const ThrottledText = "Audible refused this device. Sign in to Audible again on the Bridge (Accounts): " +
 	"that registers a new AudioSilo device Audible allows downloads to, and removes this one."
 
+// throttledDevice is the failure when Audible denies the account's device its
+// licenses (ThrottledText).
+func throttledDevice() *Failure { return fail(CodeRefused, "%s", ThrottledText) }
+
 // refusedSignIn is the failure when Audible refuses the account's sign-in.
 func refusedSignIn() *Failure {
 	return fail(CodeRefused, "Audible refused the account's sign-in: sign in again on the Bridge's Accounts tab.")
@@ -369,7 +373,7 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	// stays denied) until the owner signs in again, which ends the refusal.
 	if acct.RefusedAt != "" {
 		if audibleacct.Throttled(acct) {
-			return nil, fail(CodeRefused, "%s", ThrottledText)
+			return nil, throttledDevice()
 		}
 		return nil, refusedSignIn()
 	}
@@ -867,7 +871,7 @@ func (h *Importer) license(ctx context.Context, account, asin string) (audible.L
 		return audible.License{}, refusedSignIn()
 	case errors.Is(err, audible.ErrThrottled):
 		// The account's device, not the title: the message says how to fix it.
-		return audible.License{}, fail(CodeRefused, "%s", ThrottledText)
+		return audible.License{}, throttledDevice()
 	case errors.Is(err, audible.ErrNotReleased):
 		return audible.License{}, fail(CodeNotReleased, "Audible says the title isn't released yet: %v", err)
 	case errors.Is(err, audible.ErrNoRights):

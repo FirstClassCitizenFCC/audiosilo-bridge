@@ -1,10 +1,6 @@
 package audible
 
-import (
-	"crypto/rand"
-	"strconv"
-	"strings"
-)
+import "crypto/rand"
 
 // The device profile: the Audible for iPhone app a device registers as, and
 // the app version its token refreshes and deregistration name. Since about
@@ -28,9 +24,13 @@ const (
 	ProfileVersion = appVersion + "/" + osVersion + "/" + softwareVersion
 )
 
-// cfNetworkVersion is the CFNetwork of the iOS 26.2 the profile names (the
-// 3860 line of iOS and macOS 26), for userAgent.
-const cfNetworkVersion = "3860.300.31"
+// cfNetworkVersion and darwinVersion are the CFNetwork and Darwin kernel of
+// the iOS 26.2 the profile names (iOS 26.2 runs Darwin 25.2.0), for
+// userAgent: they change with osVersion.
+const (
+	cfNetworkVersion = "3860.300.31"
+	darwinVersion    = "25.2.0"
+)
 
 // userAgent is the Audible for iPhone app's own user agent on the profile's
 // device (an app's URLSession sends "<app>/<build> CFNetwork/<v> Darwin/<v>"),
@@ -41,23 +41,7 @@ const cfNetworkVersion = "3860.300.31"
 // the app build Amazon registers; mkb79/Audible 0.13.1 sets no user agent of
 // its own on API calls (httpx's), and its sign-in web view's is the owner's
 // browser here.
-var userAgent = "Audible/" + softwareVersion + " CFNetwork/" + cfNetworkVersion + " Darwin/" + darwinVersion(osVersion)
-
-// darwinVersion is the Darwin kernel of an iOS 26 or later version
-// "major.minor": Darwin major is iOS major minus one (iOS 26.2 runs Darwin
-// 25.2.0). "" for anything else, so a profile change the rule doesn't fit
-// shows in its test rather than in a made-up user agent.
-func darwinVersion(ios string) string {
-	majorStr, minor, ok := strings.Cut(ios, ".")
-	major, err := strconv.Atoi(majorStr)
-	if !ok || err != nil || major < 26 {
-		return ""
-	}
-	if _, err := strconv.Atoi(minor); err != nil {
-		return ""
-	}
-	return strconv.Itoa(major-1) + "." + minor + ".0"
-}
+const userAgent = "Audible/" + softwareVersion + " CFNetwork/" + cfNetworkVersion + " Darwin/" + darwinVersion
 
 // serialLen and serialAlphabet are the official app's serial shape: 40 ASCII
 // letters and digits.

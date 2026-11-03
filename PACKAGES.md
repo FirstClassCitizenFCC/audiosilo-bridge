@@ -2081,8 +2081,9 @@ internal/
             at Register (IsCurrentProfile; "" is an earlier sign-in). Changing the set
             flags every account registered before it. userAgent (every signed call
             and download) is built from the same set: "Audible/<softwareVersion>
-            CFNetwork/3860.300.31 Darwin/<darwinVersion(osVersion)>" (iOS 26.2 =
-            Darwin 25.2.0), never audible-cli's old Darwin/20.6 one (mkb79/Audible
+            CFNetwork/<cfNetworkVersion> Darwin/<darwinVersion>" (iOS 26.2's
+            3860.300.31 and 25.2.0, pinned beside osVersion and changed with it),
+            never audible-cli's old Darwin/20.6 one (mkb79/Audible
             0.13.1 sets none on API calls). denialKind checks the
             customer's throttling (customerthrottled, "being throttled") FIRST, as
             ErrThrottled (a bare "Throttled", a rate limit, stays ErrDenied);
