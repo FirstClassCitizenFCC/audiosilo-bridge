@@ -94,6 +94,24 @@ func (s *stubService) Library(_ context.Context, creds audible.Credentials) ([]s
 }
 
 // stubServer is the server's account routes.
+func (s *stubService) Title(_ context.Context, creds audible.Credentials, asin string) (source.Record, error) {
+	if s.libraryErr != nil {
+		return source.Record{}, s.libraryErr
+	}
+	return source.Record{ASIN: asin, Title: "Title " + asin + " " + creds.DeviceSerial}, nil
+}
+
+func (s *stubService) License(_ context.Context, creds audible.Credentials, _ string) (audible.License, error) {
+	if s.libraryErr != nil {
+		return audible.License{}, s.libraryErr
+	}
+	return audible.License{URL: "https://cdn.example/f", Key: "KEY", IV: "IV" + creds.DeviceSerial}, nil
+}
+
+func (s *stubService) Download(context.Context, audible.Credentials, string, string, audible.DownloadOptions) error {
+	return nil
+}
+
 type stubServer struct {
 	mu      sync.Mutex
 	put     map[string]link.AudibleAccountInput
@@ -623,4 +641,34 @@ func TestLibraryAfterASignInAgainIsNoRefusal(t *testing.T) {
 	if got, _ := e.m.Account(context.Background(), a.ID); got.RefusedAt != "" || got.LastError != "" {
 		t.Fatalf("marked refused: %+v", got)
 	}
+}
+
+// An import's title read and license use the account's sign-in, and a refusal
+// on either marks the account refused as a poll's does.
+func TestImportCallsAndTheirRefusal(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	creds, _ := e.m.credentials(a.ID)
+	ctx := context.Background()
+	if rec, err := e.m.Title(ctx, a.ID, "B0FAKE0003"); err != nil || rec.Title != "Title B0FAKE0003 "+creds.DeviceSerial {
+		t.Fatalf("title = %+v, %v", rec, err)
+	}
+	if lic, err := e.m.License(ctx, a.ID, "B0FAKE0003"); err != nil || lic.IV != "IV"+creds.DeviceSerial {
+		t.Fatalf("license: %v", err)
+	}
+	if err := e.m.Download(ctx, a.ID, "https://cdn.example/f", filepath.Join(t.TempDir(), "f"), audible.DownloadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	e.svc.libraryErr = fmt.Errorf("%w (HTTP 403)", ErrRefused)
+	if _, err := e.m.License(ctx, a.ID, "B0FAKE0003"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("refused license = %v", err)
+	}
+	if got, _ := e.m.Account(ctx, a.ID); got.RefusedAt == "" {
+		t.Fatalf("a refused license didn't mark the account: %+v", got)
+	}
+	if _, err := e.m.Title(ctx, "nosuchaccount1", "B0FAKE0003"); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("an unknown account's title = %v", err)
+	}
+	e.noSecrets(t)
 }

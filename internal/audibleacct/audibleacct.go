@@ -84,6 +84,13 @@ type Service interface {
 	// Library answers ErrRefused (wrapped) when Audible refuses the device's
 	// credentials (401/403 on the signed call).
 	Library(ctx context.Context, creds audible.Credentials) ([]source.Record, error)
+	// Title, License and Download are an import's (Phase 4b): one title of the
+	// library, a book's license and its download. Title and License answer
+	// ErrRefused (wrapped) as Library does; Download's 403 is an expired URL,
+	// never a refusal.
+	Title(ctx context.Context, creds audible.Credentials, asin string) (source.Record, error)
+	License(ctx context.Context, creds audible.Credentials, asin string) (audible.License, error)
+	Download(ctx context.Context, creds audible.Credentials, url, dest string, opts audible.DownloadOptions) error
 }
 
 // Audible is the real Service, its calls made with opts (endpoints, an HTTP
@@ -111,10 +118,41 @@ func (c client) Library(ctx context.Context, creds audible.Credentials) ([]sourc
 		return nil, err
 	}
 	recs, err := cl.Library(ctx)
-	if audible.IsRefused(err) {
-		return nil, fmt.Errorf("%w (HTTP %d)", ErrRefused, audible.HTTPStatus(err))
+	return recs, refused(err)
+}
+
+func (c client) Title(ctx context.Context, creds audible.Credentials, asin string) (source.Record, error) {
+	cl, err := audible.NewClient(creds, c.opts...)
+	if err != nil {
+		return source.Record{}, err
 	}
-	return recs, err
+	rec, err := cl.Title(ctx, asin)
+	return rec, refused(err)
+}
+
+func (c client) License(ctx context.Context, creds audible.Credentials, asin string) (audible.License, error) {
+	cl, err := audible.NewClient(creds, c.opts...)
+	if err != nil {
+		return audible.License{}, err
+	}
+	lic, err := cl.License(ctx, asin)
+	return lic, refused(err)
+}
+
+func (c client) Download(ctx context.Context, creds audible.Credentials, url, dest string, opts audible.DownloadOptions) error {
+	cl, err := audible.NewClient(creds, c.opts...)
+	if err != nil {
+		return err
+	}
+	return cl.Download(ctx, url, dest, opts)
+}
+
+// refused wraps a 401/403 on a signed API call as ErrRefused.
+func refused(err error) error {
+	if audible.IsRefused(err) {
+		return fmt.Errorf("%w (HTTP %d)", ErrRefused, audible.HTTPStatus(err))
+	}
+	return err
 }
 
 // Store is the part of the store the accounts use (*store.DB).
@@ -549,19 +587,75 @@ func (m *Manager) credentials(id string) (audible.Credentials, error) {
 // Library lists account id's Audible library. A refusal (401/403 on the signed
 // call) marks the account refused and answers ErrRefused.
 func (m *Manager) Library(ctx context.Context, id string) ([]source.Record, error) {
+	var recs []source.Record
+	err := m.signed(ctx, id, func(creds audible.Credentials) (err error) {
+		recs, err = m.o.Service.Library(ctx, creds)
+		return err
+	})
+	return recs, err
+}
+
+// Title reads one title of account id's library (an import's metadata);
+// audible.ErrNotInLibrary when the library doesn't hold it. A refusal is
+// Library's.
+func (m *Manager) Title(ctx context.Context, id, asin string) (source.Record, error) {
+	var rec source.Record
+	err := m.signed(ctx, id, func(creds audible.Credentials) (err error) {
+		rec, err = m.o.Service.Title(ctx, creds, asin)
+		return err
+	})
+	return rec, err
+}
+
+// License asks for a book's download license with account id's sign-in. The
+// answer holds the book's key and iv: the caller keeps it in memory and hands
+// it to audible.Decrypt only. A refusal is Library's.
+func (m *Manager) License(ctx context.Context, id, asin string) (audible.License, error) {
+	var lic audible.License
+	err := m.signed(ctx, id, func(creds audible.Credentials) (err error) {
+		lic, err = m.o.Service.License(ctx, creds, asin)
+		return err
+	})
+	return lic, err
+}
+
+// Download fetches a license's URL to dest with account id's signature
+// (audible.Client.Download: resumable, capped).
+func (m *Manager) Download(ctx context.Context, id, url, dest string, opts audible.DownloadOptions) error {
+	creds, err := m.open(id)
+	if err != nil {
+		return err
+	}
+	return m.o.Service.Download(ctx, creds, url, dest, opts)
+}
+
+// open opens account id's sealed sign-in, saying what is wrong in words.
+func (m *Manager) open(id string) (audible.Credentials, error) {
 	creds, err := m.credentials(id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return nil, fmt.Errorf("the account's sign-in is missing on this Bridge: sign in again")
+			return audible.Credentials{}, fmt.Errorf("the account's sign-in is missing on this Bridge: sign in again")
 		}
-		return nil, fmt.Errorf("the account's sign-in can't be opened: %w", err)
+		return audible.Credentials{}, fmt.Errorf("the account's sign-in can't be opened: %w", err)
 	}
-	recs, err := m.o.Service.Library(ctx, creds)
+	return creds, nil
+}
+
+// signed runs one signed call with account id's sign-in. A refusal (ErrRefused
+// from the Service) is tried once more with a newer sign-in when one replaced
+// the device meanwhile, else it marks the account refused, runs OnChange and
+// answers ErrRefused.
+func (m *Manager) signed(ctx context.Context, id string, call func(audible.Credentials) error) error {
+	creds, err := m.open(id)
+	if err != nil {
+		return err
+	}
+	err = call(creds)
 	if errors.Is(err, ErrRefused) {
-		// A sign-in that finished meanwhile deregistered the device this poll
-		// used: list again with the new one rather than mark it refused.
+		// A sign-in that finished meanwhile deregistered the device this call
+		// used: call again with the new one rather than mark it refused.
 		if fresh, ferr := m.credentials(id); ferr == nil && fresh.DeviceSerial != creds.DeviceSerial {
-			recs, err = m.o.Service.Library(ctx, fresh)
+			err = call(fresh)
 		}
 	}
 	if errors.Is(err, ErrRefused) {
@@ -570,9 +664,9 @@ func (m *Manager) Library(ctx context.Context, id string) ([]source.Record, erro
 		}
 		m.o.Log.Warn("audible: Audible refused the account's sign-in", "account", id, "err", err)
 		m.o.OnChange()
-		return nil, ErrRefused
+		return ErrRefused
 	}
-	return recs, err
+	return err
 }
 
 // Polled records a complete poll of account id.
