@@ -143,11 +143,7 @@ func (f *Fake) license(w http.ResponseWriter, r *http.Request, _ []byte) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	body, err := f.contentOf(r.Context(), t)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	body := f.contentOf(r.Context(), t)
 	token := "T" + randHex(12)
 	f.mu.Lock()
 	f.urls[token] = asin
@@ -212,11 +208,7 @@ func (f *Fake) download(w http.ResponseWriter, r *http.Request, _ []byte) {
 		return
 	}
 	t, _ := f.title(asin)
-	body, err := f.contentOf(r.Context(), t)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	body := f.contentOf(r.Context(), t)
 	sum := sha256.Sum256(body)
 	w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:8])+`"`)
 	w.Header().Set("Content-Type", "audio/vnd.audible.aaxc")
@@ -249,12 +241,12 @@ func (c *cutWriter) Write(p []byte) (int, error) {
 // contentOf is the title's download: the fixture tagged with the title's own
 // title, authors and narrators by ffmpeg (-c copy), made once per title; the
 // fixture as it is when there is no ffmpeg.
-func (f *Fake) contentOf(ctx context.Context, t Title) ([]byte, error) {
+func (f *Fake) contentOf(ctx context.Context, t Title) []byte {
 	f.mu.Lock()
 	b, ok := f.content[t.ASIN]
 	f.mu.Unlock()
 	if ok {
-		return b, nil
+		return b
 	}
 	b = fixtureM4B
 	if tagged, err := tag(ctx, f.opts.FFmpeg, t); err == nil {
@@ -267,7 +259,7 @@ func (f *Fake) contentOf(ctx context.Context, t Title) ([]byte, error) {
 		f.content[t.ASIN] = b
 	}
 	f.mu.Unlock()
-	return b, nil
+	return b
 }
 
 // tag writes t's metadata into a copy of the fixture with ffmpeg.

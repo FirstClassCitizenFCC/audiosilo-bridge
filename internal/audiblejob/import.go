@@ -56,13 +56,10 @@ const (
 	CodeUnknownAccount = "unknown_account"     // not this Bridge's account, or mapped on another server
 )
 
-// Free-space factors: the Bridge's temp folder holds the AAXC and the
-// decrypted copy at once (2 x, plus a margin); the library the installed file
-// (transfer's own 1.1 x).
-const (
-	tmpHeadroom     = 2.2
-	libraryHeadroom = transfer.DefaultHeadroom
-)
+// tmpHeadroom is the free-space factor for the Bridge's temp folder: it holds
+// the AAXC and the decrypted copy at once (2 x, plus a margin). The library
+// wants transfer's own (transfer.DefaultHeadroom).
+const tmpHeadroom = 2.2
 
 // PartialMaxAge is how long the start-up sweep keeps a partial download (a
 // job that never resumed: cancelled while the Bridge was down, or lost).
@@ -83,6 +80,11 @@ func (f *Failure) Error() string { return f.Message }
 
 func fail(code, format string, args ...any) *Failure {
 	return &Failure{Code: code, Message: fmt.Sprintf(format, args...)}
+}
+
+// refusedSignIn is the failure when Audible refuses the account's sign-in.
+func refusedSignIn() *Failure {
+	return fail(CodeRefused, "Audible refused the account's sign-in: sign in again on the Bridge's Accounts tab.")
 }
 
 // ImportParams are audible.import's params, built by the server: the account,
@@ -217,16 +219,7 @@ func NewImport(o ImportOptions) *Importer {
 		o.Free = fsutil.FreeBytes
 	}
 	if o.Wait == nil {
-		o.Wait = func(ctx context.Context, d time.Duration) error {
-			t := time.NewTimer(d)
-			defer t.Stop()
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-t.C:
-				return nil
-			}
-		}
+		o.Wait = sleepCtx
 	}
 	if o.CheckPoll <= 0 {
 		o.CheckPoll = time.Second
@@ -240,10 +233,15 @@ func (h *Importer) Kind() string { return ImportKind }
 // Lane is the download lane.
 func (h *Importer) Lane() string { return jobs.LaneDownload }
 
+// tmpBase is the name every temp file of the account's title starts with.
+func (h *Importer) tmpBase(account, asin string) string {
+	return filepath.Join(h.o.TmpDir, account+"-"+asin)
+}
+
 // partPaths are the job's temp files: the partial AAXC (kept across a restart,
 // with its state file) and the decrypted copy.
 func (h *Importer) partPaths(account, asin string) (part, decrypted string) {
-	base := filepath.Join(h.o.TmpDir, account+"-"+asin)
+	base := h.tmpBase(account, asin)
 	return base + ".aaxc.part", base + ".m4b"
 }
 
@@ -327,14 +325,14 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	// job goes on from the rescan instead of failing exists.
 	marker := h.markerPath(acct.ID, p.ASIN)
 	if m, ok := readPlaced(marker, lib.ID, mount); ok {
-		return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, m.Path, m.Size, true, !m.NoEnrich, marker)
+		return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, installed{rel: m.Path, size: m.Size, already: true, enrich: !m.NoEnrich}, marker)
 	}
 
 	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Reading the title from Audible"})
 	rec, err := h.o.Accounts.Title(ctx, acct.ID, p.ASIN)
 	switch {
 	case errors.Is(err, audibleacct.ErrRefused):
-		return nil, fail(CodeRefused, "Audible refused the account's sign-in: sign in again on the Bridge's Accounts tab.")
+		return nil, refusedSignIn()
 	case errors.Is(err, audible.ErrNotInLibrary):
 		return nil, fail(CodeNoRights, "The title isn't in the Audible account's library.")
 	case err != nil:
@@ -404,7 +402,8 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 	if err := writePlaced(marker, lib.ID, mount, placed.RelPath, !enrich); err != nil {
 		h.o.Log.Warn("audible: recording an imported book's placement failed", "account", acct.ID, "asin", p.ASIN, "err", err)
 	}
-	return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, placed.RelPath, placed.Size, placed.AlreadyPresent, enrich, marker)
+	return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID,
+		installed{rel: placed.RelPath, size: placed.Size, already: placed.AlreadyPresent, enrich: enrich}, marker)
 }
 
 // enrichable reports whether the book the title's file lands in at rel may
@@ -419,7 +418,7 @@ func enrichable(rec source.Record, books []link.LibraryBook, rel string) bool {
 	if !ok {
 		return true
 	}
-	b, matched := importjob.NewBookMatcher(books).Match(rec)
+	b, matched := importjob.MatchInBooks(books, rec)
 	return matched && b.Path == joined.Path && !importjob.SpanMismatch(rec, joined)
 }
 
@@ -435,10 +434,20 @@ func bookAt(books []link.LibraryBook, dir string) (link.LibraryBook, bool) {
 	return best, found
 }
 
+// installed is the file an install left in the library: where, its size,
+// whether it was there already (an earlier run's), and whether its book may
+// take the title's ASIN (enrichable).
+type installed struct {
+	rel             string
+	size            int64
+	already, enrich bool
+}
+
 // finish is the steps after the install: the rescan, the ASIN (when enrich)
 // and the result. The placement marker goes once the result is made.
 func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportServer, account, asin string, libraryID int64,
-	rel string, size int64, already, enrich bool, marker string) (*ImportResult, error) {
+	in installed, marker string) (*ImportResult, error) {
+	rel, size := in.rel, in.size
 	h.report(rep, jobs.Progress{Step: StepRescan, Message: "Asking the server to index the book"})
 	bookPath, err := h.rescan(ctx, srv, libraryID, rel)
 	if err != nil {
@@ -446,7 +455,7 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 	}
 
 	enriched := false
-	if enrich {
+	if in.enrich {
 		h.report(rep, jobs.Progress{Step: StepEnrich, Message: "Adding the title's ASIN to the book"})
 		if enriched, err = h.enrichPlaced(ctx, rep, srv, account, libraryID, bookPath, asin); err != nil {
 			return nil, err
@@ -456,7 +465,7 @@ func (h *Importer) finish(ctx context.Context, rep *jobs.Reporter, srv ImportSer
 			"account", account, "asin", asin, "library", libraryID, "path", bookPath)
 	}
 	h.o.Log.Info("audible: imported", "account", account, "asin", asin, "library", libraryID, "path", bookPath,
-		"bytes", size, "already_there", already, "enriched", enriched)
+		"bytes", size, "already_there", in.already, "enriched", enriched)
 	_ = os.Remove(marker)
 	return &ImportResult{LibraryID: libraryID, Path: bookPath, Files: []ImportFile{{Path: rel, Size: size}},
 		Bytes: size, Enriched: enriched}, nil
@@ -510,7 +519,7 @@ type placedMarker struct {
 
 // markerPath is the job's placement marker, beside its temp files.
 func (h *Importer) markerPath(account, asin string) string {
-	return filepath.Join(h.o.TmpDir, account+"-"+asin+placedSuffix)
+	return h.tmpBase(account, asin) + placedSuffix
 }
 
 // placedSuffix names the placement markers (SweepTmp keeps the young ones).
@@ -670,7 +679,7 @@ func (h *Importer) license(ctx context.Context, account, asin string) (audible.L
 	case ctx.Err() != nil:
 		return audible.License{}, ctx.Err()
 	case errors.Is(err, audibleacct.ErrRefused):
-		return audible.License{}, fail(CodeRefused, "Audible refused the account's sign-in: sign in again on the Bridge's Accounts tab.")
+		return audible.License{}, refusedSignIn()
 	case errors.Is(err, audible.ErrNotReleased):
 		return audible.License{}, fail(CodeNotReleased, "Audible says the title isn't released yet: %v", err)
 	case errors.Is(err, audible.ErrNoRights):
@@ -697,12 +706,14 @@ func (h *Importer) download(ctx context.Context, account, asin string, lic audib
 			if total <= 0 {
 				return nil
 			}
-			if free, err := h.o.Free(h.o.TmpDir); err == nil && free < ceil(tmpHeadroom*float64(total))-held {
-				room = fmt.Sprintf("the Bridge's data folder has %s free and needs about %s for this book", size(free), size(ceil(tmpHeadroom*float64(total))-held))
+			need := ceil(tmpHeadroom*float64(total)) - held
+			if free, err := h.o.Free(h.o.TmpDir); err == nil && free < need {
+				room = fmt.Sprintf("the Bridge's data folder has %s free and needs about %s for this book", size(free), size(need))
 				return errNoRoom
 			}
-			if free, err := h.o.Free(nearestDir(mount, rel)); err == nil && free < ceil(libraryHeadroom*float64(total)) {
-				room = fmt.Sprintf("the library has %s free and needs about %s for this book", size(free), size(ceil(libraryHeadroom*float64(total))))
+			need = ceil(transfer.DefaultHeadroom * float64(total))
+			if free, err := h.o.Free(transfer.NearestDir(mount, rel)); err == nil && free < need {
+				room = fmt.Sprintf("the library has %s free and needs about %s for this book", size(free), size(need))
 				return errNoRoom
 			}
 			return nil
@@ -799,7 +810,7 @@ func Destination(p ImportParams, rec source.Record, books []link.LibraryBook) (s
 	if tmpl != "" {
 		mode = placement.ModeTemplate
 	}
-	items, err := importjob.Plan([]source.Record{rec}, importjob.PlanOptions{Mode: mode, Template: tmpl, Books: books, SkipExistsCheck: true})
+	items, err := importjob.Plan([]source.Record{rec}, importjob.PlanOptions{Mode: mode, Template: tmpl, Books: books})
 	if err != nil {
 		return "", fail(CodeNotWritable, "The account's path template can't place the title: %v", err)
 	}
@@ -831,21 +842,6 @@ func isAudioName(p string) bool {
 		return true
 	}
 	return false
-}
-
-// nearestDir is the nearest existing folder of rel's under mount (the library
-// root at the latest): where the library's free space is read.
-func nearestDir(mount, rel string) string {
-	dir := path.Dir(rel)
-	for dir != "." && dir != "/" {
-		if full, err := mapping.SafeJoin(mount, dir); err == nil {
-			if st, err := os.Stat(full); err == nil && st.IsDir() {
-				return full
-			}
-		}
-		dir = path.Dir(dir)
-	}
-	return mount
 }
 
 func ceil(v float64) int64 {
@@ -884,18 +880,15 @@ func SweepTmp(dir string, now time.Time) error {
 		if !e.Type().IsRegular() {
 			continue
 		}
-		if strings.HasSuffix(e.Name(), placedSuffix) {
-			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) < PartialMaxAge {
-				keep[e.Name()] = true
-			}
-			continue
-		}
-		if !strings.HasSuffix(e.Name(), ".aaxc.part") {
+		marker, part := strings.HasSuffix(e.Name(), placedSuffix), strings.HasSuffix(e.Name(), ".aaxc.part")
+		if !marker && !part {
 			continue
 		}
 		if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) < PartialMaxAge {
 			keep[e.Name()] = true
-			keep[filepath.Base(audible.StatePath(e.Name()))] = true
+			if part {
+				keep[filepath.Base(audible.StatePath(e.Name()))] = true
+			}
 		}
 	}
 	var errs []error

@@ -74,8 +74,8 @@ func (it libItem) dedupeKey() string {
 	return "title:" + it.Title
 }
 
-// Library lists the account's owned audiobooks as import records (metadata only;
-// SrcPath is empty - audible.import fetches the file). Items are deduped
+// Library lists the account's owned audiobooks as import records (metadata
+// only: audible.import fetches the file). Items are deduped
 // by dedupeKey, so a repeated page can neither duplicate a book nor spin the pager.
 func (c *Client) Library(ctx context.Context) ([]source.Record, error) {
 	var recs []source.Record

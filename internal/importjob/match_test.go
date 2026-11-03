@@ -107,9 +107,8 @@ func TestSiblingsFromBooks(t *testing.T) {
 	}
 }
 
-// Plan must make NO server calls when given the library books up front - passing a
-// nil client proves it (any per-book query would nil-panic). This is the fix for
-// the 429 the Audible pre-flight hit on a large library.
+// Plan places from the library books it is given and makes no server calls
+// (there is no client to make them with); matching is BookMatcher's.
 func TestPlanUsesLocalBooksNoQueries(t *testing.T) {
 	books := []link.LibraryBook{
 		{Path: "Kinney/Diary of a Wimpy Kid/DWK01 - The First", Authors: []string{"Jeff Kinney"}, Series: []link.SeriesRef{{Name: "Diary of a Wimpy Kid", Position: "1"}}, ASIN: "B1"},
@@ -125,10 +124,10 @@ func TestPlanUsesLocalBooksNoQueries(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("want 2 items, got %d", len(items))
 	}
-	if !items[0].ExistsOnServer {
+	if _, ok := MatchInBooks(books, recs[0]); !ok {
 		t.Error("book B1 should be matched as already on the server (local match)")
 	}
-	if items[1].ExistsOnServer {
+	if _, ok := MatchInBooks(books, recs[1]); ok {
 		t.Error("book B5 should NOT be on the server")
 	}
 }

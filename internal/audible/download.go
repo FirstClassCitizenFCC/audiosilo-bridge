@@ -166,17 +166,16 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		return c.Download(ctx, downloadURL, dest, opts)
 	}
 
-	var (
-		appendTo bool
-		total    int64
-	)
+	// held is what the partial already holds of the file (only when the server
+	// sent the rest of it); total is the file's whole size (-1: unknown).
+	var held, total int64
 	switch {
 	case resp.StatusCode == http.StatusPartialContent && have > 0:
 		start, size, ok := parseContentRange(resp.Header.Get("Content-Range"))
 		if !ok || start != have || (want > 0 && size != want) {
 			return restart() // not the rest of our file
 		}
-		appendTo, total = true, size
+		held, total = have, size
 	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && have > 0:
 		// dest may already be whole: the server says how long the file is.
 		if _, size, ok := parseContentRange(resp.Header.Get("Content-Range")); ok && size == have && (want <= 0 || want == have) {
@@ -192,10 +191,6 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		RemovePartial(dest)
 		return ErrTooLarge
 	}
-	held := int64(0)
-	if appendTo {
-		held = have
-	}
 	if opts.BeforeWrite != nil {
 		if err := opts.BeforeWrite(total, held); err != nil {
 			return err
@@ -203,7 +198,7 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 	}
 
 	flags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-	if appendTo {
+	if held > 0 {
 		flags = os.O_WRONLY | os.O_APPEND
 	} else {
 		fresh := partialState{Size: max(total, 0), ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified")}

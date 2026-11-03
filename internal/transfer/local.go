@@ -73,10 +73,6 @@ type PlaceResult struct {
 // Local installs into a directory on this machine (a local path or a mounted
 // SMB/NFS share).
 type Local struct {
-	// Headroom is the free space wanted at the destination as a factor of the
-	// file's size (0: DefaultHeadroom).
-	Headroom float64
-
 	// Seams for tests: the free-space reader, the hard link, and a hook run
 	// just before the install (a racing writer).
 	free          func(dir string) (int64, error)
@@ -119,7 +115,7 @@ func CleanRel(rel string) (string, error) {
 // Place copies SrcPath to RelPath under Root and never replaces anything:
 //   - the destination holding the same bytes already is AlreadyPresent (an
 //     earlier run installed it), anything else there is ErrExists;
-//   - less free space than Headroom x the size at the destination is
+//   - less free space than DefaultHeadroom x the size at the destination is
 //     ErrDiskFull, as is running out during the copy;
 //   - the copy is staged beside the destination, size-checked and installed
 //     with fsutil.InstallNoReplace; a file that appears meanwhile wins and is
@@ -258,35 +254,34 @@ func sameBytes(ctx context.Context, a, b io.Reader) (bool, error) {
 	}
 }
 
-// checkFree wants Headroom x size free on the filesystem that will hold rel
-// (its nearest existing folder).
+// checkFree wants DefaultHeadroom x size free on the filesystem that will
+// hold rel (its nearest existing folder).
 func (l *Local) checkFree(rootDir, rel string, size int64) error {
 	free := l.free
 	if free == nil {
 		free = fsutil.FreeBytes
 	}
-	headroom := l.Headroom
-	if headroom <= 0 {
-		headroom = DefaultHeadroom
+	n, err := free(NearestDir(rootDir, rel))
+	if err != nil {
+		return fmt.Errorf("reading the library's free space: %w", err)
 	}
-	dir := path.Dir(rel)
-	for {
+	if need := int64(float64(size) * DefaultHeadroom); n < need {
+		return fmt.Errorf("%w: %d bytes free, %d needed", ErrDiskFull, n, need)
+	}
+	return nil
+}
+
+// NearestDir is the nearest existing folder of rel's (a clean library-relative
+// file path) under rootDir, rootDir itself at the latest: where the free space
+// for a file at rel is read.
+func NearestDir(rootDir, rel string) string {
+	for dir := path.Dir(rel); dir != "." && dir != "/"; dir = path.Dir(dir) {
 		full := filepath.Join(rootDir, filepath.FromSlash(dir))
 		if st, err := os.Stat(full); err == nil && st.IsDir() {
-			n, err := free(full)
-			if err != nil {
-				return fmt.Errorf("reading the library's free space: %w", err)
-			}
-			if need := int64(float64(size) * headroom); n < need {
-				return fmt.Errorf("%w: %d bytes free, %d needed", ErrDiskFull, n, need)
-			}
-			return nil
+			return full
 		}
-		if dir == "." {
-			return fmt.Errorf("library root unavailable: %s", rootDir)
-		}
-		dir = path.Dir(dir)
 	}
+	return rootDir
 }
 
 // stage copies src into a new temp file in dir, synced and size-checked, and

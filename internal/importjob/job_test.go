@@ -9,14 +9,13 @@ import (
 )
 
 func TestPlan(t *testing.T) {
-	// An existing sibling in the Cradle series (drives the C##/width-2 convention),
-	// and the existing "Unsouled" the existence check matches by author + title.
+	// An existing sibling in the Cradle series (drives the C##/width-2 convention).
 	books := []link.LibraryBook{
 		{Path: "Will Wight/Cradle/C01 - Unsouled", Title: "Unsouled", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Cradle", Position: "1"}}},
 	}
 	recs := []source.Record{
-		{SrcPath: "/tmp/Soulsmith.m4b", Title: "Soulsmith", Author: "Will Wight", Series: "Cradle", Sequence: 2, HasSequence: true},
-		{SrcPath: "/tmp/Unsouled.m4b", Title: "Unsouled", Author: "Will Wight", Series: "Cradle", Sequence: 1, HasSequence: true},
+		{FileName: "Soulsmith.m4b", Title: "Soulsmith", Author: "Will Wight", Series: "Cradle", Sequence: 2, HasSequence: true},
+		{FileName: "Unsouled.m4b", Title: "Unsouled", Author: "Will Wight", Series: "Cradle", Sequence: 1, HasSequence: true},
 	}
 	items, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
 	if err != nil {
@@ -26,16 +25,9 @@ func TestPlan(t *testing.T) {
 		t.Fatalf("got %d items", len(items))
 	}
 
-	// Book 2 (new) anchors on sibling C01 → C02, and is not yet on the server.
+	// Book 2 (new) anchors on sibling C01 → C02.
 	if items[0].RelPath != "Will Wight/Cradle/C02 - Soulsmith/Soulsmith.m4b" {
 		t.Fatalf("Soulsmith placement = %q", items[0].RelPath)
-	}
-	if items[0].ExistsOnServer {
-		t.Fatal("Soulsmith should not be detected on the server")
-	}
-	// Book 1 already exists (author + title).
-	if !items[1].ExistsOnServer {
-		t.Fatal("Unsouled should be detected on the server")
 	}
 }
 
@@ -54,7 +46,7 @@ func TestPlanMultiAuthorSiblingsBareTitle(t *testing.T) {
 		Title:  "He Who Fights with Monsters 13: A LitRPG Adventure",
 		Author: "Shirtaloon", Series: "He Who Fights with Monsters", Sequence: 13, HasSequence: true,
 	}}
-	items, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books, SkipExistsCheck: true})
+	items, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +63,7 @@ func TestPlanSiblingInSecondSeries(t *testing.T) {
 		Path: "Pratchett/Witches/W01 - Equal Rites", Title: "Equal Rites", Authors: []string{"Terry Pratchett"},
 		Series: []link.SeriesRef{{Name: "Discworld", Position: "3"}, {Name: "Witches", Position: "1"}},
 	}}
-	recs := []source.Record{{SrcPath: "/tmp/wa.m4b", Title: "Wyrd Sisters", Author: "Terry Pratchett", Series: "Witches", Sequence: 2, HasSequence: true}}
+	recs := []source.Record{{FileName: "wa.m4b", Title: "Wyrd Sisters", Author: "Terry Pratchett", Series: "Witches", Sequence: 2, HasSequence: true}}
 	items, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
 	if err != nil {
 		t.Fatal(err)
@@ -79,66 +71,10 @@ func TestPlanSiblingInSecondSeries(t *testing.T) {
 	if items[0].RelPath != "Pratchett/Witches/W02 - Wyrd Sisters/wa.m4b" {
 		t.Fatalf("placement = %q", items[0].RelPath)
 	}
-	if items[0].ExistsOnServer {
-		t.Fatal("a new book in the series must not match its sibling")
-	}
-}
-
-func TestApplyDestinations(t *testing.T) {
-	items := []PlannedItem{
-		{Record: source.Record{Key: "A1"}, RelPath: "Various/Halo/Evolutions/Halo - Evolutions.m4b"},
-		{Record: source.Record{Key: "A2"}, RelPath: "Will Wight/Cradle/C02 - Soulsmith/Soulsmith.m4b"},
-		{Record: source.Record{Key: "A3"}, RelPath: "Author/Book/Book.m4b"},
-	}
-	ApplyDestinations(items, map[string]string{
-		"A1": "HALO/Evolutions/Halo - Evolutions.m4b", // normal override
-		"A3": "../outside/Book.m4b",                   // traversal is ignored
-		"A9": "Nowhere/x.m4b",                         // unknown key is ignored
-	})
-	if items[0].RelPath != "HALO/Evolutions/Halo - Evolutions.m4b" || items[0].Note != "manually chosen destination" {
-		t.Fatalf("override not applied: %+v", items[0])
-	}
-	if items[1].RelPath != "Will Wight/Cradle/C02 - Soulsmith/Soulsmith.m4b" {
-		t.Fatalf("untouched item changed: %q", items[1].RelPath)
-	}
-	if items[2].RelPath != "Author/Book/Book.m4b" {
-		t.Fatalf("unsafe override applied: %q", items[2].RelPath)
-	}
-	// Leading slashes are stripped, not treated as absolute host paths.
-	ApplyDestinations(items, map[string]string{"A2": "//Flat/Soulsmith.m4b"})
-	if items[1].RelPath != "Flat/Soulsmith.m4b" {
-		t.Fatalf("slash-prefixed override = %q", items[1].RelPath)
-	}
-}
-
-// A record whose automatic match the user rejected ("Not on server") must be
-// planned as not existing, so Run imports it instead of skipping it.
-func TestPlanRejectedExistence(t *testing.T) {
-	books := []link.LibraryBook{{Path: "Will Wight/Cradle/C01 - Unsouled", Title: "Unsouled", Authors: []string{"Will Wight"}, Series: []link.SeriesRef{{Name: "Cradle", Position: "1"}}}}
-	recs := []source.Record{{Key: "A1", SrcPath: "/tmp/Unsouled.m4b", Title: "Unsouled", Author: "Will Wight", Series: "Cradle", Sequence: 1, HasSequence: true}}
-
-	// Sanity: without a rejection the record is detected on the server.
-	plain, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !plain[0].ExistsOnServer {
-		t.Fatalf("record should match the server book: %+v", plain[0])
-	}
-
-	rej, err := Plan(recs, PlanOptions{
-		Mode: placement.ModeAuto, Books: books, Rejected: map[string]bool{"A1": true},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rej[0].ExistsOnServer {
-		t.Fatalf("rejected record still planned as on server: %+v", rej[0])
-	}
 }
 
 func TestPlanTemplateMode(t *testing.T) {
-	recs := []source.Record{{SrcPath: "/x/Warbreaker.m4b", Title: "Warbreaker", Author: "Brandon Sanderson"}}
+	recs := []source.Record{{FileName: "Warbreaker.m4b", Title: "Warbreaker", Author: "Brandon Sanderson"}}
 	items, err := Plan(recs, PlanOptions{
 		Mode: placement.ModeTemplate, Template: "{Author}/{Title}/{OriginalFilename}",
 	})

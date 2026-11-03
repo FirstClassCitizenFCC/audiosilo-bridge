@@ -2242,11 +2242,12 @@ internal/
             author set and position, the same book owned twice, and a claim of the
             keeper's work keeps it at any score; a title that folds to nothing has
             no key), SpanMismatch (a range record on a book with no
-            range: no enrichment), Plan(records, {Mode, Template, Books, Rejected}) (siblings by
-            tolerant author + series, AuthorFolders reusing an existing author folder
-            spelling, the existence check; no per-record server query),
-            ApplyDestinations (Run went in Phase 4b: audiblejob's import runs the
-            steps). The manager's serverapi client went: the Bridge holds
+            range: no enrichment), Plan(records, {Mode, Template, Books}) (destinations
+            only: siblings by tolerant author + series, AuthorFolders reusing an
+            existing author folder spelling; no per-record server query; whether
+            the library holds a record is BookMatcher's). Run, the existence check
+            and ApplyDestinations went in Phase 4b: audiblejob's import runs the
+            steps. The manager's serverapi client went: the Bridge holds
             the paged listing. Deps: link, placement, source,
             audiosilo-server/pkg/match.
   placement/ where a new book goes (the manager's, as is): Auto (series siblings'
@@ -2261,7 +2262,7 @@ internal/
             (Phase 4b, hardened before it writes a library): every call through an
             os.Root at the mapping's root (a symlink can't lead out); the same bytes
             already there are AlreadyPresent, anything else (a different file, a
-            folder, a link) ErrExists; Headroom (1.1x) free at the nearest existing
+            folder, a link) ErrExists; DefaultHeadroom (1.1x) free at the nearest existing
             folder else ErrDiskFull (also ENOSPC/EDQUOT during the copy); staged as a
             .audiosilo-import-*.part dotfile beside the destination (0644, synced,
             size-checked), installed with fsutil.InstallNoReplace, a file that

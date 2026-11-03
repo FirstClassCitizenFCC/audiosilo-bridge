@@ -104,8 +104,8 @@ func TestClientLibrary(t *testing.T) {
 	if r.ASIN != "B01" || r.Author != "Will Wight" || r.Series != "Cradle" || !r.HasSequence || r.Sequence != 2 {
 		t.Fatalf("mapped record wrong: %+v", r)
 	}
-	if r.Year != "2016" || r.FileName != "Soulsmith.m4b" || r.SrcPath != "" {
-		t.Fatalf("record fields: year=%q file=%q src=%q", r.Year, r.FileName, r.SrcPath)
+	if r.Year != "2016" || r.FileName != "Soulsmith.m4b" {
+		t.Fatalf("record fields: year=%q file=%q", r.Year, r.FileName)
 	}
 	if r.ReleaseDate != "2016-08-01" || r.SeriesPosition != "2" || len(r.Authors) != 1 || r.Authors[0] != "Will Wight" {
 		t.Fatalf("record: release=%q position=%q authors=%q", r.ReleaseDate, r.SeriesPosition, r.Authors)

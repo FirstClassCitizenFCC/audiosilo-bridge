@@ -57,3 +57,40 @@ func TestFreeBytes(t *testing.T) {
 		t.Fatal("permission is not no-space")
 	}
 }
+
+func TestNoReplaceRenameRefusesExistingTarget(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	for name, rename := range map[string]func(*os.Root, string, string) error{"platform": RenameNoReplace, "portable": RenameIfAbsent} {
+		t.Run(name, func(t *testing.T) {
+			if err := root.WriteFile("a.mp3", []byte("staged"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := root.WriteFile("b.mp3", []byte("existing"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := rename(root, "a.mp3", "b.mp3"); !errors.Is(err, ErrExists) {
+				t.Fatal("replaced an existing target:", err)
+			}
+			if got, _ := root.ReadFile("b.mp3"); string(got) != "existing" {
+				t.Fatal("target overwritten")
+			}
+			if err := root.Remove("b.mp3"); err != nil {
+				t.Fatal(err)
+			}
+			if err := rename(root, "a.mp3", "b.mp3"); err != nil {
+				t.Fatal("absent target refused:", err)
+			}
+			if got, _ := root.ReadFile("b.mp3"); string(got) != "staged" {
+				t.Fatal("rename lost bytes")
+			}
+			if _, err := root.Lstat("a.mp3"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("source kept", err)
+			}
+			_ = root.Remove("b.mp3")
+		})
+	}
+}

@@ -4,8 +4,7 @@ package source
 
 // Record is normalized metadata for one importable audiobook file.
 type Record struct {
-	SrcPath    string // a local file's path ("" for an Audible title; FileName names it)
-	FileName   string // destination file name (Plan falls back to SrcPath's base)
+	FileName   string // destination file name
 	Title      string
 	TitleShort string
 	Author     string

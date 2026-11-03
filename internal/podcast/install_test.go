@@ -7,6 +7,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/kodestar/audiosilo-bridge/internal/fsutil"
 )
 
 // withLink replaces the hard link for one test.
@@ -18,7 +20,7 @@ func withLink(t *testing.T, fn func(root *os.Root, oldname, newname string) erro
 }
 
 func TestInstallFallsBackToNoReplaceRenameWithoutHardLinks(t *testing.T) {
-	for _, unsupported := range unsupportedLinkErrors {
+	for _, unsupported := range fsutil.UnsupportedLinkErrors {
 		t.Run(unsupported.Error(), func(t *testing.T) {
 			root, j := journalFixture(t)
 			withLink(t, func(_ *os.Root, oldname, newname string) error {
@@ -51,7 +53,7 @@ func TestInstallFallbackRefusesAnExistingTarget(t *testing.T) {
 		if err := r.WriteFile(newname, foreign, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: unsupportedLinkErrors[0]}
+		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: fsutil.UnsupportedLinkErrors[0]}
 	})
 	if err := Publish(root, j, time.Now(), nil); !errors.Is(err, ErrInvalidFile) {
 		t.Fatal("fallback replaced or failed oddly:", err)
@@ -75,43 +77,10 @@ func TestInstallFallbackRefusesAnExistingTarget(t *testing.T) {
 	}
 }
 
-func TestNoReplaceRenameRefusesExistingTarget(t *testing.T) {
-	root, _ := journalFixture(t)
-	for name, rename := range map[string]func(*os.Root, string, string) error{"platform": renameNoReplace, "portable": renameIfAbsent} {
-		t.Run(name, func(t *testing.T) {
-			if err := root.WriteFile("Fixture Show/a.mp3", []byte("staged"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := root.WriteFile("Fixture Show/b.mp3", []byte("existing"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if err := rename(root, "Fixture Show/a.mp3", "Fixture Show/b.mp3"); !errors.Is(err, ErrInvalidFile) {
-				t.Fatal("replaced an existing target:", err)
-			}
-			if got, _ := root.ReadFile("Fixture Show/b.mp3"); string(got) != "existing" {
-				t.Fatal("target overwritten")
-			}
-			if err := root.Remove("Fixture Show/b.mp3"); err != nil {
-				t.Fatal(err)
-			}
-			if err := rename(root, "Fixture Show/a.mp3", "Fixture Show/b.mp3"); err != nil {
-				t.Fatal("absent target refused:", err)
-			}
-			if got, _ := root.ReadFile("Fixture Show/b.mp3"); string(got) != "staged" {
-				t.Fatal("rename lost bytes")
-			}
-			if _, err := root.Lstat("Fixture Show/a.mp3"); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("source kept", err)
-			}
-			_ = root.Remove("Fixture Show/b.mp3")
-		})
-	}
-}
-
 func TestRecoveryAfterFallbackRenameBeforeFeedCommit(t *testing.T) {
 	root, j := journalFixture(t)
 	withLink(t, func(_ *os.Root, oldname, newname string) error {
-		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: unsupportedLinkErrors[0]}
+		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: fsutil.UnsupportedLinkErrors[0]}
 	})
 	crash := errors.New("interrupted after rename")
 	if err := Publish(root, j, time.Now(), func(at string) error {
