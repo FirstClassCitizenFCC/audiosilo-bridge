@@ -68,7 +68,6 @@ func TestExtractCandidatesSentenceInitialExclusion(t *testing.T) {
 	kael := candidateByForm(c, "Kael")
 	if kael == nil {
 		t.Fatalf("Kael should be a candidate (non_initial >= 2); forms=%v", forms(c))
-		return
 	}
 	if kael.NonInitial < 2 {
 		t.Errorf("Kael non_initial = %d, want >= 2", kael.NonInitial)
@@ -87,7 +86,6 @@ func TestExtractCandidatesMultiWordPhrase(t *testing.T) {
 	lc := candidateByForm(c, "Leafs Crossing")
 	if lc == nil {
 		t.Fatalf("Leafs Crossing phrase should be a candidate; forms=%v", forms(c))
-		return
 	}
 	if lc.Count < 2 {
 		t.Errorf("Leafs Crossing count = %d, want >= 2", lc.Count)
@@ -135,7 +133,6 @@ func TestExtractCandidatesLowercaseVariant(t *testing.T) {
 	lower := candidateByForm(c, "blades")
 	if lower == nil {
 		t.Fatalf("lowercase variant blades should be captured; forms=%v", forms(c))
-		return
 	}
 	if lower.Form != "blades" {
 		t.Errorf("lowercase variant surface = %q, want exact lowercase form", lower.Form)
