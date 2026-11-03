@@ -2112,8 +2112,8 @@ internal/
             ASIN, states them (UnavailableReason "" available, "pre-order"
             preorder, else unavailable with the reason), matches with
             importjob.BookMatcher (how = asin when the book's ASIN is the title's,
-            else fuzzy; a book at the library's root, ".", is never named: the
-            server takes clean paths only), cuts a title's authors to 20 (the
+            else fuzzy; a book path goes out only as "." (a library that is one
+            book) or a clean path below the root, as the server takes), cuts a title's authors to 20 (the
             server refuses a whole call over more), PUTs the titles in calls of 500
             under ONE poll id (job, attempt and a random suffix), the last final (an
             empty library sends one empty final call, so the server marks every

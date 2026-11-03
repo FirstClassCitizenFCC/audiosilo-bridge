@@ -202,8 +202,6 @@ func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 		default:
 			res.Unavailable++
 		}
-		// A book at the library's root (".") can't be named in a match: the
-		// server takes only a clean path below the root.
 		if b, ok := matcher.Match(rec); ok && matchable(b.Path) {
 			how := link.MatchFuzzy
 			if strings.EqualFold(b.ASIN, rec.ASIN) {
@@ -282,11 +280,11 @@ func (h *Handler) fail(ctx context.Context, account, why string) error {
 	return errors.New(why)
 }
 
-// matchable reports whether p is a book path the server takes in a match:
-// clean and below the library's root (a library that is one book lists it as
-// ".").
+// matchable reports whether p is a book path the server takes in a match and
+// an enrichment: "." (a library that is one book, at its root) or a clean path
+// below the root (no "..", not absolute).
 func matchable(p string) bool {
-	return p != "" && strings.Trim(path.Clean("/"+p), "/") == p
+	return p == "." || (p != "" && strings.Trim(path.Clean("/"+p), "/") == p)
 }
 
 // allBooks reads every page of the library's books.

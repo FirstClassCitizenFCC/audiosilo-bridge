@@ -50,7 +50,7 @@ func TestAudibleWireMirror(t *testing.T) {
 			_, _ = w.Write([]byte(`{"books":[],"next":null}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/bridge/libraries/1/enrichment":
 			switch r.URL.Query().Get("path") {
-			case "A/One":
+			case "A/One", ".":
 				w.WriteHeader(http.StatusNoContent)
 			case "A/Set":
 				w.WriteHeader(http.StatusConflict)
@@ -139,6 +139,16 @@ func TestAudibleWireMirror(t *testing.T) {
 	}
 	if b := calls[len(calls)-1].body; b != `{"asin":"B000000001"}` {
 		t.Fatalf("enrichment body = %s", b)
+	}
+	if q := calls[len(calls)-1].query; q != "path=A%2FOne" {
+		t.Fatalf("enrichment query = %q", q)
+	}
+	// The library's root book (a library that is one book) is "." on the wire.
+	if err := c.Enrich(ctx, 1, ".", "B000000001"); err != nil {
+		t.Fatal(err)
+	}
+	if q := calls[len(calls)-1].query; q != "path=." {
+		t.Fatalf("root enrichment query = %q", q)
 	}
 	if err := c.Enrich(ctx, 1, "A/Set", "B000000001"); !errors.Is(err, ErrASINSet) {
 		t.Fatalf("asin set = %v", err)

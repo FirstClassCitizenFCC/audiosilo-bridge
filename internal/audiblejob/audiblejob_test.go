@@ -252,8 +252,8 @@ func TestPollEmptyLibraryIsFinal(t *testing.T) {
 }
 
 // The poll keeps to what the server takes: an anthology's credits are cut to
-// maxAuthors, a book at the library's root (".") is never named in a match, and
-// a preorder's ASIN never goes onto a book (it isn't out, so that is another
+// maxAuthors, a book at the library's root (".") is matched and enriched as
+// ".", and a preorder's ASIN never goes onto a book (it isn't out, so that is another
 // edition).
 func TestPollKeepsToTheServersRules(t *testing.T) {
 	t.Parallel()
@@ -285,14 +285,27 @@ func TestPollKeepsToTheServersRules(t *testing.T) {
 	if a := byASIN["B0FAKE0040"].Authors; len(a) != maxAuthors || a[0] != "Author 0" || a[maxAuthors-1] != "Author 19" {
 		t.Fatalf("authors = %v", a)
 	}
-	if m := byASIN["B0FAKE0041"].Match; m != nil {
-		t.Fatalf("the library's root named in a match: %+v", m)
+	if m := byASIN["B0FAKE0041"].Match; m == nil || m.Path != "." {
+		t.Fatalf("the library's root match = %+v", m)
 	}
 	if p := byASIN["B0FAKE0005"]; p.State != link.AudiblePreorder || p.Match == nil || p.Match.How != link.MatchFuzzy {
 		t.Fatalf("preorder = %+v", p)
 	}
-	if len(fs.enriched) != 0 || res.Enriched != 0 || res.Matched != 1 {
+	if len(fs.enriched) != 1 || fs.enriched["."] != "B0FAKE0041" || res.Enriched != 1 || res.Matched != 2 {
 		t.Fatalf("enriched %v, result %+v", fs.enriched, res)
+	}
+}
+
+func TestMatchable(t *testing.T) {
+	t.Parallel()
+	for p, want := range map[string]bool{
+		".": true, "Quill/Canopy": true, "Canopy": true,
+		"": false, "..": false, "../Canopy": false, "Quill/../Canopy": false, "/Quill/Canopy": false,
+		"Quill//Canopy": false, "Quill/Canopy/": false, "./Canopy": false, "Quill/.": false,
+	} {
+		if got := matchable(p); got != want {
+			t.Errorf("matchable(%q) = %v, want %v", p, got, want)
+		}
 	}
 }
 
