@@ -2145,7 +2145,11 @@ internal/
             use: ASIN exact first, then author + series + title tokens; a book in
             several series is a candidate under each; narrators join the person
             gate; an Audible range position "5-6" is matched at its start, so the
-            title's "Pack 3" never stands in for it), MatchScored (the match's
+            title's "Pack 3" never stands in for it; a book the listing gives a
+            range position (a pack's folder, LAM05-06 as "5-6") is matched only
+            by a range title starting where it does, tried before the single
+            volumes, never by a single volume, so it never takes a volume's ASIN
+            by enrichment), MatchScored (the match's
             score, match.ScoreASIN for an ASIN), Contested(path) (a path claimed by
             two records: derive nothing durable, like an ASIN backfill), KeepBest
             (of the claims on one path the single best score keeps it; a tie keeps

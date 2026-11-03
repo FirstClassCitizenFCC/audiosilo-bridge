@@ -48,11 +48,11 @@ func TestMatcherOverMissShapes(t *testing.T) {
 		// "(Unabridged)" after the genre tail, the position from the folder code.
 		{Path: "Garth/Prime Hunter/PH15 - 15", Title: "The Prime Hunter 15:  A LitRPG Adventure (Unabridged)", Authors: []string{"Zog Garth"}, Series: series("The Prime Hunter", "15")},
 		{Path: "Garth/Prime Hunter/PH14 - 14", Title: "The Prime Hunter 14:  A LitRPG Adventure (Unabridged)", Authors: []string{"Zog Garth"}, Series: series("The Prime Hunter", "14")},
-		// Publisher packs: the listing reads LAM05-06 as 5.
-		{Path: "Sisk/Arch Mage/AM01-02", Title: "Arch Mage: Publisher's Pack - Arch Mage, Book 1, 2", Authors: []string{"Mo Sisk"}, Series: series("Arch Mage", "1")},
-		{Path: "Sisk/Arch Mage/AM03-04", Title: "Arch Mage: Publisher's Pack 2 - Arch Mage, Book 3, 4", Authors: []string{"Mo Sisk"}, Series: series("Arch Mage", "3")},
-		{Path: "Sisk/Arch Mage/AM05-06", Title: "Arch Mage: Publisher's Pack 3 - Arch Mage, Book 5, 6", Authors: []string{"Mo Sisk"}, Series: series("Arch Mage", "5")},
-		{Path: "Sisk/Arch Mage/AM07-08", Title: "Arch Mage: Publisher's Pack 4 - Books 7-8", Authors: []string{"Mo Sisk"}, Series: series("Arch Mage", "7")},
+		// Publisher packs: the listing reads LAM05-06 as the range "5-6".
+		{Path: "Sisk/Arch Mage/AM01-02", Title: "Arch Mage: Publisher's Pack - Arch Mage, Book 1, 2", Authors: []string{"Mo Sisk"}, Series: series("Arch Mage", "1-2")},
+		{Path: "Sisk/Arch Mage/AM03-04", Title: "Arch Mage: Publisher's Pack 2 - Arch Mage, Book 3, 4", Authors: []string{"Mo Sisk"}, Series: series("Arch Mage", "3-4")},
+		{Path: "Sisk/Arch Mage/AM05-06", Title: "Arch Mage: Publisher's Pack 3 - Arch Mage, Book 5, 6", Authors: []string{"Mo Sisk"}, Series: series("Arch Mage", "5-6")},
+		{Path: "Sisk/Arch Mage/AM07-08", Title: "Arch Mage: Publisher's Pack 4 - Books 7-8", Authors: []string{"Mo Sisk"}, Series: series("Arch Mage", "7-8")},
 		// Sub-series volumes: only volume 1 is here, as series book 4.
 		{Path: "Yrs/Fate Cycle/FC04 - Strands of Fate - Volume 1", Title: "Strands of Fate: Volume 1", Authors: []string{"Yrs Ill"}, Series: series("Fate Cycle", "")},
 		// A Dresden-like short story collection: junk title, position from the folder.
@@ -76,6 +76,8 @@ func TestMatcherOverMissShapes(t *testing.T) {
 		{audibleRec("B0SYN00031", "Arch Mage: Publisher's Pack 2", "Mo Sisk", "Arch Mage", "3-4"), "Sisk/Arch Mage/AM03-04"},
 		{audibleRec("B0SYN00032", "Arch Mage: Publisher's Pack 3", "Mo Sisk", "Arch Mage", "5-6"), "Sisk/Arch Mage/AM05-06"},
 		{audibleRec("B0SYN00033", "Arch Mage: Publisher's Pack 4", "Mo Sisk", "Arch Mage", "7-8"), "Sisk/Arch Mage/AM07-08"},
+		// A single volume of the series is in none of the packs.
+		{audibleRec("B0SYN00034", "Arch Mage 5", "Mo Sisk", "Arch Mage", "5"), ""},
 		{audibleRec("B0SYN00041", "Short Cases", "Jim Butch", "The Wizard Files", "15.5"), "Butch/Wizard Files/WF15.5 Short Cases"},
 		{audibleRec("B0SYN00051", "A House at the Edge", "Amy Sparks", "", ""), ""},
 	}
@@ -145,6 +147,65 @@ func TestKeepBest(t *testing.T) {
 				break
 			}
 		}
+	}
+}
+
+// TestMatcherRangeBooks: a book whose position is a range (a pack's folder,
+// "LAM05-06" listed as "5-6") is matched by the pack starting where it does,
+// before a single volume's folder at that position; never by a single volume
+// (by position or by title), so it never takes a volume's ASIN by enrichment;
+// and never by a pack starting elsewhere.
+func TestMatcherRangeBooks(t *testing.T) {
+	pack := audibleRec("B0SYN00081", "Iron Vale: Books 5-6", "Ona Fell", "Iron Vale", "5-6")
+	vol5 := audibleRec("B0SYN00082", "Iron Vale 5", "Ona Fell", "Iron Vale", "5")
+	ash := audibleRec("B0SYN00083", "Ash Road", "Ona Fell", "Iron Vale", "5")
+	cases := []struct {
+		name  string
+		books []link.LibraryBook
+		rec   source.Record
+		want  string
+	}{
+		{"a single volume by position", []link.LibraryBook{
+			{Path: "Fell/Iron Vale/IV05-06", Title: "Iron Vale", Authors: []string{"Ona Fell"}, Series: series("Iron Vale", "5-6")},
+		}, vol5, ""},
+		{"a single volume by title", []link.LibraryBook{
+			{Path: "Fell/Iron Vale/IV05-06", Title: "Ash Road and Ember Road", Authors: []string{"Ona Fell"}, Series: series("Iron Vale", "5-6")},
+		}, ash, ""},
+		{"a range in another series too", []link.LibraryBook{
+			{Path: "Fell/Iron Vale/IV05-06", Title: "Iron Vale", Authors: []string{"Ona Fell"},
+				Series: []link.SeriesRef{{Name: "Fell Worlds", Position: "5"}, {Name: "Iron Vale", Position: "5-6"}}},
+		}, vol5, ""},
+		{"the pack on its range", []link.LibraryBook{
+			{Path: "Fell/Iron Vale/IV05-06", Title: "Iron Vale", Authors: []string{"Ona Fell"}, Series: series("Iron Vale", "5-6")},
+		}, pack, "Fell/Iron Vale/IV05-06"},
+		{"the pack on its range before volume 5", []link.LibraryBook{
+			{Path: "Fell/Iron Vale/IV05 - Iron Vale", Title: "Iron Vale 5", Authors: []string{"Ona Fell"}, Series: series("Iron Vale", "5")},
+			{Path: "Fell/Iron Vale/IV05-06", Title: "Iron Vale", Authors: []string{"Ona Fell"}, Series: series("Iron Vale", "5-6")},
+		}, pack, "Fell/Iron Vale/IV05-06"},
+		{"the pack on a folder at its start", []link.LibraryBook{
+			{Path: "Fell/Iron Vale/IV05 - Books 5-6", Title: "Iron Vale", Authors: []string{"Ona Fell"}, Series: series("Iron Vale", "5")},
+		}, pack, "Fell/Iron Vale/IV05 - Books 5-6"},
+		{"not another pack", []link.LibraryBook{
+			{Path: "Fell/Iron Vale/IV03-04", Title: "Iron Vale: Books 3-4", Authors: []string{"Ona Fell"}, Series: series("Iron Vale", "3-4")},
+		}, pack, ""},
+		{"a range's own ASIN", []link.LibraryBook{
+			{Path: "Fell/Iron Vale/IV05-06", Title: "Iron Vale", Authors: []string{"Ona Fell"}, ASIN: "B0SYN00082", Series: series("Iron Vale", "5-6")},
+		}, vol5, "Fell/Iron Vale/IV05-06"},
+	}
+	for _, tc := range cases {
+		got := ""
+		if b, ok := NewBookMatcher(tc.books).Match(tc.rec); ok {
+			got = b.Path
+		}
+		if got != tc.want {
+			t.Errorf("%s: %q #%s matched %q, want %q", tc.name, tc.rec.Title, tc.rec.SeriesPosition, got, tc.want)
+		}
+	}
+	// The folder the old listing gave as "5" was volume 5's by position: the
+	// range is what keeps them apart.
+	old := []link.LibraryBook{{Path: "Fell/Iron Vale/IV05-06", Title: "Iron Vale", Authors: []string{"Ona Fell"}, Series: series("Iron Vale", "5")}}
+	if _, ok := NewBookMatcher(old).Match(vol5); !ok {
+		t.Error("a single position no longer matches its volume")
 	}
 }
 

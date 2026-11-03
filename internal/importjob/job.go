@@ -126,13 +126,16 @@ func ApplyDestinations(items []PlannedItem, dests map[string]string) {
 // ASIN step anyway), so a poll matching a whole Audible library doesn't
 // normalise every author of the library for every title. A book in several
 // series is a candidate under each of them (any one may be the series Audible
-// names). It also counts how many records have claimed each matched path (see
-// Contested). Not safe for concurrent use.
+// names). A book whose position is a range ("5-6": a pack or an omnibus, the
+// listing's reading of a folder code like LAM05-06) is matched by a range title
+// only (see MatchScored). It also counts how many records have claimed each
+// matched path (see Contested). Not safe for concurrent use.
 type BookMatcher struct {
 	books  []link.LibraryBook
 	cands  []match.Book
 	people []people       // cands[i]'s normalised author and narrators
 	owner  []int          // cands[i] is a candidate for books[owner[i]]
+	span   []bool         // cands[i]'s book spans books: a range position in any series
 	claims map[string]int // matched path -> how many records claimed it
 	subset []match.Book   // reused per Match: the candidates past the person gate
 	subIdx []int          // subset[j] is cands[subIdx[j]]
@@ -179,19 +182,30 @@ func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
 	for i, b := range books {
 		base := match.Book{Title: b.Title, Author: Credit(b.Authors), ASIN: b.ASIN, Narrators: b.Narrators}
 		who := normalisedPeople(base.Author, base.Narrators)
-		if len(b.Series) == 0 {
-			m.cands = append(m.cands, base)
-			m.people = append(m.people, who)
-			m.owner = append(m.owner, i)
-			continue
-		}
-		for _, s := range b.Series {
-			c := base
-			c.Series = s.Name
-			c.SeriesIndex, _ = parsePosition(s.Position)
+		add := func(c match.Book) {
 			m.cands = append(m.cands, c)
 			m.people = append(m.people, who)
 			m.owner = append(m.owner, i)
+		}
+		if len(b.Series) == 0 {
+			add(base)
+			m.span = append(m.span, false)
+			continue
+		}
+		spans := slices.ContainsFunc(b.Series, func(s link.SeriesRef) bool {
+			_, ok := rangeStart(s.Position)
+			return ok
+		})
+		for _, s := range b.Series {
+			c := base
+			c.Series = s.Name
+			var ok bool
+			if c.SeriesIndex, ok = parsePosition(s.Position); !ok {
+				// A range is placed at its start, as a range title is.
+				c.SeriesIndex, _ = rangeStart(s.Position)
+			}
+			add(c)
+			m.span = append(m.span, spans)
 		}
 	}
 	return m
@@ -216,13 +230,15 @@ func (m *BookMatcher) MatchScored(rec source.Record) (link.LibraryBook, float64,
 	// A range position ("5-6": a pack of two books) is placed at its start, so a
 	// number in the title ("Pack 3") never stands in for the position the store
 	// gave.
+	isRange := false
 	if !q.HasSequence {
-		q.Sequence, q.HasSequence = rangeStart(rec.SeriesPosition)
+		q.Sequence, isRange = rangeStart(rec.SeriesPosition)
+		q.HasSequence = isRange
 	}
 	if rec.Narrator != "" {
 		q.Narrators = []string{rec.Narrator}
 	}
-	i, score, ok := m.best(q)
+	i, score, ok := m.best(q, isRange)
 	if !ok {
 		return link.LibraryBook{}, 0, false
 	}
@@ -246,8 +262,14 @@ func rangeStart(pos string) (float64, bool) {
 
 // best is match.BestWith(m.cands, q, m.opts): its ASIN step over every
 // candidate, then match.BestWith over the candidates past the person gate only
-// (in their order, so ties break the same way), its index mapped back.
-func (m *BookMatcher) best(q match.Query) (int, float64, bool) {
+// (in their order, so ties break the same way), its index mapped back. A book
+// that spans books (m.span) is never a single volume's: a title that is no range
+// skips it, or a pack's folder would look like its first volume and take that
+// volume's ASIN by enrichment. A range title (q at the range's start) tries the
+// spanning books starting where it does first, then the single volumes (a
+// folder holding the pack under its first volume's position); a spanning book
+// starting elsewhere is another pack.
+func (m *BookMatcher) best(q match.Query, isRange bool) (int, float64, bool) {
 	if q.ASIN != "" {
 		for i := range m.cands {
 			if m.cands[i].ASIN != "" && strings.EqualFold(q.ASIN, m.cands[i].ASIN) {
@@ -256,18 +278,28 @@ func (m *BookMatcher) best(q match.Query) (int, float64, bool) {
 		}
 	}
 	qp := normalisedPeople(q.Author, q.Narrators)
-	m.subset, m.subIdx = m.subset[:0], m.subIdx[:0]
-	for i := range m.cands {
-		if m.people[i].passes(qp) {
-			m.subset = append(m.subset, m.cands[i])
-			m.subIdx = append(m.subIdx, i)
+	pass := func(keep func(i int) bool) (int, float64, bool) {
+		m.subset, m.subIdx = m.subset[:0], m.subIdx[:0]
+		for i := range m.cands {
+			if keep(i) && m.people[i].passes(qp) {
+				m.subset = append(m.subset, m.cands[i])
+				m.subIdx = append(m.subIdx, i)
+			}
 		}
+		j, score, ok := match.BestWith(m.subset, q, m.opts)
+		if !ok {
+			return -1, 0, false
+		}
+		return m.subIdx[j], score, true
 	}
-	j, score, ok := match.BestWith(m.subset, q, m.opts)
-	if !ok {
-		return -1, 0, false
+	single := func(i int) bool { return !m.span[i] }
+	if !isRange {
+		return pass(single)
 	}
-	return m.subIdx[j], score, true
+	if i, score, ok := pass(func(i int) bool { return m.span[i] && m.cands[i].SeriesIndex == q.Sequence }); ok {
+		return i, score, true
+	}
+	return pass(single)
 }
 
 // Contested reports whether more than one record has matched path since the
