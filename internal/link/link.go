@@ -332,6 +332,8 @@ type APIError struct {
 	Status  int
 	Code    string
 	Message string
+	// RetryAfter is the answer's Retry-After (a 429's wait), 0 when it sent none.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -602,7 +604,26 @@ func (c *Client) doFound(ctx context.Context, method, path string, q url.Values,
 		}
 		return true, nil
 	}
-	return false, answerError(resp.StatusCode, raw)
+	err = answerError(resp.StatusCode, raw)
+	var ae *APIError
+	if errors.As(err, &ae) {
+		ae.RetryAfter = retryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
+	return false, err
+}
+
+// retryAfter reads a Retry-After value (delay seconds or an HTTP date); 0 when
+// absent, unreadable or past.
+func retryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if n, err := strconv.Atoi(v); err == nil {
+		// Clamped before the multiply so a huge value can't overflow.
+		return time.Duration(min(max(n, 0), 24*3600)) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		return max(t.Sub(now), 0)
+	}
+	return 0
 }
 
 // answerError maps a failed answer to its sentinel or an APIError.

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The Audible routes as the server's handlers_audible.go answers them: methods,
@@ -155,5 +156,43 @@ func TestAudibleWireMirror(t *testing.T) {
 	}
 	if err := c.Enrich(ctx, 1, "A/None", "B000000001"); !errors.Is(err, ErrNoBook) {
 		t.Fatalf("no book = %v", err)
+	}
+}
+
+// A 429 carries its Retry-After (seconds or an HTTP date) on the APIError, so
+// a caller can wait what the server asked; none is 0.
+func TestRateLimitedRetryAfter(t *testing.T) {
+	t.Parallel()
+	var retryAfter string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if retryAfter != "" {
+			w.Header().Set("Retry-After", retryAfter)
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}`))
+	}))
+	defer server.Close()
+	c, _ := New(server.URL, "tok", "0.9.0")
+	for _, tc := range []struct {
+		header   string
+		min, max time.Duration
+	}{
+		{"7", 7 * time.Second, 7 * time.Second},
+		{"", 0, 0},
+		{"soon", 0, 0},
+		{"-3", 0, 0},
+		{"99999999999999", 24 * time.Hour, 24 * time.Hour},
+		{time.Now().Add(90 * time.Second).UTC().Format(http.TimeFormat), 80 * time.Second, 90 * time.Second},
+		{time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat), 0, 0},
+	} {
+		retryAfter = tc.header
+		err := c.Enrich(context.Background(), 1, "A/One", "B000000001")
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusTooManyRequests {
+			t.Fatalf("Retry-After %q: err = %v", tc.header, err)
+		}
+		if apiErr.RetryAfter < tc.min || apiErr.RetryAfter > tc.max {
+			t.Errorf("Retry-After %q: wait %v, want %v..%v", tc.header, apiErr.RetryAfter, tc.min, tc.max)
+		}
 	}
 }

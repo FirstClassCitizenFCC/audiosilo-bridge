@@ -2,6 +2,7 @@ package audible
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -57,6 +58,12 @@ func WithHTTPClient(h *http.Client) Option {
 	return func(s *settings) { s.http = h }
 }
 
+// WithLogger logs what a call notices about Audible's answers (a library
+// title's implausible release date) to l; never a token or a request.
+func WithLogger(l *slog.Logger) Option {
+	return func(s *settings) { s.log = l }
+}
+
 // withSleep replaces the backoff's wait (tests).
 func withSleep(f func(context.Context, time.Duration) error) Option {
 	return func(s *settings) { s.sleep = f }
@@ -67,6 +74,7 @@ type settings struct {
 	endpoints *Endpoints
 	http      *http.Client
 	sleep     func(context.Context, time.Duration) error
+	log       *slog.Logger // nil: no log
 }
 
 // endpointsOf is the endpoints opts set, else mp's.

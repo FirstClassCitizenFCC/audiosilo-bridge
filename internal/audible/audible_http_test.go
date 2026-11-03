@@ -66,6 +66,7 @@ func TestMarketplaceDomains(t *testing.T) {
 }
 
 func TestClientLibrary(t *testing.T) {
+	soon := time.Now().AddDate(0, 3, 0).Format(time.DateOnly) // a real preorder: months ahead
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/1.0/library" {
 			http.NotFound(w, r)
@@ -86,7 +87,7 @@ func TestClientLibrary(t *testing.T) {
 			 "customer_rights":{"is_consumable_offline":true}},
 			{"asin":"B03","title":"Left the Catalog",
 			 "customer_rights":{"is_consumable_offline":false}},
-			{"asin":"B04","title":"Future Book","release_date":"2999-01-01"}
+			{"asin":"B04","title":"Future Book","release_date":"` + soon + `"}
 		]}`))
 	}))
 	defer ts.Close()

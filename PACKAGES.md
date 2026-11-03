@@ -1742,7 +1742,8 @@ internal/
             with a test on both sides. Answers map to ErrUnauthorized (401: the token
             was revoked), ErrNotHeld (409 not_held/finished), ErrNoHeartbeat,
             ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError
-            (an HTML proxy page never becomes a message). Phase 1a: Paired carries
+            (an HTML proxy page never becomes a message; RetryAfter carries a 429's
+            Retry-After, seconds or an HTTP date, 0 when absent, clamped at a day). Phase 1a: Paired carries
             the server's server_id (the job runner's server identity); the book
             lookup's answer carries a `book` block (BookInfo: title, authors and
             narrators as credits, series, series_index, asin, isbn, duration, and the
@@ -2020,7 +2021,12 @@ internal/
             "<first name>'s AudioSilo", DeviceName); signed calls (sign.go: RSA
             PKCS#1 v1.5 over method, path?query, date, body, adp token; no bearer);
             Library (pages of 1000, deduped, bounded at 250 pages; UnavailableReason
-            says preorder, show/periodical or no download rights); LastPositions
+            says show/periodical, no download rights or preorder, checked in that
+            order, so only a preorder sets Record.Preorder; a release date in 2100
+            or later, or more than 2 years ahead, is a placeholder (Audible sends
+            2200-01-01 for some old titles): issue_date stands in, else no date,
+            which reads as released; such a title logs its raw date, delivery type
+            and rights once through WithLogger, never a token or the customer id); LastPositions
             (25 ASINs a request, split on a 400; Position{PositionMs, LastUpdated},
             last_updated read as UTC, zero when absent) and SetLastPosition (needs the
             ACR, ContentACR); License + DecryptVoucher (AAXC key/iv) and Source.Acquire
@@ -2113,23 +2119,38 @@ internal/
             preorder, else unavailable with the reason), matches with
             importjob.BookMatcher (how = asin when the book's ASIN is the title's,
             else fuzzy; a book path goes out only as "." (a library that is one
-            book) or a clean path below the root, as the server takes), cuts a title's authors to 20 (the
+            book) or a clean path below the root, as the server takes); a book
+            several titles claimed keeps the match on the best score only
+            (importjob.KeepBest: a tie keeps none unless it is one work owned
+            twice, which all keep: dropping it would download it again), the
+            others go out unmatched with Reason link.ReasonContested ("contested",
+            on an available title; 4b's back-up-everything skips them); cuts a title's authors to 20 (the
             server refuses a whole call over more), PUTs the titles in calls of 500
             under ONE poll id (job, attempt and a random suffix), the last final (an
             empty library sends one empty final call, so the server marks every
-            title gone), then Enrich for each matched book without an ASIN that no
-            second title claimed (Contested) and no preorder matched (not out yet:
-            another edition); asin_set and a moved book are skipped, other failures
-            counted (enrich_failed). Polled/Failed record the account's outcome (a
+            title gone), then Enrich (enrich.go) for each matched book without an
+            ASIN that no second title claimed (Contested) and no preorder matched
+            (not out yet: another edition), PACED: one PUT per 200 ms, a 429 waits
+            its Retry-After (else 2 s doubling) and halves the pace (to 2 s at the
+            slowest), and a wait over 1 min, 5 429s in a row or 10 min of
+            enriching leave the rest to the next poll (enrich_deferred: those books
+            still have no ASIN, so the next poll picks them up); asin_set and a
+            moved book are skipped, other failures counted (enrich_failed). Polled/Failed record the account's outcome (a
             poll stopped, cancelled or lost records nothing). The result is counts
             only (no titles, no credential). Deps:
             audibleacct (types), importjob, jobs, link, source, store.
   importjob/ matching and placement against a library (the manager's, ported):
-            BookMatcher over []link.LibraryBook (pkg/match.Best: ASIN exact first,
-            then author + series + title tokens; a book in several series is a
-            candidate under each; narrators join the person gate), Contested(path)
-            (a path claimed by two records: derive nothing durable, like an ASIN
-            backfill), Plan(records, {Mode, Template, Books, Rejected}) (siblings by
+            BookMatcher over []link.LibraryBook (pkg/match.BestWith under
+            match.ImportOptions(), the import rules the server's own callers don't
+            use: ASIN exact first, then author + series + title tokens; a book in
+            several series is a candidate under each; narrators join the person
+            gate; an Audible range position "5-6" is matched at its start, so the
+            title's "Pack 3" never stands in for it), MatchScored (the match's
+            score, match.ScoreASIN for an ASIN), Contested(path) (a path claimed by
+            two records: derive nothing durable, like an ASIN backfill), KeepBest
+            (of the claims on one path the single best score keeps it; a tie keeps
+            none, unless every tied claim is one WorkKey: folded title, folded
+            author set and position, the same book owned twice), Plan(records, {Mode, Template, Books, Rejected}) (siblings by
             tolerant author + series, AuthorFolders reusing an existing author folder
             spelling, the existence check; no per-record server query),
             ApplyDestinations, and Run (acquire, transfer.Place, one Rescan(placed

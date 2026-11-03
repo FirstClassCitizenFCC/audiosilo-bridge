@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/audibleacct"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
@@ -58,6 +59,10 @@ type fakeServer struct {
 	enriched map[string]string // path -> asin
 	asinSet  map[string]bool   // paths answering 409 asin_set
 	titleErr int
+	// limit answers the n-th enrichment call (from 1) 429 with that
+	// Retry-After ("-" for none) when it returns ok.
+	limit   func(n int) (retryAfter string, ok bool)
+	enrichN int
 }
 
 func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +103,17 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.calls = append(f.calls, body)
 		_ = json.NewEncoder(w).Encode(map[string]int{"stored": len(body.Titles)})
 	case r.Method == http.MethodPut && r.URL.Path == "/api/v1/bridge/libraries/1/enrichment":
+		f.enrichN++
+		if f.limit != nil {
+			if ra, ok := f.limit(f.enrichN); ok {
+				if ra != "-" {
+					w.Header().Set("Retry-After", ra)
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}`))
+				return
+			}
+		}
 		var body struct{ ASIN string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		path := r.URL.Query().Get("path")
@@ -125,7 +141,9 @@ func setup(t *testing.T, fs *fakeServer, accts *stubAccounts) *Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(Options{Accounts: accts, Server: func() Server { return cl }, ServerID: func() string { return "srv-1" }})
+	h := New(Options{Accounts: accts, Server: func() Server { return cl }, ServerID: func() string { return "srv-1" }})
+	h.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() } // the pace, instantly
+	return h
 }
 
 func account() store.AudibleAccount {
