@@ -1,0 +1,344 @@
+// Package audiblejob runs the server's audible.poll job (BRIDGE-PLAN.md Phase
+// 4a): list an Audible account's library, read the account's books library on
+// the server page by page, match each title (importjob.BookMatcher: ASIN exact
+// first, then author, series and title), report the titles to the server in
+// calls of at most link.MaxAudibleTitles (the last one final, so the titles
+// the poll didn't see become gone there), then backfill the ASIN of each book
+// a title matched without doubt (the manager's Contested guard: a book two
+// titles matched is never enriched).
+//
+// It writes nothing into a library and reads no credential itself: the account
+// manager (audibleacct) holds the sign-in and lists the library. Params,
+// progress and the result carry the account's id and counts only.
+package audiblejob
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/kodestar/audiosilo-bridge/internal/audibleacct"
+	"github.com/kodestar/audiosilo-bridge/internal/importjob"
+	"github.com/kodestar/audiosilo-bridge/internal/jobs"
+	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/source"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
+)
+
+// Kind is the job kind.
+const Kind = "audible.poll"
+
+// maxBookPages bounds the library listing (500 books a page: a million books).
+const maxBookPages = 2000
+
+// maxRuntime is the longest runtime the server takes (seconds).
+const maxRuntime = 1_000_000
+
+// maxAuthors is the most authors a title carries: the server refuses a whole
+// titles call over one title with more, so an anthology's long list of credits
+// is cut to its first ones.
+const maxAuthors = 20
+
+// asinPattern is an ASIN as the server takes one.
+var asinPattern = regexp.MustCompile(`^[A-Z0-9]{10}$`)
+
+// Accounts is the part of the account manager a poll uses (*audibleacct.Manager).
+type Accounts interface {
+	Account(ctx context.Context, id string) (store.AudibleAccount, error)
+	// Library lists the account's Audible library (audibleacct.ErrRefused when
+	// Audible refuses the sign-in, which it records).
+	Library(ctx context.Context, id string) ([]source.Record, error)
+	Polled(ctx context.Context, id string, titles, matched int) error
+	Failed(ctx context.Context, id, why string) error
+}
+
+// Server is the part of the server link a poll calls (*link.Client).
+type Server interface {
+	LibraryBooks(ctx context.Context, libraryID int64, after string, limit int) (*link.LibraryBooks, error)
+	PutAudibleTitles(ctx context.Context, account string, t link.AudibleTitles) (int, error)
+	Enrich(ctx context.Context, libraryID int64, path, asin string) error
+}
+
+// Options wire the handler.
+type Options struct {
+	Accounts Accounts
+	// Server is the link (nil while unpaired); ServerID the pairing's server.
+	Server   func() Server
+	ServerID func() string
+	Log      *slog.Logger
+}
+
+// Handler runs audible.poll.
+type Handler struct{ o Options }
+
+// New returns the handler.
+func New(o Options) *Handler {
+	if o.Log == nil {
+		o.Log = slog.New(slog.DiscardHandler)
+	}
+	if o.ServerID == nil {
+		o.ServerID = func() string { return "" }
+	}
+	return &Handler{o: o}
+}
+
+// Kind is audible.poll.
+func (h *Handler) Kind() string { return Kind }
+
+// Lane is the light lane: a poll is a few API calls.
+func (h *Handler) Lane() string { return jobs.LaneLight }
+
+// Params are audible.poll's params.
+type Params struct {
+	Account string `json:"account"`
+}
+
+// ParseParams reads the params strictly (an unknown field is refused).
+func ParseParams(raw json.RawMessage) (Params, error) {
+	var p Params
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return Params{}, fmt.Errorf("bad params: %w", err)
+	}
+	if !audibleacct.IDPattern.MatchString(p.Account) {
+		return Params{}, errors.New("bad params: account must be an Audible account id")
+	}
+	return p, nil
+}
+
+// Result is what a poll reports: counts, never a title or a credential.
+type Result struct {
+	Account     string `json:"account"`
+	PollID      string `json:"poll_id"`
+	Titles      int    `json:"titles"`
+	Available   int    `json:"available"`
+	Preorder    int    `json:"preorder"`
+	Unavailable int    `json:"unavailable"`
+	// Skipped are titles Audible sent without a usable ASIN (never reported).
+	Skipped int `json:"skipped,omitempty"`
+	// Matched titles, by how; Contested the matched books two titles claimed.
+	Matched      int `json:"matched"`
+	MatchedASIN  int `json:"matched_asin"`
+	MatchedFuzzy int `json:"matched_fuzzy"`
+	Contested    int `json:"contested"`
+	// Enriched books got the ASIN of their title; EnrichFailed ones the server
+	// didn't answer for (tried again at the next poll).
+	Enriched     int `json:"enriched"`
+	EnrichFailed int `json:"enrich_failed,omitempty"`
+	Books        int `json:"books"`
+}
+
+// Run polls the account.
+func (h *Handler) Run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (any, error) {
+	p, err := ParseParams(job.Params)
+	if err != nil {
+		return nil, err
+	}
+	acct, err := h.o.Accounts.Account(ctx, p.Account)
+	if errors.Is(err, audibleacct.ErrNotFound) {
+		return nil, fmt.Errorf("this Bridge has no Audible account %s: it was removed here, or signed in on another Bridge", p.Account)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if acct.OnOtherServer(h.o.ServerID()) {
+		return nil, h.fail(ctx, acct.ID, "the account is mapped on another server: map it again on the Bridge's Accounts tab")
+	}
+	var srv Server
+	if h.o.Server != nil {
+		srv = h.o.Server()
+	}
+	if srv == nil {
+		return nil, errors.New("the Bridge isn't paired with a server")
+	}
+
+	rep.Progress(jobs.Progress{Step: "audible", Message: "Listing the Audible library"})
+	recs, err := h.o.Accounts.Library(ctx, acct.ID)
+	if errors.Is(err, audibleacct.ErrRefused) {
+		return nil, err // recorded by the accounts
+	}
+	if err != nil {
+		return nil, h.fail(ctx, acct.ID, "could not list the Audible library: "+err.Error())
+	}
+
+	rep.Progress(jobs.Progress{Step: "books", Message: "Reading the library's books on the server"})
+	books, err := allBooks(ctx, srv, acct.LibraryID)
+	if err != nil {
+		return nil, h.fail(ctx, acct.ID, "could not read the library's books on the server: "+err.Error())
+	}
+
+	rep.Progress(jobs.Progress{Step: "matching", Message: "Matching the titles to the library", Total: len(recs)})
+	res := Result{Account: acct.ID, PollID: pollID(job), Books: len(books)}
+	matcher := importjob.NewBookMatcher(books)
+	type matched struct {
+		rec      source.Record
+		book     link.LibraryBook
+		preorder bool
+	}
+	var hits []matched
+	titles := make([]link.AudibleTitle, 0, len(recs))
+	for _, rec := range recs {
+		rec.ASIN = strings.ToUpper(strings.TrimSpace(rec.ASIN))
+		if !asinPattern.MatchString(rec.ASIN) {
+			res.Skipped++
+			continue
+		}
+		t := title(rec)
+		switch t.State {
+		case link.AudibleAvailable:
+			res.Available++
+		case link.AudiblePreorder:
+			res.Preorder++
+		default:
+			res.Unavailable++
+		}
+		if b, ok := matcher.Match(rec); ok && matchable(b.Path) {
+			how := link.MatchFuzzy
+			if strings.EqualFold(b.ASIN, rec.ASIN) {
+				how = link.MatchASIN
+				res.MatchedASIN++
+			} else {
+				res.MatchedFuzzy++
+			}
+			t.Match = &link.AudibleMatch{LibraryID: acct.LibraryID, Path: b.Path, How: how}
+			hits = append(hits, matched{rec: rec, book: b, preorder: t.State == link.AudiblePreorder})
+		}
+		titles = append(titles, t)
+	}
+	res.Titles, res.Matched = len(titles), len(hits)
+
+	rep.Progress(jobs.Progress{Step: "reporting", Message: "Reporting the titles to the server", Total: len(titles)})
+	for start := 0; ; start += link.MaxAudibleTitles {
+		end := min(start+link.MaxAudibleTitles, len(titles))
+		final := end == len(titles)
+		if _, err := srv.PutAudibleTitles(ctx, acct.ID, link.AudibleTitles{PollID: res.PollID, Final: final, Titles: titles[start:end]}); err != nil {
+			if errors.Is(err, link.ErrUnknownAccount) {
+				return nil, h.fail(ctx, acct.ID, "the server has no such Audible account: sign in or map the account again on the Bridge's Accounts tab")
+			}
+			return nil, h.fail(ctx, acct.ID, "could not report the titles to the server: "+err.Error())
+		}
+		rep.Progress(jobs.Progress{Step: "reporting", Message: "Reporting the titles to the server", Done: end, Total: len(titles)})
+		if final {
+			break
+		}
+	}
+
+	rep.Progress(jobs.Progress{Step: "enriching", Message: "Adding the ASINs of the matched books"})
+	contested := map[string]bool{}
+	for _, m := range hits {
+		if matcher.Contested(m.book.Path) {
+			contested[m.book.Path] = true
+			continue
+		}
+		// A preorder isn't out yet, so the book on disk is another edition: its
+		// ASIN would stay on that book for good.
+		if m.book.ASIN != "" || m.preorder {
+			continue
+		}
+		switch err := srv.Enrich(ctx, acct.LibraryID, m.book.Path, m.rec.ASIN); {
+		case err == nil:
+			res.Enriched++
+		case errors.Is(err, link.ErrASINSet), errors.Is(err, link.ErrNoBook):
+			// Another ASIN arrived meanwhile, or the book moved: the next poll sees it.
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
+		default:
+			res.EnrichFailed++
+			h.o.Log.Warn("audible: adding a book's ASIN failed", "account", acct.ID, "library", acct.LibraryID, "err", err)
+		}
+	}
+	res.Contested = len(contested)
+
+	if err := h.o.Accounts.Polled(ctx, acct.ID, res.Titles, res.Matched); err != nil {
+		h.o.Log.Warn("audible: recording the poll failed", "account", acct.ID, "err", err)
+	}
+	h.o.Log.Info("audible: polled", "account", acct.ID, "titles", res.Titles, "matched", res.Matched, "enriched", res.Enriched)
+	return res, nil
+}
+
+// fail records why the poll failed on the account and returns it as the job's
+// error. A poll stopped, cancelled or lost meanwhile records nothing: that is
+// the job's end, not the account's failure (the runner ends the job by its
+// context's cause).
+func (h *Handler) fail(ctx context.Context, account, why string) error {
+	if ctx.Err() != nil {
+		return errors.New(why)
+	}
+	if err := h.o.Accounts.Failed(context.WithoutCancel(ctx), account, why); err != nil {
+		h.o.Log.Warn("audible: recording a failed poll failed", "account", account, "err", err)
+	}
+	return errors.New(why)
+}
+
+// matchable reports whether p is a book path the server takes in a match and
+// an enrichment: "." (a library that is one book, at its root) or a clean path
+// below the root, which is fs.ValidPath's rule.
+func matchable(p string) bool {
+	return fs.ValidPath(p)
+}
+
+// allBooks reads every page of the library's books.
+func allBooks(ctx context.Context, srv Server, libraryID int64) ([]link.LibraryBook, error) {
+	if libraryID <= 0 {
+		return nil, errors.New("the account has no library: map it again on the Bridge's Accounts tab")
+	}
+	var books []link.LibraryBook
+	after := ""
+	for range maxBookPages {
+		page, err := srv.LibraryBooks(ctx, libraryID, after, link.MaxLibraryBooks)
+		if err != nil {
+			return nil, err
+		}
+		books = append(books, page.Books...)
+		if page.Next == "" || page.Next == after {
+			return books, nil
+		}
+		after = page.Next
+	}
+	return nil, fmt.Errorf("the library has more than %d pages of books", maxBookPages)
+}
+
+// title is a record as the poll reports it.
+func title(rec source.Record) link.AudibleTitle {
+	t := link.AudibleTitle{ASIN: rec.ASIN, Title: rec.Title, Authors: rec.Authors[:min(len(rec.Authors), maxAuthors)], Series: []link.SeriesRef{},
+		ReleaseDate: rec.ReleaseDate, RuntimeS: min(max(int64(rec.RuntimeSec), 0), maxRuntime), State: link.AudibleAvailable}
+	if len(t.Authors) == 0 {
+		t.Authors = []string{}
+		if rec.Author != "" {
+			t.Authors = []string{rec.Author}
+		}
+	}
+	if rec.Series != "" {
+		pos := rec.SeriesPosition
+		if pos == "" && rec.HasSequence {
+			pos = strconv.FormatFloat(rec.Sequence, 'f', -1, 64)
+		}
+		t.Series = append(t.Series, link.SeriesRef{Name: rec.Series, Position: pos})
+	}
+	if reason := strings.TrimSpace(rec.UnavailableReason); reason != "" {
+		t.Reason = reason
+		t.State = link.AudibleUnavailable
+		if rec.Preorder {
+			t.State = link.AudiblePreorder
+		}
+	}
+	return t
+}
+
+// pollID is the poll's id: the job and attempt, and a random suffix so a poll
+// run again never shares one with an earlier run.
+func pollID(job jobs.Job) string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return "j" + strconv.FormatInt(job.ID, 10) + "." + strconv.Itoa(job.Attempt) + "." + hex.EncodeToString(b)
+}

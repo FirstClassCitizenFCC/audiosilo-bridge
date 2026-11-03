@@ -12,7 +12,10 @@ there is the Bridge now, and the folder scan, its overrides and the library
 sightings they mention were not carried over (the server's index is the library).
 The shell (link, mapping, jobs, verify, app, api, logring, web, cmd) is new, and so
 are Phase 1a's generate (the sidecars.generate job) and the agent container's three
-(agentproto, agentbox, agentrun).
+(agentproto, agentbox, agentrun). Phase 4a imported audiosilo-manager's audible,
+importjob, placement, progress, source (source.go), transfer (Local) and registry
+(BlobStore, overrides) the same way, with their history; registry went in the same
+change (the vault and the server's audible_titles columns hold its jobs).
 
 
 ```
@@ -27,6 +30,8 @@ cmd/audiosilo-bridge/     entrypoint, its subcommands: `serve` (the default; --d
                           --home /agent, --slots 1) and
                           `agent-login claude|codex` (agentrun.Login, run once inside the agent
                           container; --home /agent). `help` prints the usage.
+cmd/audiblefake/          Phase 4a, ONLY with -tags audiblefake: serves the Audible fake
+                          (--listen 127.0.0.1:8099, --lastpositions-max 10) for a live check.
 internal/
   config/   config.yaml in <data>/ + AUDIOSILO_BRIDGE_* env overrides; Load/Save/Validate.
             Phase 2c-1: podcasts.allow_networks (CIDR strings, default empty;
@@ -1204,7 +1209,8 @@ internal/
             never a credential.
   setup/    Phase 2b (FIRST-RUN-PLAN F2): Checklist(Inputs) is the setup checklist
             (link.Setup) in its fixed order: paired, libraries, asr, agent, budget,
-            github, each {id, done, required, detail}; details cut to 200
+            github, audible (Phase 4a, optional: done with an account signed in and
+            none refused; an additive id older servers and pages leave out), each {id, done, required, detail}; details cut to 200
             characters and worded for the console (the budget's "$100 a month" or
             "no monthly cap"); Complete is every required item done. The heartbeat
             sends it and the page's Status tab shows it (the console shows the
@@ -1282,8 +1288,10 @@ internal/
   secrets/  named secrets (the server token, the agent credentials, the GitHub
             sign-in; github_pat only to delete an earlier Bridge's copy) as
             AES-256-GCM sealed files in <data>/secrets (0600, the manager BlobStore's
-            format, each bound to its name as additional data so a file renamed onto
-            another name doesn't open), keyed by ONE master key:
+            layout: nonce then ciphertext; each bound to its name as additional data
+            so a file renamed onto another name doesn't open; one master key where
+            BlobStore kept a key per value in the OS keychain, which is why Phase 4a
+            dropped BlobStore on import), keyed by ONE master key:
             AUDIOSILO_BRIDGE_SECRET_KEY (32 bytes, hex or base64; lets the key live
             outside the data volume) else <data>/secret.key (created 0600, O_EXCL, on
             the first start, synced, and removed when it couldn't be written whole:
@@ -1294,9 +1302,19 @@ internal/
             nothing echoes one. Phase 2c-1: PodcastJobName(id, attempt) (each
             claim its own: an earlier attempt's end never deletes a later one's)
             and PodcastFeedName(show_id) name sealed podcast credentials; they
-            are omitted from the operator-managed Names() list.
+            are omitted from the operator-managed Names() list. Phase 4a:
+            AudibleName(id) (audible_<id>) seals an Audible account's sign-in,
+            also never in Names().
   store/    SQLite (modernc, pure Go; single writer + WAL) + append-only migrations,
-            bridge.db. 0007 adds podcast_shows, a credential-free cache keyed by
+            bridge.db. 0009 (Phase 4a, audible.go) adds audible_accounts: id (the
+            Bridge's own [a-z0-9]{8,32}), label, marketplace, customer_hash (sha256
+            of the Amazon customer id, never the id), server_id (the server the
+            mapping was last recorded on), user_id/user_name, library_id, policy,
+            sync, created_at, last_ok_at, last_poll_at, last_titles, last_matched,
+            refused_at, last_error; NO credential (the vault's audible_<id>).
+            Unique on (customer_hash, marketplace) where the hash isn't empty.
+            SignInAudibleAccount upserts (a sign-in again keeps created_at and the
+            counts, clears a refusal); AudiblePolled clears refusal and error. 0007 adds podcast_shows, a credential-free cache keyed by
             (server_id, show_id), indexed by server/library/feed hash. An empty
             library cache is rebuilt from feed.json before subscription dedupe.
             0008 adds podcast_artwork_state keyed by server/library/show, storing
@@ -1759,6 +1777,19 @@ internal/
             book's is the book's), BookInfo.Ebook {path, size} (the server's pick of the
             book's ebook, omitted when none) and Attachments.Readalong (the rescan read
             readalong.json).
+            Phase 4a: LibraryBook / SeriesRef / LibraryBooks mirror the paged listing
+            GET /bridge/libraries/{id}/books?after=&limit= (credits split, every series
+            with its position as a string, next "" on the last page; the server sends
+            null). audible.go mirrors the rest of the server's handlers_audible.go:
+            Users (GET /bridge/users: enabled adults and admins, no email),
+            PutAudibleAccount / DeleteAudibleAccount (PUT/DELETE
+            /bridge/audible/accounts/{account}; the delete is 204 known or not),
+            PutAudibleTitles (<= MaxAudibleTitles 500 per call, poll_id + final; a
+            nil list sent as []; 404 unknown_account -> ErrUnknownAccount),
+            LibraryBooks (limit <= MaxLibraryBooks 500) and Enrich (PUT
+            .../enrichment?path= {"asin"}: 409 asin_set -> ErrASINSet, any 404 ->
+            ErrNoBook). The server decodes titles and accounts strictly: send only
+            the Wire block's fields.
   mapping/  where the Bridge sees each library, CHECKED (decision 13): Check stats the
             server's sample book's files through the mount (SafeJoin: no absolute,
             "..", NUL; a backslash is a name character except on Windows) and
@@ -1980,6 +2011,144 @@ internal/
             itunes:new-feed-url never names a URL the show moved away from nor
             takes https to http. A cover deleted by hand is fetched again, subject to durable artwork backoff.
             No failure-only feed timestamp churn and no artwork work on 304.
+  -- Phase 4a: Audible (imported from audiosilo-manager with its history) --
+  audible/  the native Audible client (the manager's, ported as is, then extended):
+            NewPKCE + NewDeviceSerial + BuildAuthorizeURL (the browser half: the user
+            signs in at Amazon and pastes back the /ap/maplanding URL, ParseAuthCode)
+            -> Register (code + verifier -> Credentials: access/refresh/adp tokens,
+            the device RSA key, serial, customer id, marketplace; device named
+            "<first name>'s AudioSilo", DeviceName); signed calls (sign.go: RSA
+            PKCS#1 v1.5 over method, path?query, date, body, adp token; no bearer);
+            Library (pages of 1000, deduped, bounded at 250 pages; UnavailableReason
+            says preorder, show/periodical or no download rights); LastPositions
+            (25 ASINs a request, split on a 400; Position{PositionMs, LastUpdated},
+            last_updated read as UTC, zero when absent) and SetLastPosition (needs the
+            ACR, ContentACR); License + DecryptVoucher (AAXC key/iv) and Source.Acquire
+            (license, download, ffmpeg -c copy to .m4b; AAXC only: the manager's AAX
+            activation bytes and its sims series watch were dropped on import).
+            Phase 4a additions: RefreshAccessToken (POST /auth/token) and Deregister
+            (POST /auth/deregister, bearer, deregister_all_existing_accounts false:
+            only this device; refreshes an access token within 2 min of expiry
+            first; the caller forgets locally FIRST); Download resumes a partial file
+            with a Range (206 from its end appended, anything else starts again, a
+            416 at its size is done; a failure leaves the partial in place but
+            nothing reuses it in 4a: 4b must check If-Range or the size before
+            resuming one under a new license's URL) and refuses past MaxBytes (default 4 GiB) keeping
+            nothing, its errors never naming the presigned URL (a request that got
+            no answer names its URL without the query); every call backs off
+            on 429/503 (Retry-After seconds or date, else 2 s doubling, 4 attempts,
+            a wait over 2 min fails at once, a huge value too), each attempt signed
+            afresh;
+            HTTPStatus(err) and IsRefused(err) (401/403 on a signed call: the account
+            must sign in again); Endpoints {Amazon, AmazonAPI, API} injectable through
+            options (WithEndpoints, WithHTTPClient), EndpointsFor(marketplace) the
+            real ones. CREDENTIALS ARE FULL AMAZON ACCOUNT ACCESS: they live only in
+            the vault (sealed Credentials.Marshal JSON), never in the store, job
+            params or results, logs, the heartbeat or agent staging; errors carry
+            Audible's answer, never a request body or token. The per-book key/iv are
+            in ffmpeg's argv (visible in the container's process table): accepted.
+            Deps: stdlib + progress + source.
+            Build tag audiblefake (never in a release build or image; fake_off.go /
+            fake_on.go): AUDIOSILO_BRIDGE_AUDIBLE_FAKE_URL points every endpoint at the
+            fake (FakeURL() is "" without the tag, a test holds it) and
+            AUDIOSILO_BRIDGE_AUDIBLE_RECORD_DIR wraps the default transport in
+            audiblefake.Recorder.
+  audible/audiblefake/  ONLY with -tags audiblefake: the Audible fake (httptest or
+            cmd/audiblefake). Synthetic fixtures (fixtures.go: 30 made-up titles, 22
+            available, 4 preorders, 4 unavailable; 7 places): /ap/signin redirects
+            to its own /ap/maplanding with a code bound to the PKCE challenge;
+            /auth/register checks verifier and client id and issues a device key;
+            /auth/token; /auth/deregister (this device only, recorded); signed calls
+            verified against the issued key (unknown or deregistered 401, Refuse()
+            403); library paging; lastpositions 400 over LastPositionsMax (10);
+            PUT lastpositions recorded. licenserequest answers 501 until Phase 4b (a
+            voucher from the device and customer ids, an unencrypted download).
+            Controls: Calls(), /_fake/calls, /_fake/refuse, /_fake/titles.
+            Recorder: the owner's recording transport, a 0600 JSON-lines file per
+            run, scrubbed AS IT WRITES (secret keys and the customer, device and
+            token subtrees redacted, headers from an allowlist, signed CDN queries
+            dropped, unparseable bodies by size only); a test runs a whole flow
+            through it and finds no credential. Never imports audible (audible's
+            tagged build imports it).
+  audibleacct/ Phase 4a (decision 19): the Bridge's Audible accounts. Start(marketplace)
+            makes a sign-in: a PKCE pair + device serial held IN MEMORY only, for
+            LoginTTL (15 min; at most 8 at once, the oldest dropped), and the
+            authorize URL. Finish(login, pasted redirect URL, Mapping) checks the
+            mapping and the code first (a page without a code keeps the login),
+            then spends the login, registers the device, records the mapping on
+            the server (PUT account) BEFORE sealing anything, seals
+            Credentials.Marshal() as audible_<id> and records the row; any step
+            after the registration that fails deregisters the new device again
+            and puts back what it changed (best effort, as the failed call may have
+            been applied): a new account DELETEd on the server, an existing one's
+            earlier sign-in back in the vault and its earlier mapping PUT again
+            (when it was mapped on this server), so a failed sign-in leaves no
+            device and the account as it was. A sign-in of an Amazon account already
+            here (customer_hash + marketplace) replaces it: same id, the old device
+            deregistered after (an earlier sign-in that can't be opened is logged:
+            its device stays). Finish runs one at a time from the lookup until
+            the row is stored (finishMu; Remove takes it while it forgets locally), so two sign-ins of one Amazon account finishing together
+            end as a sign-in again, not two accounts (the unique index backs it). A name the Bridge made ("<person> (<STORE>)") follows
+            the person when Map or a sign-in again changes it; a typed one stays.
+            Map records a new mapping on the server, then here. Remove forgets
+            locally FIRST (vault, then row), then DELETEs on the server and
+            deregisters, run to the end even if the page goes away; either failing
+            is a warning for the page, never the account kept. Library opens the
+            sign-in and lists the library through Service (audibleacct.Audible(opts...):
+            the audible package; a stub in tests), which answers ErrRefused on a
+            401/403 signed call: Library lists again when a sign-in again replaced
+            the device meanwhile, else records the refusal (RefusedText) and runs
+            OnChange (the heartbeat's checklist). Errors carry Amazon's or the
+            server's answer, never a token;
+            tests walk the data dir and the log for every stub secret, and the
+            tagged tests run the whole life against the fake. Deps: audible, link,
+            secrets, source, store.
+  audiblejob/ Phase 4a: audible.poll (light lane; params exactly {"account"}, strict;
+            the server claims it with no library). Checks the account is this
+            Bridge's and was mapped on the paired server (else fails asking to map
+            it again), lists the Audible library (a refusal is the account's, the
+            job just fails), reads the account's books library on the server page
+            by page (500, bounded at 2000 pages), skips records without a usable
+            ASIN, states them (UnavailableReason "" available, "pre-order"
+            preorder, else unavailable with the reason), matches with
+            importjob.BookMatcher (how = asin when the book's ASIN is the title's,
+            else fuzzy; a book path goes out only as "." (a library that is one
+            book) or a clean path below the root, as the server takes), cuts a title's authors to 20 (the
+            server refuses a whole call over more), PUTs the titles in calls of 500
+            under ONE poll id (job, attempt and a random suffix), the last final (an
+            empty library sends one empty final call, so the server marks every
+            title gone), then Enrich for each matched book without an ASIN that no
+            second title claimed (Contested) and no preorder matched (not out yet:
+            another edition); asin_set and a moved book are skipped, other failures
+            counted (enrich_failed). Polled/Failed record the account's outcome (a
+            poll stopped, cancelled or lost records nothing). The result is counts
+            only (no titles, no credential). Deps:
+            audibleacct (types), importjob, jobs, link, source, store.
+  importjob/ matching and placement against a library (the manager's, ported):
+            BookMatcher over []link.LibraryBook (pkg/match.Best: ASIN exact first,
+            then author + series + title tokens; a book in several series is a
+            candidate under each; narrators join the person gate), Contested(path)
+            (a path claimed by two records: derive nothing durable, like an ASIN
+            backfill), Plan(records, {Mode, Template, Books, Rejected}) (siblings by
+            tolerant author + series, AuthorFolders reusing an existing author folder
+            spelling, the existence check; no per-record server query),
+            ApplyDestinations, and Run (acquire, transfer.Place, one Rescan(placed
+            paths) callback). The manager's serverapi client went: the Bridge holds
+            the paged listing. Deps: link, placement, source, transfer,
+            audiosilo-server/pkg/match.
+  placement/ where a new book goes (the manager's, as is): Auto (series siblings'
+            folder and shortcode convention, else author/title) and templates.
+  source/   Record (normalized metadata of one importable book: ASIN as Key,
+            UnavailableReason; Phase 4a: Authors (every credit), SeriesPosition as
+            the source spells it, ReleaseDate YYYY-MM-DD or "") and the Source/Acquirer interfaces (source.go only;
+            the manager's folder walk, probe and OpenAudible reader were not
+            imported).
+  transfer/ Local only (SFTP was not imported): EnsureRoot, Index (basename +
+            size, lazily stat'd), Place (temp + rename, size-verified, idempotent).
+            Phase 4b hardens it before it writes a library: the podcast install's
+            no-replace primitive and a free-space check, through mapping.SafeJoin.
+  progress/ throttled byte-progress Reader/Writer (1 MiB) shared by the download
+            and the transfer.
   generate/ sidecars.generate (Phase 1a): turns a server job into an ENGINE BOOK, follows
             it to the end reporting its stage, ETA, spend and parks, then writes the
             validated characters and recaps into the book's .audiosilo/ and asks the
@@ -2608,7 +2777,18 @@ internal/
             (and a fake uname for the other OS's service file), each run in a
             temp HOME holding service files rendered by worker.Service, so no
             test reads this computer's own.
-  app/      Phase 2c-1 wires the guarded client and both podcast handlers,
+  app/      Phase 4a: audible.go wires audibleacct (OnChange kicks a beat) and
+            registers audiblejob (so the heartbeat's kinds, and the server's
+            features, gain audible); the Backend's Audible section: Audible (the
+            accounts, the heartbeat's books libraries, the server's people read
+            live from GET /bridge/users, other_server when the mapping's server_id
+            isn't the pairing's), Start/FinishAudibleSignIn, MapAudibleAccount
+            (each checks the library is a books one the server listed and the
+            person is one GET /bridge/users lists), RemoveAudibleAccount; the
+            setup checklist's audible input. The server's Audible routes are not
+            behind the console's module toggle (the podcasts precedent): the page
+            signs in either way and says the module must be on for polls.
+            Phase 2c-1 wires the guarded client and both podcast handlers,
             advertises their kinds (2c-2a also fetch/download and retain/light),
             opts fetch into the generic interactive pool (2c-2b),
             uses the resolved engine probe for podcast audio, warns for allowed
@@ -2715,6 +2895,14 @@ internal/
             ({accounts, revoke_error}), PUT /api/accounts/agent {kind, value},
             DELETE /api/accounts/agent?kind=; status carries setup and
             setup_complete, settings monthly_budget_usd and budget_reviewed.
+            Phase 4a: audible.go, GET /api/accounts/audible (accounts, marketplaces,
+            policies, paired, books libraries, people, users_error), POST
+            /api/accounts/audible/sign-in {marketplace} -> {login, url, marketplace,
+            expires_at}, POST /api/accounts/audible {login, redirect_url, label,
+            user_id, library_id, policy, sync} (the pasted page's code is taken,
+            never answered or logged), PUT /api/accounts/audible/{id} (a mapping),
+            DELETE /api/accounts/audible/{id} -> {audible, warning}; session + LAN
+            tested allowed and denied.
             workerdist.go: GET /worker/install.sh and GET
             /worker/download/{os}/{arch} (internal/workerdist), outside
             /worker/v1, behind lanOnly, with NO page password (a curl | sh has no
@@ -2865,5 +3053,7 @@ contributing stage, and the spelling stage's series glossary); `contrib -> {stor
 through contrib's DeviceTokens interface, so accounts never imports contrib); `agent`/`repair` are leaf helpers (no
 scheduler/store deps; `repair -> qa` for the shared Python-compat gram/repr helpers
 and the shared clip-floor predicate `qa.ClipStartInRange`/`qa.ClipStartFloorSec`);
-`state` is pure. Handlers marshal DTOs and call into the injected packages; they
+`state` is pure. Phase 4a: `audibleacct -> {audible, link, secrets, source, store}`
+and `audiblejob -> {audibleacct, importjob, jobs, link, source, store}` (app wires both;
+neither imports app or api). Handlers marshal DTOs and call into the injected packages; they
 hold no logic (state transitions live in `state`, dispatch in `scheduler`).

@@ -21,6 +21,8 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/accounts"
 	"github.com/kodestar/audiosilo-bridge/internal/agentbox"
 	"github.com/kodestar/audiosilo-bridge/internal/api"
+	"github.com/kodestar/audiosilo-bridge/internal/audibleacct"
+	"github.com/kodestar/audiosilo-bridge/internal/audiblejob"
 	"github.com/kodestar/audiosilo-bridge/internal/auth"
 	"github.com/kodestar/audiosilo-bridge/internal/config"
 	"github.com/kodestar/audiosilo-bridge/internal/contrib"
@@ -91,6 +93,8 @@ type Bridge struct {
 	tokens     *contrib.TokenSource
 	github     *accounts.GitHub
 	agentCreds *accounts.Agent
+	// audible is the Audible accounts (Phase 4a): sign-ins sealed in the vault.
+	audible *audibleacct.Manager
 	// est caches the heartbeat's estimates (estimates.go of the engine wiring).
 	est estimatesCache
 
@@ -211,8 +215,11 @@ func New(ctx context.Context, opts Options) (*Bridge, string, error) {
 	}})
 	corrector := correct.New(correct.Options{Meta: metaops.NewClient(cfg.Metadata.BaseURL), Tokens: b.tokens,
 		BaseURL: cfg.Contribution.APIBaseURL, CoreRepo: cfg.Contribution.CoreRepo, KV: db, ServerID: serverID, Log: opts.Logger})
+	var audiblePoll *audiblejob.Handler
+	b.audible, audiblePoll = newAudible(vault, db, opts.Logger, b.Kick, b.conn.Client, serverID)
 	b.runner = jobs.New(db, b.server, b.tokenRefused, jobs.Options{Log: opts.Logger, ServerID: serverID},
-		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ReadalongJob(), b.gen.ContributeJob(), corrector, podcasts, podcasts.PollJob(), podcasts.FetchJob(), podcasts.RetainJob())
+		verifier, b.gen, b.gen.DescribeJob(), b.gen.ChaptersJob(), b.gen.ReadalongJob(), b.gen.ContributeJob(), corrector, podcasts, podcasts.PollJob(), podcasts.FetchJob(), podcasts.RetainJob(),
+		audiblePoll)
 	conn.onChange = b.linkChanged
 	return b, oneTime, nil
 }

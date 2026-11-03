@@ -34,7 +34,7 @@ func TestChecklistOrderAndComplete(t *testing.T) {
 	for _, it := range s.Items {
 		ids = append(ids, it.ID)
 	}
-	if strings.Join(ids, ",") != "paired,libraries,asr,agent,budget,github" {
+	if strings.Join(ids, ",") != "paired,libraries,asr,agent,budget,github,audible" {
 		t.Fatalf("order = %v", ids)
 	}
 	if !Complete(s) {
@@ -42,6 +42,9 @@ func TestChecklistOrderAndComplete(t *testing.T) {
 	}
 	if gh := item(t, s, ItemGitHub); gh.Done || gh.Required {
 		t.Fatalf("github = %+v (optional)", gh)
+	}
+	if a := item(t, s, ItemAudible); a.Done || a.Required || a.Detail != "" {
+		t.Fatalf("audible = %+v (optional)", a)
 	}
 	if b := item(t, s, ItemBudget); b.Detail != "$100 a month" {
 		t.Fatalf("budget = %+v", b)
@@ -200,5 +203,26 @@ func TestChecklistAgentProblems(t *testing.T) {
 		if c.agent.Problem != AgentNoCredential && c.agent.Problem != AgentOtherBackend && strings.Contains(a.Detail, "sign-in") {
 			t.Errorf("%+v asks for a sign-in: %q", c.agent, a.Detail)
 		}
+	}
+}
+
+func TestAudibleItem(t *testing.T) {
+	in := done()
+	in.Audible = Audible{Accounts: 1}
+	if a := item(t, Checklist(in), ItemAudible); !a.Done || a.Required || a.Detail != "1 account signed in" {
+		t.Fatalf("one account = %+v", a)
+	}
+	in.Audible = Audible{Accounts: 3, Refused: 2}
+	s := Checklist(in)
+	if a := item(t, s, ItemAudible); a.Done || a.Detail != "2 accounts need signing in again" {
+		t.Fatalf("refused = %+v", a)
+	}
+	// Optional: a refused Audible account never makes the setup incomplete.
+	if !Complete(s) {
+		t.Fatal("a refused Audible account made the setup incomplete")
+	}
+	in.Audible = Audible{Accounts: 1, Refused: 1}
+	if a := item(t, Checklist(in), ItemAudible); a.Detail != "1 account needs signing in again" {
+		t.Fatalf("one refused = %+v", a)
 	}
 }

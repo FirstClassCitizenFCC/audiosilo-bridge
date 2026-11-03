@@ -334,3 +334,26 @@ func TestHeartbeatSetupAndAccepts(t *testing.T) {
 		t.Fatal("an older server accepts nothing")
 	}
 }
+
+// The paged listing (Phase 4a) decodes the server's shape: credits split, every
+// series with its position as a string, and a null next on the last page.
+func TestLibraryBooksDecode(t *testing.T) {
+	raw := `{"books":[{"path":"Wight/Cradle/C01","title":"Unsouled","authors":["Will Wight"],` +
+		`"narrators":["Travis Baldree"],"series":[{"name":"Cradle","position":"1"},{"name":"Other","position":""}],` +
+		`"asin":"B01","isbn":"","duration":36012.4}],"next":null}`
+	var page LibraryBooks
+	if err := json.Unmarshal([]byte(raw), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Next != "" || len(page.Books) != 1 {
+		t.Fatalf("page = %+v", page)
+	}
+	b := page.Books[0]
+	if b.Path != "Wight/Cradle/C01" || b.Authors[0] != "Will Wight" || b.Narrators[0] != "Travis Baldree" ||
+		len(b.Series) != 2 || b.Series[0] != (SeriesRef{Name: "Cradle", Position: "1"}) || b.ASIN != "B01" || b.Duration != 36012.4 {
+		t.Fatalf("book = %+v", b)
+	}
+	if err := json.Unmarshal([]byte(`{"books":[],"next":"abc"}`), &page); err != nil || page.Next != "abc" {
+		t.Fatalf("next = %q, %v", page.Next, err)
+	}
+}

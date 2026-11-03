@@ -135,6 +135,7 @@ describe('descriptions', () => {
     expect(kindLabel('podcast.poll')).toBe('Checking a feed');
     expect(kindLabel('podcast.fetch')).toBe('Fetching an episode');
     expect(kindLabel('podcast.retain')).toBe('Checking retained episodes');
+    expect(kindLabel('audible.poll')).toBe('Checking an Audible library');
     expect(kindLabel('sidecars.contribute')).toBe('Community share');
     expect(kindLabel('meta.correct')).toBe('Corrections');
     expect(kindLabel('bridge.verify')).toBe('Verify');

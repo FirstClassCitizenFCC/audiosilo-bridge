@@ -259,6 +259,37 @@ type Attachments struct {
 	Readalong bool `json:"readalong"`
 }
 
+// LibraryBook is one book of a library's paged listing (GET
+// /bridge/libraries/{id}/books?after=&limit=, Phase 4a): what Audible matching
+// and placement compare against. Path is relative to the library root; authors
+// and narrators are split into credits; series lists every series the book is
+// in with its position as the server stores it ("" for none); duration is in
+// seconds. (Book is the single-book answer, with its files.)
+type LibraryBook struct {
+	Path      string      `json:"path"`
+	Title     string      `json:"title"`
+	Authors   []string    `json:"authors"`
+	Narrators []string    `json:"narrators"`
+	Series    []SeriesRef `json:"series"`
+	ASIN      string      `json:"asin"`
+	ISBN      string      `json:"isbn"`
+	Duration  float64     `json:"duration"`
+}
+
+// SeriesRef is one series a book is in and its position there ("3", "2.5", or
+// "" when the server has none).
+type SeriesRef struct {
+	Name     string `json:"name"`
+	Position string `json:"position"`
+}
+
+// LibraryBooks is one page of the paged listing. Next is the cursor for the
+// following page, "" (the server sends null) on the last one.
+type LibraryBooks struct {
+	Books []LibraryBook `json:"books"`
+	Next  string        `json:"next"`
+}
+
 // BookFile is one of a Book's files, its path relative to the library root.
 // Duration is its indexed length in seconds (a single-file book's is the
 // book's), which a read-along map's whole-book times are built from (Phase 3c;

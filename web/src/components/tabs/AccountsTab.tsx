@@ -12,6 +12,7 @@ import {
   minutesLeft,
   savedText,
 } from '@/lib/accounts';
+import { AudibleCard } from './AudibleCard';
 import { Ago } from '../ui/Ago';
 import { Badge } from '../ui/Badge';
 import { Card } from '../ui/Card';
@@ -22,8 +23,9 @@ import { Row } from '../ui/Row';
 import { dangerButton, primaryButton, secondaryButton } from '../ui/buttons';
 
 // The Accounts tab: the GitHub sign-in the Bridge shares with the community
-// through, and the agent's credential it hands to the agent container. A
-// credential's value goes to the Bridge and never comes back.
+// through, the agent's credential it hands to the agent container, and the
+// Audible accounts it signs in to. A credential's value goes to the Bridge and
+// never comes back.
 export function AccountsTab({ client }: { client: ApiClient }) {
   const {
     data: accounts,
@@ -42,6 +44,7 @@ export function AccountsTab({ client }: { client: ApiClient }) {
       {loadError && <Notice kind="error">{loadError}</Notice>}
       <GitHubCard client={client} accounts={accounts} onChange={setData} />
       <AgentCard client={client} accounts={accounts} onChange={setData} />
+      <AudibleCard client={client} />
     </div>
   );
 }

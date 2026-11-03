@@ -12,6 +12,7 @@ export const SETUP_ITEMS: Record<SetupItemId, { label: string; tab: TabId | null
   agent: { label: "Set the agent's credential", tab: 'accounts' },
   budget: { label: 'Review the monthly budget', tab: 'settings' },
   github: { label: 'Sign in to GitHub (optional, to share with the community)', tab: 'accounts' },
+  audible: { label: 'Sign in to Audible (optional)', tab: 'accounts' },
 };
 
 function known(id: string): id is SetupItemId {
