@@ -2,6 +2,7 @@ package audible
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,19 +32,73 @@ type DownloadOptions struct {
 	// MaxBytes caps the whole file (resumed bytes included); 0 is
 	// DefaultMaxDownloadBytes.
 	MaxBytes int64
+	// ExpectedSize is the file's size as the license gave it (0: unknown). A
+	// partial file resumes only into a file of the size it was started on.
+	ExpectedSize int64
+	// BeforeWrite (may be nil) runs once the file's size is known (total, -1
+	// when the server sent none) and before a byte is written, with the bytes a
+	// resumed partial already holds: the caller's free-space check. Its error
+	// ends the download with the partial kept.
+	BeforeWrite func(total, held int64) error
 	// OnProgress (may be nil) reports bytes held so far and the file's total
 	// (-1 when the server sends none), throttled.
 	OnProgress func(copied, total int64)
 }
 
+// partialState is what Download records beside a file it starts (StatePath):
+// the size the server announced and its validators. A partial file resumes only
+// with it, so a Range never appends another file's bytes, even under a new
+// license's URL: the validator goes out as If-Range (a changed file answers 200,
+// the whole of it), and the 206's total must be the size recorded (or the
+// license's).
+type partialState struct {
+	Size         int64  `json:"size,omitempty"`
+	ETag         string `json:"etag,omitempty"`
+	LastModified string `json:"last_modified,omitempty"`
+}
+
+// StatePath is where Download records what it knows of the partial file at
+// dest (dest + ".state").
+func StatePath(dest string) string { return dest + ".state" }
+
+// RemovePartial deletes a partial download and its state file (a cancel, or a
+// job's terminal end).
+func RemovePartial(dest string) {
+	_ = os.Remove(dest)
+	_ = os.Remove(StatePath(dest))
+}
+
+func readState(dest string) (partialState, bool) {
+	b, err := os.ReadFile(StatePath(dest)) //nolint:gosec // G304: the caller's own temp path
+	if err != nil {
+		return partialState{}, false
+	}
+	var st partialState
+	if json.Unmarshal(b, &st) != nil {
+		return partialState{}, false
+	}
+	return st, true
+}
+
+// ifRange is the state's validator for If-Range: a strong ETag, else the
+// Last-Modified date ("" for none).
+func (st partialState) ifRange() string {
+	if st.ETag != "" && !strings.HasPrefix(st.ETag, "W/") {
+		return st.ETag
+	}
+	return st.LastModified
+}
+
 // Download fetches a content URL to dest, resuming a partial dest left by an
-// earlier attempt with a Range request: a 206 that starts where dest ends is
-// appended; any other answer (a 200, a 206 from elsewhere) starts dest again.
-// A failure part way leaves what arrived in dest (a refusal for size removes
-// it), and Download resumes whatever partial it finds at dest without checking
-// it is the same file. A caller resuming one under another URL (a new
-// license's) must first check that (an If-Range validator, or the expected
-// size), since a Range against another file would append the wrong bytes.
+// earlier attempt, under this URL or another (a new license's), only when it
+// can tell it is the same file: the state Download recorded when it started
+// the file (StatePath) must exist, agree with opts.ExpectedSize when both
+// know a size, and hold a validator (sent as If-Range) or a size. A 206 that
+// starts where dest ends, for a file of that size, is appended; a 200 (If-Range
+// found another file) starts dest again from its body, and anything else (a
+// 206 from elsewhere, a 416 for another size) starts dest again with a new
+// request. A failure part way leaves what arrived in dest (a refusal for size
+// removes it, and its state), for the next attempt to resume.
 //
 // The content-delivery URL is served by Audible's CDS and validates the same
 // device RSA signature as the API - audible-cli downloads it with the
@@ -60,9 +115,20 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 	if info, err := os.Stat(dest); err == nil && info.Mode().IsRegular() {
 		have = info.Size()
 	}
+	st, known := readState(dest)
+	want := st.Size
+	if want <= 0 {
+		want = opts.ExpectedSize
+	}
 	if have > maxBytes {
-		_ = os.Remove(dest)
+		RemovePartial(dest)
 		return ErrTooLarge
+	}
+	if have > 0 && (!known || (opts.ExpectedSize > 0 && st.Size > 0 && st.Size != opts.ExpectedSize) ||
+		(want <= 0 && st.ifRange() == "") || (want > 0 && have > want)) {
+		// Nothing proves this partial is the file the URL serves.
+		RemovePartial(dest)
+		have = 0
 	}
 	// A dedicated client with no overall timeout - a large audiobook can exceed the
 	// API client's per-request timeout; cancellation is governed by ctx. Redirects
@@ -83,6 +149,9 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		}
 		if have > 0 {
 			req.Header.Set("Range", "bytes="+strconv.FormatInt(have, 10)+"-")
+			if v := st.ifRange(); v != "" {
+				req.Header.Set("If-Range", v)
+			}
 		}
 		return req, c.signGet(req)
 	})
@@ -93,9 +162,7 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 	// restart drops dest and downloads it again from the start, without a Range.
 	restart := func() error {
 		_ = resp.Body.Close()
-		if err := os.Remove(dest); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+		RemovePartial(dest)
 		return c.Download(ctx, downloadURL, dest, opts)
 	}
 
@@ -106,13 +173,13 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 	switch {
 	case resp.StatusCode == http.StatusPartialContent && have > 0:
 		start, size, ok := parseContentRange(resp.Header.Get("Content-Range"))
-		if !ok || start != have {
+		if !ok || start != have || (want > 0 && size != want) {
 			return restart() // not the rest of our file
 		}
 		appendTo, total = true, size
 	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && have > 0:
 		// dest may already be whole: the server says how long the file is.
-		if _, size, ok := parseContentRange(resp.Header.Get("Content-Range")); ok && size == have {
+		if _, size, ok := parseContentRange(resp.Header.Get("Content-Range")); ok && size == have && (want <= 0 || want == have) {
 			return nil
 		}
 		return restart()
@@ -122,14 +189,28 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		return &httpError{StatusCode: resp.StatusCode, Method: http.MethodGet, Path: "download"}
 	}
 	if total > maxBytes {
-		_ = os.Remove(dest)
+		RemovePartial(dest)
 		return ErrTooLarge
+	}
+	held := int64(0)
+	if appendTo {
+		held = have
+	}
+	if opts.BeforeWrite != nil {
+		if err := opts.BeforeWrite(total, held); err != nil {
+			return err
+		}
 	}
 
 	flags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-	held := int64(0)
 	if appendTo {
-		flags, held = os.O_WRONLY|os.O_APPEND, have
+		flags = os.O_WRONLY | os.O_APPEND
+	} else {
+		fresh := partialState{Size: max(total, 0), ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified")}
+		b, _ := json.Marshal(fresh)
+		if err := os.WriteFile(StatePath(dest), b, 0o600); err != nil {
+			return err
+		}
 	}
 	f, err := os.OpenFile(dest, flags, 0o600) //nolint:gosec // the caller's own temp path
 	if err != nil {
@@ -146,14 +227,14 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		err = cerr
 	}
 	if held+n > maxBytes {
-		_ = os.Remove(dest)
+		RemovePartial(dest)
 		return ErrTooLarge
 	}
 	if err != nil {
 		return err
 	}
 	if total >= 0 && held+n != total {
-		return fmt.Errorf("download ended at %d of %d bytes", held+n, total)
+		return fmt.Errorf("download ended at %d of %d bytes: %w", held+n, total, io.ErrUnexpectedEOF)
 	}
 	return nil
 }

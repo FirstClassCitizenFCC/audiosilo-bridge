@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -52,7 +53,8 @@ func DecryptVoucher(b64Voucher, deviceType, serial, customerID, asin string) (ke
 	}
 	var vk voucherKeys
 	if err := json.Unmarshal(out[start:end+1], &vk); err != nil {
-		return "", "", fmt.Errorf("voucher json: %w", err)
+		// Not json's own words: they quote the decrypted payload, the key's bytes.
+		return "", "", errors.New("voucher: the decrypted payload is not the expected JSON")
 	}
 	if vk.Key == "" || vk.IV == "" {
 		return "", "", fmt.Errorf("voucher missing key/iv")

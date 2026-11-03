@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -232,15 +233,15 @@ func TestClientLicense(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	url, k, iv2, err := testClient(t, ts.URL).License(context.Background(), asin)
+	lic, err := testClient(t, ts.URL).License(context.Background(), asin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if url != "https://cdn.example/x.aaxc?sig=1" {
-		t.Fatalf("download url = %q", url)
+	if lic.URL != "https://cdn.example/x.aaxc?sig=1" {
+		t.Fatalf("download url = %q", lic.URL)
 	}
-	if k != "aaaa1111bbbb2222cccc3333dddd4444" || iv2 != "4444dddd3333cccc2222bbbb1111aaaa" {
-		t.Fatalf("voucher key/iv = %q / %q", k, iv2)
+	if lic.Key != "aaaa1111bbbb2222cccc3333dddd4444" || lic.IV != "4444dddd3333cccc2222bbbb1111aaaa" {
+		t.Fatalf("voucher key/iv = %q / %q", lic.Key, lic.IV)
 	}
 }
 
@@ -255,12 +256,12 @@ func TestClientLicenseDenied(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	_, _, _, err := testClient(t, ts.URL).License(context.Background(), "B00")
+	_, err := testClient(t, ts.URL).License(context.Background(), "B00")
 	if err == nil {
 		t.Fatal("expected an error for a denied license")
 	}
-	if !strings.Contains(err.Error(), "ContentEligibility") || !strings.Contains(err.Error(), "refused") {
-		t.Fatalf("denial detail missing from error: %v", err)
+	if !strings.Contains(err.Error(), "ContentEligibility") || !errors.Is(err, ErrNoRights) {
+		t.Fatalf("denial detail or kind missing from error: %v", err)
 	}
 }
 

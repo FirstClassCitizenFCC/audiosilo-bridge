@@ -2,6 +2,7 @@ package audible
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -73,14 +74,14 @@ func (it libItem) dedupeKey() string {
 }
 
 // Library lists the account's owned audiobooks as import records (metadata only;
-// SrcPath is empty - the file is fetched on demand by Acquire). Items are deduped
+// SrcPath is empty - audible.import fetches the file). Items are deduped
 // by dedupeKey, so a repeated page can neither duplicate a book nor spin the pager.
 func (c *Client) Library(ctx context.Context) ([]source.Record, error) {
 	var recs []source.Record
 	seen := make(map[string]bool, libraryPageSize) // one page is the common case
 	for page := 1; page <= maxLibraryPages; page++ {
 		q := url.Values{
-			"response_groups": {"contributors,series,product_desc,product_attrs,customer_rights"},
+			"response_groups": {libraryGroups},
 			"num_results":     {strconv.Itoa(libraryPageSize)},
 			"page":            {strconv.Itoa(page)},
 		}
@@ -105,6 +106,30 @@ func (c *Client) Library(ctx context.Context) ([]source.Record, error) {
 		}
 	}
 	return recs, nil
+}
+
+// libraryGroups are the response groups a library listing and a title read ask for.
+const libraryGroups = "contributors,series,product_desc,product_attrs,customer_rights"
+
+// ErrNotInLibrary is a title the account's library doesn't hold.
+var ErrNotInLibrary = errors.New("the title isn't in the account's Audible library")
+
+// Title reads one title of the account's library (GET /1.0/library/{asin}) as
+// an import record, as Library would list it. A title the library doesn't hold
+// is ErrNotInLibrary.
+func (c *Client) Title(ctx context.Context, asin string) (source.Record, error) {
+	var resp struct {
+		Item *libItem `json:"item"`
+	}
+	q := url.Values{"response_groups": {libraryGroups}}
+	err := c.doSigned(ctx, http.MethodGet, "/1.0/library/"+url.PathEscape(asin)+"?"+q.Encode(), nil, &resp)
+	if HTTPStatus(err) == http.StatusNotFound || (err == nil && (resp.Item == nil || !strings.EqualFold(resp.Item.ASIN, asin))) {
+		return source.Record{}, ErrNotInLibrary
+	}
+	if err != nil {
+		return source.Record{}, err
+	}
+	return resp.Item.toRecord(time.Now()), nil
 }
 
 func (it libItem) toRecord(now time.Time) source.Record {
