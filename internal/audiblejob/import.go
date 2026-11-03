@@ -364,6 +364,16 @@ func (h *Importer) run(ctx context.Context, job jobs.Job, p ImportParams, rep *j
 		return h.finish(ctx, rep, srv, acct.ID, p.ASIN, lib.ID, earlier.installed(), marker)
 	}
 
+	// A refused account fails here, before asking Audible anything: each queued
+	// import would only be refused in turn (a device denied licenses, for one,
+	// stays denied) until the owner signs in again, which ends the refusal.
+	if acct.RefusedAt != "" {
+		if audibleacct.Throttled(acct) {
+			return nil, fail(CodeRefused, "%s", ThrottledText)
+		}
+		return nil, refusedSignIn()
+	}
+
 	h.report(rep, jobs.Progress{Step: StepLicense, Message: "Reading the title from Audible"})
 	rec, err := h.o.Accounts.Title(ctx, acct.ID, p.ASIN)
 	switch {

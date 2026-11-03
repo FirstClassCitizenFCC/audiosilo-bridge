@@ -22,7 +22,7 @@ func TestAudibleAccounts(t *testing.T) {
 	if err := db.SignInAudibleAccount(ctx, a, at); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AudiblePolled(ctx, "abcd1234", 30, 12, at.Add(time.Hour)); err != nil {
+	if err := db.AudiblePolled(ctx, "abcd1234", 30, 12, at.Add(time.Hour), "kept"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.RefuseAudibleAccount(ctx, "abcd1234", "Audible refused", at.Add(2*time.Hour)); err != nil {
@@ -103,5 +103,64 @@ func TestAudibleAccountsUniquePerCustomer(t *testing.T) {
 		if err := db.SignInAudibleAccount(ctx, c, at); err != nil {
 			t.Fatalf("an unknown customer: %v", err)
 		}
+	}
+}
+
+// A poll ends a refusal unless its reason is keep (a device refusal a working
+// library list doesn't end), and a poll's error never replaces a refusal's
+// reason; a sign-in ends either.
+func TestAudiblePolledKeepsADeviceRefusal(t *testing.T) {
+	ctx := context.Background()
+	db := open(t)
+	at := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+	a := AudibleAccount{ID: "abcd1234", Label: "Chris", Marketplace: "us", CustomerHash: "h1", LibraryID: 1, Policy: "manual"}
+	if err := db.SignInAudibleAccount(ctx, a, at); err != nil {
+		t.Fatal(err)
+	}
+	get := func() AudibleAccount {
+		t.Helper()
+		got, err := db.GetAudibleAccount(ctx, a.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	// A refusal for another reason ends with a poll.
+	if err := db.RefuseAudibleAccount(ctx, a.ID, "sign-in refused", at); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AudiblePolled(ctx, a.ID, 3, 1, at, "throttled"); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.RefusedAt != "" || got.LastError != "" {
+		t.Fatalf("a sign-in refusal outlived a poll: %+v", got)
+	}
+	// An error with no refusal is recorded.
+	if err := db.AudibleAccountError(ctx, a.ID, "server down"); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.LastError != "server down" {
+		t.Fatalf("error = %+v", got)
+	}
+
+	// The kept reason stays through an error and a poll.
+	if err := db.RefuseAudibleAccount(ctx, a.ID, "throttled", at.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AudibleAccountError(ctx, a.ID, "server down"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AudiblePolled(ctx, a.ID, 4, 2, at.Add(2*time.Hour), "throttled"); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.RefusedAt != Timestamp(at.Add(time.Hour)) || got.LastError != "throttled" || got.LastTitles != 4 {
+		t.Fatalf("the device refusal didn't stay: %+v", got)
+	}
+	if err := db.SignInAudibleAccount(ctx, a, at.Add(3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.RefusedAt != "" || got.LastError != "" {
+		t.Fatalf("a sign-in kept the refusal: %+v", got)
 	}
 }

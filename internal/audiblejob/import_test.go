@@ -589,6 +589,37 @@ func TestImportCodes(t *testing.T) {
 }
 
 // Bad params fail before anything is asked of Audible.
+// A refused account's import fails before asking Audible anything: a device
+// denied licenses with the throttled advice, a refused sign-in with its own.
+// Allowed: an account with only a poll's error still imports.
+func TestImportOfARefusedAccountFailsFast(t *testing.T) {
+	for _, c := range []struct {
+		name, why, msg string
+	}{
+		{"throttled", audibleacct.ThrottledText, ThrottledText},
+		{"sign-in refused", audibleacct.RefusedText, refusedSignIn().Message},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newImportEnv(t)
+			e.accts.acct.RefusedAt, e.accts.acct.LastError = "2026-11-03T10:00:00Z", c.why
+			_, err := e.run(context.Background(), e.params(nil))
+			var f *Failure
+			if !errors.As(err, &f) || f.Code != CodeRefused || f.Message != c.msg {
+				t.Fatalf("err = %v", err)
+			}
+			if e.accts.licenses != 0 || e.accts.downloads != 0 {
+				t.Fatalf("licenses %d, downloads %d", e.accts.licenses, e.accts.downloads)
+			}
+			e.tmpEmpty(t)
+		})
+	}
+	e := newImportEnv(t)
+	e.accts.acct.LastError = "could not list the Audible library: connection reset"
+	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.licenses != 1 {
+		t.Fatalf("an account with a poll error: %v (licenses %d)", err, e.accts.licenses)
+	}
+}
+
 func TestImportParams(t *testing.T) {
 	for _, raw := range []string{`{}`, `{"account":"BAD","asin":"B0FAKE0002","library_id":1}`,
 		`{"account":"acct0001","asin":"nope","library_id":1}`, `{"account":"acct0001","asin":"B0FAKE0002"}`, `[]`} {

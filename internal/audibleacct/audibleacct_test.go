@@ -709,6 +709,57 @@ func TestImportCallsAndTheirRefusal(t *testing.T) {
 	e.noSecrets(t)
 }
 
+// A license denied to the device (audible.ErrThrottled) marks the account
+// refused with ThrottledText and answers the denial; a poll (its library still
+// lists) keeps it and a poll's error doesn't hide it; a sign-in again ends it.
+// Denied: another denial, or a title's, leaves the account alone.
+func TestThrottledLicenseRefusesTheAccountUntilASignIn(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	ctx := context.Background()
+	changed := 0
+	e.m.o.OnChange = func() { changed++ }
+
+	for _, denial := range []error{audible.ErrNoRights, audible.ErrDenied, audible.ErrNotReleased} {
+		e.svc.libraryErr = fmt.Errorf("license denied: %w", denial)
+		if _, err := e.m.License(ctx, a.ID, "B0FAKE0003"); !errors.Is(err, denial) {
+			t.Fatalf("license = %v, want %v", err, denial)
+		}
+		if got, _ := e.m.Account(ctx, a.ID); got.RefusedAt != "" || Throttled(got) || changed != 0 {
+			t.Fatalf("%v marked the account: %+v", denial, got)
+		}
+	}
+
+	e.svc.libraryErr = fmt.Errorf("license denied: %w", audible.ErrThrottled)
+	if _, err := e.m.License(ctx, a.ID, "B0FAKE0003"); !errors.Is(err, audible.ErrThrottled) || errors.Is(err, ErrRefused) {
+		t.Fatalf("throttled license = %v", err)
+	}
+	got, _ := e.m.Account(ctx, a.ID)
+	if got.RefusedAt == "" || got.LastError != ThrottledText || !Throttled(got) || changed != 1 {
+		t.Fatalf("after a throttled license = %+v (changed %d)", got, changed)
+	}
+
+	if err := e.m.Failed(ctx, a.ID, "could not read the library's books on the server"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.m.Polled(ctx, a.ID, 30, 4); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = e.m.Account(ctx, a.ID); !Throttled(got) || got.LastTitles != 30 {
+		t.Fatalf("a poll ended the throttling: %+v", got)
+	}
+
+	e.svc.libraryErr = nil
+	if b := e.signIn(t); b.ID != a.ID || b.RefusedAt != "" || b.LastError != "" || Throttled(b) {
+		t.Fatalf("signed in again = %+v", b)
+	}
+	if _, err := e.m.License(ctx, a.ID, "B0FAKE0003"); err != nil {
+		t.Fatalf("license after the sign-in again = %v", err)
+	}
+	e.noSecrets(t)
+}
+
 // Denied: the real Service's errors carry neither the account's customer id
 // nor its device serial, even in shapes no pattern knows (Amazon's answer
 // quoting them back), while errors.Is still sees the cause.

@@ -1327,7 +1327,9 @@ internal/
             Unique on (customer_hash, marketplace) where the hash isn't empty.
             SignInAudibleAccount upserts (a sign-in again keeps created_at and the
             counts, clears a refusal, records device_profile); AudiblePolled clears
-            refusal and error. 0010 (4b owner fixes) adds audible_accounts.device_profile
+            refusal and error, except a refusal whose last_error is its keep
+            argument (audibleacct.ThrottledText: a throttled device still lists);
+            AudibleAccountError leaves a refused account's reason alone. 0010 (4b owner fixes) adds audible_accounts.device_profile
             (audible.ProfileVersion at the sign-in; '' for one made before it was
             kept, which reads as the older profile). 0007 adds podcast_shows, a credential-free cache keyed by
             (server_id, show_id), indexed by server/library/feed hash. An empty
@@ -2077,7 +2079,11 @@ internal/
             NewDeviceSerial draws 40 letters and digits from crypto/rand;
             ProfileVersion ("4.60/26.2/46000856") is recorded in Credentials.Profile
             at Register (IsCurrentProfile; "" is an earlier sign-in). Changing the set
-            flags every account registered before it. denialKind checks the
+            flags every account registered before it. userAgent (every signed call
+            and download) is built from the same set: "Audible/<softwareVersion>
+            CFNetwork/3860.300.31 Darwin/<darwinVersion(osVersion)>" (iOS 26.2 =
+            Darwin 25.2.0), never audible-cli's old Darwin/20.6 one (mkb79/Audible
+            0.13.1 sets none on API calls). denialKind checks the
             customer's throttling (customerthrottled, "being throttled") FIRST, as
             ErrThrottled (a bare "Throttled", a rate limit, stays ErrDenied);
             Client.Title(asin) (GET /1.0/library/{asin}, ErrNotInLibrary on 404);
@@ -2206,7 +2212,11 @@ internal/
             through the same signed path (Manager.signed: open the sign-in, call, on
             a refusal retry once with a newer sign-in, else record it); Download
             only opens the sign-in (its 401/403 is an expired URL, the import's to
-            license again, never the account's refusal). 4b owner fixes: Finish
+            license again, never the account's refusal). 4b owner fixes: a license
+            denied as audible.ErrThrottled is a refusal too (signed retries it with a
+            newer sign-in, else records refused_at with ThrottledText and answers the
+            denial, not ErrRefused); Throttled(a) reads it; a poll keeps it, only a
+            sign-in again ends it (no new wire field: the page's refused). Finish
             records the device's profile (store device_profile from
             Credentials.Profile); OldProfile(a) (not audible.ProfileVersion, or none)
             flags an account that must sign in again ("Sign in again to keep
@@ -2289,7 +2299,10 @@ internal/
             refused this device. Sign in to Audible again on the Bridge (Accounts):
             that registers a new AudioSilo device Audible allows downloads to, and
             removes this one." (never "remove it at Amazon": the new device has the
-            same name), never no_rights) and the destination (Destination, a wrapper over
+            same name), never no_rights; the account then reads refused, and every
+            later import of it fails audible_refused at once, before the title read
+            or a license (ThrottledText for a throttled account, else the sign-in
+            refusal's), after a marker's rescan-only resume, until a sign-in again) and the destination (Destination, a wrapper over
             destination(), which also returns the plan's kind and siblings and
             which the poll's plans share: dest_path FIRST, the
             template not consulted, else the template, else Auto from the paged

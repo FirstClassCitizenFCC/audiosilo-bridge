@@ -104,4 +104,38 @@ func TestImportAgainstTheFakeDeviceProfile(t *testing.T) {
 			}
 		}
 	}
+
+	// The denial marked the account: the next queued import fails at once,
+	// asking Audible nothing, with the same advice.
+	if a, _ := m.Account(context.Background(), acct.ID); !audibleacct.Throttled(a) {
+		t.Fatalf("the throttled account isn't marked: %+v", a)
+	}
+	_, err = e.run(context.Background(), e.params(func(p *ImportParams) { p.Account, p.ASIN = acct.ID, "B0FAKE0007" }))
+	if !errors.As(err, &f) || f.Code != CodeRefused || f.Message != ThrottledText {
+		t.Fatalf("the next import = %v", err)
+	}
+	if lic := fake.Calls().Licenses; len(lic) != 2 {
+		t.Fatalf("the next import asked for a license: %+v", lic)
+	}
+
+	// Signing in again registers a current device and ends the refusal.
+	st, err = m.Start("us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, err = browser.Get(st.URL); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	again, err := m.Finish(context.Background(), accountServer{&fakeServer{}}, "srv1", audibleacct.Finish{Login: st.Login,
+		RedirectURL: resp.Header.Get("Location"), Mapping: audibleacct.Mapping{UserID: 3, UserName: "Chris", LibraryID: 1, Policy: "manual"}})
+	if err != nil || again.ID != acct.ID || again.RefusedAt != "" {
+		t.Fatalf("signed in again = %+v, %v", again, err)
+	}
+	if _, err := e.run(context.Background(), e.params(func(p *ImportParams) { p.Account, p.ASIN = acct.ID, "B0FAKE0006" })); err != nil {
+		t.Fatalf("the import after signing in again: %v", err)
+	}
+	if lic := fake.Calls().Licenses; len(lic) != 3 || lic[2].Status != "Granted" {
+		t.Fatalf("licenses = %+v", lic)
+	}
 }

@@ -128,10 +128,15 @@ func (db *DB) MapAudibleAccount(ctx context.Context, a AudibleAccount) error {
 
 // AudiblePolled records a complete poll of id at at: Audible answered (a
 // refusal ends), titles and matched are its counts, and the last error clears.
-func (db *DB) AudiblePolled(ctx context.Context, id string, titles, matched int, at time.Time) error {
+// A refusal recorded with keep as its reason stays (a device Audible denies
+// licenses still lists its library: only a new sign-in ends that one).
+func (db *DB) AudiblePolled(ctx context.Context, id string, titles, matched int, at time.Time, keep string) error {
 	ts := timestamp(at)
 	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET last_ok_at = ?, last_poll_at = ?, last_titles = ?,
-		last_matched = ?, refused_at = '', last_error = '' WHERE id = ?`, ts, ts, titles, matched, id)
+		last_matched = ?,
+		refused_at = CASE WHEN refused_at <> '' AND last_error = ? THEN refused_at ELSE '' END,
+		last_error = CASE WHEN refused_at <> '' AND last_error = ? THEN last_error ELSE '' END
+		WHERE id = ?`, ts, ts, titles, matched, keep, keep, id)
 	return err
 }
 
@@ -142,9 +147,10 @@ func (db *DB) RefuseAudibleAccount(ctx context.Context, id, why string, at time.
 	return err
 }
 
-// AudibleAccountError records why id's last poll failed (not a refusal).
+// AudibleAccountError records why id's last poll failed (not a refusal). A
+// refused account keeps its refusal's reason: that is what it needs fixed.
 func (db *DB) AudibleAccountError(ctx context.Context, id, why string) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET last_error = ? WHERE id = ?`, why, id)
+	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET last_error = ? WHERE id = ? AND refused_at = ''`, why, id)
 	return err
 }
 
