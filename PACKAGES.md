@@ -2407,8 +2407,8 @@ internal/
             server keeps queueing: the next poll Audible answers ends it), another server's or none
             unknown_account; lists the titles (store.ListAudibleSync) first, then while sync_retry_at
             is ahead ends "waiting" without calling Audible; reads the push's rows, then lastpositions
-            (25s, split on 400/414; a failure waits Audible's Retry-After from when it came back, at
-            least 2 min), skips a place under 1 s, past the runtime (5% + 2 min), older than 85 days
+            (in batches of 25 ASINs, split on 400/414; a 429/503 waits Audible's Retry-After from when
+            it came back, at least 2 min), skips a place under 1 s, past the runtime (5% + 2 min), older than 85 days
             or within 5 s of the place last written (its echo), posts a listen of no length (from_pos =
             to_pos, started_at = ended_at = last_updated, start jump; id EventID: "aud-" + 32 hex of
             sha256(account|asin|position_ms|last_updated|kind|library_id|path), kind "" or "finish", so
