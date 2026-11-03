@@ -351,6 +351,11 @@ func TestRegisterParse(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
+		// The profile's user agent, as the signed calls send it (bridge#46),
+		// never Go's default one.
+		if ua := r.Header.Get("User-Agent"); ua != userAgent {
+			t.Errorf("register User-Agent = %q, want %q", ua, userAgent)
+		}
 		// Assert the registration body carries the required cookies object and the
 		// auth code/verifier - omitting cookies is what triggers Amazon MissingValue.
 		var sent registerBody

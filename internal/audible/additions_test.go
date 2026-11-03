@@ -102,6 +102,41 @@ func TestBackoffGivesUp(t *testing.T) {
 	}
 }
 
+// RetryWait says a 429/503 the backoff gave up on is a request to slow down,
+// with its Retry-After (a wait past the call's cap included, so a caller that
+// backs off for longer honours it); any other answer isn't.
+func TestRetryWait(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("asins") {
+		case "B000000001":
+			w.Header().Set("Retry-After", "3600")
+			w.WriteHeader(http.StatusTooManyRequests)
+		case "B000000002":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer ts.Close()
+	var waits []time.Duration
+	c := backoffClient(t, ts.URL, &waits)
+	_, err := c.LastPositions(context.Background(), []string{"B000000001"}, nil)
+	if wait, ok := RetryWait(err); !ok || wait != time.Hour || len(waits) != 0 {
+		t.Fatalf("a 429 asking for an hour: RetryWait = %v, %v (waits %v), err %v", wait, ok, waits, err)
+	}
+	_, err = c.LastPositions(context.Background(), []string{"B000000002"}, nil)
+	if wait, ok := RetryWait(err); !ok || wait != 0 || HTTPStatus(err) != http.StatusServiceUnavailable {
+		t.Fatalf("a 503 with no Retry-After: RetryWait = %v, %v, err %v", wait, ok, err)
+	}
+	_, err = c.LastPositions(context.Background(), []string{"B000000003"}, nil)
+	if _, ok := RetryWait(err); ok || !IsRefused(err) {
+		t.Fatalf("a 403 is no request to slow down: err %v", err)
+	}
+	if _, ok := RetryWait(errors.New("network")); ok {
+		t.Fatal("a network error is no request to slow down")
+	}
+}
+
 func TestRetryAfter(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	for in, want := range map[string]time.Duration{
@@ -476,6 +511,10 @@ func TestDeregisterRefreshesFirst(t *testing.T) {
 	var paths []string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
+		// The profile's user agent on every identity call (bridge#46).
+		if ua := r.Header.Get("User-Agent"); ua != userAgent {
+			t.Errorf("%s User-Agent = %q, want %q", r.URL.Path, ua, userAgent)
+		}
 		switch r.URL.Path {
 		case "/auth/token":
 			_ = r.ParseForm()

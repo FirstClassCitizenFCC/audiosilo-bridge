@@ -103,7 +103,8 @@ func Register(ctx context.Context, mp Marketplace, code string, pkce PKCE, seria
 const authTimeout = 30 * time.Second
 
 // postAuth POSTs body to the identity API's path (with a bearer token when
-// accessToken is set), backing off on 429/503, and returns the 2xx answer's body.
+// accessToken is set) under the profile's user agent, backing off on 429/503,
+// and returns the 2xx answer's body.
 // An error never carries the request: its body holds the code, the verifier or
 // a token.
 func postAuth(ctx context.Context, set settings, path string, mp Marketplace, contentType string, body []byte, accessToken string) ([]byte, error) {
@@ -114,6 +115,9 @@ func postAuth(ctx context.Context, set settings, path string, mp Marketplace, co
 		}
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("Accept", "application/json")
+		// The profile's own user agent, as on every signed call: Go's default
+		// one names no app the device registered as.
+		req.Header.Set("User-Agent", userAgent)
 		req.Header.Set("x-amzn-identity-auth-domain", mp.AmazonAPIDomain())
 		if accessToken != "" {
 			req.Header.Set("Authorization", "Bearer "+accessToken)

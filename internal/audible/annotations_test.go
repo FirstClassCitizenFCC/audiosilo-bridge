@@ -100,6 +100,41 @@ func TestLastPositionsAdaptiveSplit(t *testing.T) {
 	}
 }
 
+// A URL too long for Amazon's front end (414) splits the batch as a 400 does.
+func TestLastPositionsSplitsOn414(t *testing.T) {
+	asins := make([]string, 25)
+	for i := range asins {
+		asins[i] = fmt.Sprintf("B%09d", i)
+	}
+	var sizes []int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := strings.Split(r.URL.Query().Get("asins"), ",")
+		sizes = append(sizes, len(got))
+		if len(got) > 6 {
+			w.WriteHeader(http.StatusRequestURITooLong)
+			return
+		}
+		var b strings.Builder
+		b.WriteString(`{"asin_last_position_heard_annots":[`)
+		for i, a := range got {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `{"asin":%q,"last_position_heard":{"status":"Exists","position_ms":1000}}`, a)
+		}
+		b.WriteString(`]}`)
+		_, _ = io.WriteString(w, b.String())
+	}))
+	defer ts.Close()
+	got, err := testClient(t, ts.URL).LastPositions(context.Background(), asins, nil)
+	if err != nil || len(got) != len(asins) {
+		t.Fatalf("got %d positions, err %v (sizes %v)", len(got), err, sizes)
+	}
+	if sizes[0] != 25 {
+		t.Fatalf("the first request carried %d ASINs, want the batch of 25", sizes[0])
+	}
+}
+
 // lastPositionsServer returns a fake annotations endpoint. If maxAsins > 0 it
 // mimics Audible's HTTP 400 when a request carries more than maxAsins ASINs. If
 // maxQueryLen is non-nil it records the longest query string seen.

@@ -73,7 +73,11 @@ func (c *Client) doSigned(ctx context.Context, method, path string, body []byte,
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxAPIBody))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &httpError{StatusCode: resp.StatusCode, Method: method, Path: pathOnly(path), Body: snippet(data)}
+		he := &httpError{StatusCode: resp.StatusCode, Method: method, Path: pathOnly(path), Body: snippet(data)}
+		if retryable(resp.StatusCode) {
+			he.RetryAfter, _ = retryAfter(resp.Header.Get("Retry-After"), time.Now())
+		}
+		return he
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)
@@ -101,6 +105,9 @@ type httpError struct {
 	Method     string
 	Path       string
 	Body       string
+	// RetryAfter is a 429/503's Retry-After (0 when it sent none, or another
+	// status): how long Audible asked the caller to wait.
+	RetryAfter time.Duration
 }
 
 func (e *httpError) Error() string {
