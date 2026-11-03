@@ -49,7 +49,7 @@ func Plan(recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
 		// Name by the clean book title - strip the series prefix and "(Book N)" /
 		// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
 		// Truth", not "... - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
-		clean := match.CleanTitle(rec.Title, seriesAsTitled(rec.Title, rec.Series))
+		clean := dropLeadingSequence(match.CleanTitle(rec.Title, seriesAsTitled(rec.Title, rec.Series)), rec)
 		sug, err := placement.SuggestWith(opts.Mode, opts.Template, placement.Input{
 			Author:       rec.Author,
 			Title:        clean,
@@ -70,6 +70,32 @@ func Plan(recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
 		items = append(items, PlannedItem{RelPath: path.Join(sug.RelPath, sug.Filename)})
 	}
 	return items, nil
+}
+
+// leadingSequence is a title that opens with a number and a separator ("2.5:
+// Margins", "3 - The Coast"), the shape CleanTitle leaves of "<Series> N:
+// Subtitle" once it strips the series name.
+var leadingSequence = regexp.MustCompile(`^(\d+(?:\.\d+)?)\s*[:\-\x{2013}\x{2014},]\s*(.+)$`)
+
+// dropLeadingSequence removes the record's own series position from the front
+// of a cleaned title: "Mapmakers 2.5: Margins" cleans to "2.5: Margins", which
+// placement would name "2.5 - 2.5 - Margins" since the folder code carries the
+// number already. Only the record's sequence is dropped, only before an explicit
+// separator and only when letters follow, so a bare "13" (placement names that
+// by its series or siblings) and a title of its own ("3 Days of Rain", or a
+// number that is not this book's position) stay as they are.
+func dropLeadingSequence(clean string, rec source.Record) string {
+	if !rec.HasSequence {
+		return clean
+	}
+	m := leadingSequence.FindStringSubmatch(clean)
+	if m == nil || !strings.ContainsFunc(m[2], unicode.IsLetter) {
+		return clean
+	}
+	if n, err := strconv.ParseFloat(m[1], 64); err != nil || n != rec.Sequence {
+		return clean
+	}
+	return m[2]
 }
 
 // seriesAsTitled is the series name as the title opens with it, with the

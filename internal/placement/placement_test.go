@@ -36,6 +36,18 @@ func TestSuggest(t *testing.T) {
 			wantKind: SeriesExisting,
 		},
 		{
+			name: "unprefixed sibling codes take a fractional position as is",
+			in: Input{
+				Author: "Wen Liang", Title: "Margins", SeriesName: "Mapmakers",
+				Sequence: 2.5, HasSequence: true, Filename: "Mapmakers 2.5 - Margins.m4b",
+				Siblings: []Sibling{
+					{RelPath: "Wen Liang/Mapmakers/1 - The Cartographer's Apprentice", SeriesIndex: 1},
+				},
+			},
+			wantPath: "Wen Liang/Mapmakers/2.5 - Margins/Mapmakers 2.5 - Margins.m4b",
+			wantKind: SeriesExisting,
+		},
+		{
 			name: "large series keeps two-digit padding",
 			in: Input{
 				Author: "B.V. Larson", Title: "Throne World", SeriesName: "Undying Mercenaries",

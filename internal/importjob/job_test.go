@@ -106,3 +106,67 @@ func TestPlanArticleBeforeSeries(t *testing.T) {
 		}
 	}
 }
+
+// "<Series> N: Subtitle" cleans to "N: Subtitle" once the series is stripped;
+// the folder code carries the number already, so the folder is named by the
+// subtitle alone ("2.5 - Margins", never "2.5 - 2.5 - Margins"). The file keeps
+// its original name, as every placement does. A number that is not the
+// record's position, a title of its own and a bare number stay as they were.
+func TestPlanSeriesNumberTitle(t *testing.T) {
+	plain := []link.LibraryBook{{
+		Path: "Wen Liang/Mapmakers/1 - The Cartographer's Apprentice", Title: "The Cartographer's Apprentice",
+		Authors: []string{"Wen Liang"}, Series: []link.SeriesRef{{Name: "Mapmakers", Position: "1"}},
+	}}
+	coded := []link.LibraryBook{{
+		Path: "Wen Liang/Mapmakers/MM01 - The Cartographer's Apprentice", Title: "The Cartographer's Apprentice",
+		Authors: []string{"Wen Liang"}, Series: []link.SeriesRef{{Name: "Mapmakers", Position: "1"}},
+	}}
+	for _, c := range []struct {
+		name  string
+		books []link.LibraryBook
+		title string
+		seq   float64
+		want  string
+	}{
+		{"decimal", plain, "Mapmakers 2.5: Margins", 2.5, "Wen Liang/Mapmakers/2.5 - Margins/x.m4b"},
+		{"integer", plain, "Mapmakers 3: The Coast", 3, "Wen Liang/Mapmakers/3 - The Coast/x.m4b"},
+		{"hyphen", plain, "Mapmakers 3 - The Coast", 3, "Wen Liang/Mapmakers/3 - The Coast/x.m4b"},
+		{"en dash", plain, "Mapmakers 3 \u2013 The Coast", 3, "Wen Liang/Mapmakers/3 - The Coast/x.m4b"},
+		{"article", plain, "The Mapmakers 3: The Coast", 3, "Wen Liang/Mapmakers/3 - The Coast/x.m4b"},
+		{"shortcode decimal", coded, "Mapmakers 2.5: Margins", 2.5, "Wen Liang/Mapmakers/MM02.5 - Margins/x.m4b"},
+		{"shortcode integer", coded, "Mapmakers 3: The Coast", 3, "Wen Liang/Mapmakers/MM03 - The Coast/x.m4b"},
+		{"new series", nil, "Mapmakers 3: The Coast", 3, "Wen Liang/Mapmakers/M03 - The Coast/x.m4b"},
+		{"marker already handled", plain, "Mapmakers, Book 3: The Coast", 3, "Wen Liang/Mapmakers/3 - The Coast/x.m4b"},
+		{"not this position", plain, "Mapmakers 7: The Coast", 3, "Wen Liang/Mapmakers/3 - 7 - The Coast/x.m4b"},
+		{"title of its own", plain, "3 Days of Rain", 3, "Wen Liang/Mapmakers/3 - 3 Days of Rain/x.m4b"},
+	} {
+		recs := []source.Record{{FileName: "x.m4b", Title: c.title, Author: "Wen Liang", Series: "Mapmakers", Sequence: c.seq, HasSequence: true}}
+		items, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: c.books})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if items[0].RelPath != c.want {
+			t.Errorf("%s (%q): got %q, want %q", c.name, c.title, items[0].RelPath, c.want)
+		}
+	}
+}
+
+func TestDropLeadingSequence(t *testing.T) {
+	rec := source.Record{Sequence: 2.5, HasSequence: true}
+	for _, c := range []struct{ in, want string }{
+		{"2.5: Margins", "Margins"},
+		{"2.50 - Margins", "Margins"},
+		{"2.5", "2.5"},                 // bare: placement names it by series or siblings
+		{"2.5: 1", "2.5: 1"},           // nothing of its own after the number
+		{"2.5 Margins", "2.5 Margins"}, // no separator: may be the title's own words
+		{"25: Margins", "25: Margins"},
+		{"Margins", "Margins"},
+	} {
+		if got := dropLeadingSequence(c.in, rec); got != c.want {
+			t.Errorf("%q: got %q, want %q", c.in, got, c.want)
+		}
+	}
+	if got := dropLeadingSequence("2.5: Margins", source.Record{}); got != "2.5: Margins" {
+		t.Errorf("no sequence: got %q", got)
+	}
+}

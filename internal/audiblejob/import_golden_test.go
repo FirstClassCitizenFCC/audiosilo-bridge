@@ -107,3 +107,29 @@ func noAuthor(series string) source.Record {
 	}
 	return r
 }
+
+// "<Series> N: Subtitle" next to "N - Title" siblings (fake B0FAKE0013 into a
+// library holding Mapmakers 1): the folder is "2.5 - Margins", never "2.5 -
+// 2.5 - Margins". The file keeps the title's own name, as every Auto
+// placement does.
+func TestDestinationSeriesNumberTitle(t *testing.T) {
+	books := []link.LibraryBook{{
+		Path: "Wen Liang/Mapmakers/1 - The Cartographer's Apprentice", Title: "The Cartographer's Apprentice",
+		Authors: []string{"Wen Liang"}, Series: []link.SeriesRef{{Name: "Mapmakers", Position: "1"}},
+	}}
+	p := ImportParams{Account: "acct0001", ASIN: "B0FAKE0013", LibraryID: 1}
+	for _, c := range []struct {
+		title, file string
+		seq         float64
+		want        string
+	}{
+		{"Mapmakers 2.5: Margins", "Mapmakers 2.5 - Margins.m4b", 2.5, "Wen Liang/Mapmakers/2.5 - Margins/Mapmakers 2.5 - Margins.m4b"},
+		{"Mapmakers 3: The Coast", "Mapmakers 3 - The Coast.m4b", 3, "Wen Liang/Mapmakers/3 - The Coast/Mapmakers 3 - The Coast.m4b"},
+	} {
+		r := rec("B0FAKE0013", c.title, "Wen Liang", "Mapmakers", c.seq)
+		r.FileName = c.file
+		if got, err := Destination(p, r, books); err != nil || got != c.want {
+			t.Errorf("%q:\n got %q, %v\nwant %q", c.title, got, err, c.want)
+		}
+	}
+}
