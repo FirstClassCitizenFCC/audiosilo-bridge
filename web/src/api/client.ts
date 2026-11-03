@@ -1,6 +1,10 @@
 import type {
   Accounts,
   AgentKind,
+  AudibleAccounts,
+  AudibleMapping,
+  AudibleRemoveResponse,
+  AudibleSignIn,
   Engine,
   GitHubPending,
   SignOutResponse,
@@ -218,6 +222,45 @@ export class ApiClient {
   deleteAgentCredential(kind?: AgentKind): Promise<Accounts> {
     const qs = kind ? `?${new URLSearchParams({ kind })}` : '';
     return this.request(`/api/accounts/agent${qs}`, { method: 'DELETE' });
+  }
+
+  // --- the Audible accounts ---
+  audible(): Promise<AudibleAccounts> {
+    return this.request('/api/accounts/audible');
+  }
+
+  // Starts an Audible sign-in in a marketplace: the Amazon page to open. 400 =
+  // an unknown marketplace.
+  startAudibleSignIn(marketplace: string): Promise<AudibleSignIn> {
+    return this.request('/api/accounts/audible/sign-in', { method: 'POST', body: { marketplace } });
+  }
+
+  // Ends a sign-in with the address of the page Amazon landed on and the
+  // account's mapping. 400 = something to correct; 404 = the sign-in expired;
+  // 409 = not paired; 422 = Amazon or the server refused.
+  finishAudibleSignIn(
+    login: string,
+    redirectUrl: string,
+    mapping: AudibleMapping,
+  ): Promise<AudibleAccounts> {
+    return this.request('/api/accounts/audible', {
+      method: 'POST',
+      body: { login, redirect_url: redirectUrl, ...mapping },
+    });
+  }
+
+  // Maps an account again (another person, library or policy).
+  mapAudibleAccount(id: string, mapping: AudibleMapping): Promise<AudibleAccounts> {
+    return this.request(`/api/accounts/audible/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: mapping,
+    });
+  }
+
+  // Forgets an account here, then removes it on the server and its device at
+  // Amazon; warning says what didn't happen.
+  removeAudibleAccount(id: string): Promise<AudibleRemoveResponse> {
+    return this.request(`/api/accounts/audible/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 }
 

@@ -6,6 +6,7 @@ describe('setup', () => {
   it('links each item to the tab the console links to', () => {
     expect(setupLink('agent')?.hash).toBe('#/accounts');
     expect(setupLink('github')?.hash).toBe('#/accounts');
+    expect(setupLink('audible')?.hash).toBe('#/accounts');
     expect(setupLink('asr')?.hash).toBe('#/settings');
     expect(setupLink('budget')?.hash).toBe('#/settings');
     expect(setupLink('libraries')).toEqual({ hash: '#/libraries', name: 'Libraries' });
@@ -34,6 +35,13 @@ describe('setup', () => {
       remainingRequired(setupFixture({ agent: { done: false }, budget: { done: false } })),
     ).toBe(2);
     expect(remainingRequired(null)).toBe(0);
+  });
+
+  it('shows the optional Audible item', () => {
+    const s = setupFixture();
+    s.items.push({ id: 'audible', done: false, required: false });
+    expect(setupItems(s).map((it) => it.id)).toContain('audible');
+    expect(remainingRequired(s)).toBe(0);
   });
 
   it('leaves out an item a later Bridge adds', () => {

@@ -5,7 +5,13 @@ import { AccountsTab } from './AccountsTab';
 import { ApiClient } from '@/api/client';
 import type { Accounts } from '@/api/types';
 import { lastCall, mockFetch } from '@/test/fetchMock';
-import { accountsFixture } from '@/test/fixtures';
+import { accountsFixture, audibleFixture } from '@/test/fixtures';
+
+// mockTab is mockFetch with the Audible card's load answered (its own tests
+// are AudibleCard.test.tsx).
+function mockTab(routes: Parameters<typeof mockFetch>[0]) {
+  return mockFetch({ 'GET /api/accounts/audible': { body: audibleFixture() }, ...routes });
+}
 
 const api = () => new ApiClient({ getToken: () => 't', onSignedOut: vi.fn() });
 
@@ -38,7 +44,7 @@ describe('AccountsTab', () => {
       },
     };
     let state = accountsFixture();
-    const { calls } = mockFetch({
+    const { calls } = mockTab({
       'GET /api/accounts': () => ({ body: state }),
       'POST /api/accounts/github/device': () => {
         state = pending;
@@ -59,7 +65,7 @@ describe('AccountsTab', () => {
 
   it('says signed in when sharing goes through gh, and offers this sign-in as optional', async () => {
     const a = accountsFixture();
-    mockFetch({
+    mockTab({
       'GET /api/accounts': {
         body: { ...a, github: { ...a.github, from: 'gh', can_contribute: true } },
       },
@@ -74,7 +80,7 @@ describe('AccountsTab', () => {
 
   it('says signed in through the environment, with no sign-in to offer', async () => {
     const a = accountsFixture();
-    mockFetch({
+    mockTab({
       'GET /api/accounts': {
         body: {
           ...a,
@@ -89,7 +95,7 @@ describe('AccountsTab', () => {
   });
 
   it('shows the sign-in, signs out, and passes on a revoke GitHub did not confirm', async () => {
-    const { calls } = mockFetch({
+    const { calls } = mockTab({
       'GET /api/accounts': { body: signedIn() },
       'DELETE /api/accounts/github': {
         body: { accounts: accountsFixture(), revoke_error: "GitHub didn't confirm the revoke" },
@@ -111,7 +117,7 @@ describe('AccountsTab', () => {
 
   it('asks to sign in again after GitHub refused the sign-in, and names an env token', async () => {
     const a = signedIn();
-    mockFetch({
+    mockTab({
       'GET /api/accounts': {
         body: {
           ...a,
@@ -133,7 +139,7 @@ describe('AccountsTab', () => {
   });
 
   it('shows a refused start verbatim', async () => {
-    mockFetch({
+    mockTab({
       'GET /api/accounts': { body: accountsFixture() },
       'POST /api/accounts/github/device': {
         status: 422,
@@ -147,7 +153,7 @@ describe('AccountsTab', () => {
 
   it("saves the agent's credential without ever showing it, and removes it", async () => {
     let state = accountsFixture();
-    const { calls } = mockFetch({
+    const { calls } = mockTab({
       'GET /api/accounts': () => ({ body: state }),
       'PUT /api/accounts/agent': () => {
         state = {
@@ -200,7 +206,7 @@ describe('AccountsTab', () => {
   it('shows each credential with the time it was saved', async () => {
     const a = accountsFixture();
     const ago = (secs: number) => new Date(Date.now() - secs * 1000).toISOString();
-    mockFetch({
+    mockTab({
       'GET /api/accounts': {
         body: {
           ...a,
@@ -223,7 +229,7 @@ describe('AccountsTab', () => {
 
   it("says the container's own credential wins", async () => {
     const a = accountsFixture();
-    mockFetch({
+    mockTab({
       'GET /api/accounts': {
         body: { ...a, agent: { ...a.agent, available: true, container_credential: 'oauth_token' } },
       },

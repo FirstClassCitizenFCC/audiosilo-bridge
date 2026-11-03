@@ -57,7 +57,8 @@ export interface Status {
 }
 
 // link.SetupItem ids, in the checklist's order (internal/setup).
-export type SetupItemId = 'paired' | 'libraries' | 'asr' | 'agent' | 'budget' | 'github';
+export type SetupItemId =
+  'paired' | 'libraries' | 'asr' | 'agent' | 'budget' | 'github' | 'audible';
 
 // link.SetupItem
 export interface SetupItem {
@@ -447,4 +448,80 @@ export interface Accounts {
 export interface SignOutResponse {
   accounts: Accounts;
   revoke_error: string;
+}
+
+// --- the Accounts tab's Audible section (internal/api/audible.go) ---
+
+// What an account backs up (audibleacct.Policies).
+export type AudiblePolicy = 'all' | 'series' | 'manual';
+
+// api.AudibleAccount: never a credential.
+export interface AudibleAccount {
+  id: string;
+  label: string;
+  marketplace: string;
+  user_id: number;
+  user_name: string;
+  library_id: number;
+  library_name: string;
+  policy: AudiblePolicy;
+  sync: boolean;
+  created_at: string;
+  last_ok_at: string;
+  last_poll_at: string;
+  last_titles: number;
+  last_matched: number;
+  refused: boolean;
+  refused_at: string;
+  last_error: string;
+  // The mapping was recorded on another server than the one paired now.
+  other_server: boolean;
+}
+
+// api.AudibleUser: who an account may be mapped to.
+export interface AudibleUser {
+  id: number;
+  name: string;
+  admin: boolean;
+}
+
+// api.AudibleLibrary: one of the server's books libraries.
+export interface AudibleLibrary {
+  id: number;
+  name: string;
+}
+
+// GET /api/accounts/audible
+export interface AudibleAccounts {
+  accounts: AudibleAccount[];
+  marketplaces: string[];
+  policies: AudiblePolicy[];
+  paired: boolean;
+  libraries: AudibleLibrary[];
+  users: AudibleUser[];
+  users_error: string;
+}
+
+// POST /api/accounts/audible/sign-in: open url, then paste the page Amazon
+// lands on back before expires_at.
+export interface AudibleSignIn {
+  login: string;
+  url: string;
+  marketplace: string;
+  expires_at: string;
+}
+
+// api.AudibleMapping
+export interface AudibleMapping {
+  label: string;
+  user_id: number;
+  library_id: number;
+  policy: AudiblePolicy;
+  sync: boolean;
+}
+
+// DELETE /api/accounts/audible/{id}
+export interface AudibleRemoveResponse {
+  audible: AudibleAccounts;
+  warning: string;
 }

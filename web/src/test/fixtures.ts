@@ -1,5 +1,7 @@
 import type {
   Accounts,
+  AudibleAccount,
+  AudibleAccounts,
   Engine,
   Library,
   ServerJob,
@@ -226,6 +228,43 @@ export function workerFixture(over: Partial<Worker> = {}): Worker {
     decode_seconds: 2005,
     connected: true,
     task: '',
+    ...over,
+  };
+}
+
+export function audibleAccountFixture(over: Partial<AudibleAccount> = {}): AudibleAccount {
+  return {
+    id: 'acct0001',
+    label: 'Chris (US)',
+    marketplace: 'us',
+    user_id: 3,
+    user_name: 'Chris',
+    library_id: 1,
+    library_name: 'Books',
+    policy: 'manual',
+    sync: true,
+    created_at: '2026-11-03T10:00:00Z',
+    last_ok_at: '2026-11-03T11:00:00Z',
+    last_poll_at: '2026-11-03T11:00:00Z',
+    last_titles: 30,
+    last_matched: 12,
+    refused: false,
+    refused_at: '',
+    last_error: '',
+    other_server: false,
+    ...over,
+  };
+}
+
+export function audibleFixture(over: Partial<AudibleAccounts> = {}): AudibleAccounts {
+  return {
+    accounts: [],
+    marketplaces: ['au', 'uk', 'us'],
+    policies: ['all', 'series', 'manual'],
+    paired: true,
+    libraries: [{ id: 1, name: 'Books' }],
+    users: [{ id: 3, name: 'Chris', admin: true }],
+    users_error: '',
     ...over,
   };
 }
