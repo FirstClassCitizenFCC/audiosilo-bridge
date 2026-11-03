@@ -154,7 +154,7 @@ internal/
               -> rescan -> ASIN enrich
   importjob/  BookMatcher (link.LibraryBook) + Plan: match and place against a library
   transfer/   Local.Place: SafeJoin + os.Root, free-space check, no-replace install
-  placement/ source/ progress/  (the manager's, imported as is)
+  placement/ source/ progress/  (the manager's; source trimmed to Record in 4b)
 web/          the page: Vite + React 19 + TS + Tailwind v4; pure logic in src/lib
 docker/       entrypoint.sh (own /bridge-data, umask 022, drop to PUID:PGID)
 Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, agent
@@ -416,12 +416,17 @@ download lane, one per account): the title checked, a license (denials as
 `<data>/audible/tmp` with a resumable, validated, capped download (If-Range
 against the partial's state file; 2.2x free there, 1.1x in the library, else
 `disk_full`; one new license on an expired URL, then `offline_url_expired`),
-decrypted by ffmpeg `-c copy` to .m4b, placed (Auto from the server's books
-listing, or the template / `dest_path`), installed with `transfer.Local` (never
-replacing: `exists`), a rescan and the ASIN enriched (paced on 429 like the poll; a
-file that joins an existing book enriches it only under the poll's matcher and
-`SpanMismatch` rule). A stop keeps the partial for
-the next start (swept after 7 days), a cancel or failure deletes it. The fake
+decrypted by ffmpeg `-c copy` to .m4b, placed (the `dest_path`, else the
+template, else Auto from the server's books listing; spelled as the disk spells
+the folders that exist; never a hidden segment), installed with `transfer.Local`
+(never replacing: `exists`; nor joining a book the library has: a destination
+in a listed book's folder, or one holding audio, is `exists` before the
+download), a rescan and the ASIN enriched (paced on 429 like the poll; a file a
+dest_path puts in a disc folder of a book enriches it only under the poll's
+matcher and `SpanMismatch` rule). A stop, or a lost claim the server hands out again,
+keeps the partial for the next run (swept after 7 days), a cancel or failure
+deletes it; a resumed job, or one at the place step, whose library isn't
+writable parks `not_writable` and waits for it. The fake
 serves a plain .m4b as the AAXC (ffmpeg passes an unencrypted MP4 through with the
 key set) with Range, a cut and an expiry. No migration.
 

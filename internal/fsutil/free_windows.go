@@ -29,3 +29,9 @@ func FreeBytes(path string) (int64, error) {
 func IsNoSpace(err error) bool {
 	return errors.Is(err, windows.ERROR_DISK_FULL) || errors.Is(err, windows.ERROR_HANDLE_DISK_FULL)
 }
+
+// IsReadOnly reports whether err is a write refused by a write-protected
+// volume (ERROR_WRITE_PROTECT).
+func IsReadOnly(err error) bool {
+	return errors.Is(err, windows.ERROR_WRITE_PROTECT)
+}

@@ -161,6 +161,15 @@ func TestSuggest(t *testing.T) {
 			wantKind: Standalone,
 		},
 		{
+			// A hidden (dot) name is never indexed by the server's scan.
+			name: "leading dots never make a hidden folder",
+			in: Input{
+				Author: ".hack Team", Title: "...And Ladies of the Club", Filename: "And Ladies of the Club.m4b",
+			},
+			wantPath: "hack Team/And Ladies of the Club/And Ladies of the Club.m4b",
+			wantKind: Standalone,
+		},
+		{
 			name: "new series reuses existing author folder spelling",
 			in: Input{
 				Author: "L. A. McBride", Title: "Book One", SeriesName: "Magic & Mayhem",

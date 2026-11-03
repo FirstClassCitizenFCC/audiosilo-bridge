@@ -131,7 +131,8 @@ func TestPlaceSafeJoinRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := source(t, "payload")
-	for _, rel := range []string{"../escape.m4b", "../../etc/passwd", "a/../../b.m4b", "/abs/path.m4b", "", ".", "a/..", "a\x00b.m4b", "Author/.hidden.m4b"} {
+	for _, rel := range []string{"../escape.m4b", "../../etc/passwd", "a/../../b.m4b", "/abs/path.m4b", "", ".", "a/..", "a\x00b.m4b", "Author/.hidden.m4b",
+		".audible/Author/x.m4b", "Author/.hidden/x.m4b"} {
 		_, err := NewLocal().Place(context.Background(), PlaceRequest{Root: root, RelPath: rel, SrcPath: src})
 		if !errors.Is(err, ErrInvalidPath) {
 			t.Errorf("Place(%q) = %v, want ErrInvalidPath", rel, err)
@@ -251,11 +252,67 @@ func TestPlaceCancelLeavesNothing(t *testing.T) {
 	noTemps(t, root)
 }
 
-func TestEnsureRootMissing(t *testing.T) {
-	if err := NewLocal().EnsureRoot(context.Background(), filepath.Join(t.TempDir(), "nope")); err == nil {
-		t.Fatal("expected error for a missing root")
-	}
-	if _, err := NewLocal().Place(context.Background(), PlaceRequest{Root: filepath.Join(t.TempDir(), "nope"), RelPath: "a/b.m4b", SrcPath: source(t, "x")}); err == nil {
+// A missing root (an unmounted share), or a file where the root should be,
+// fails before anything is written.
+func TestPlaceMissingRoot(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope")
+	if _, err := NewLocal().Place(context.Background(), PlaceRequest{Root: missing, RelPath: "a/b.m4b", SrcPath: source(t, "x")}); err == nil {
 		t.Fatal("an unmounted library must not get a stub tree")
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the missing root was created: %v", err)
+	}
+	file := filepath.Join(t.TempDir(), "file")
+	writeFile(t, file, "not a folder")
+	if _, err := NewLocal().Place(context.Background(), PlaceRequest{Root: file, RelPath: "a/b.m4b", SrcPath: source(t, "x")}); err == nil {
+		t.Fatal("a file as the library root was accepted")
+	}
+}
+
+// A filesystem whose free space can't be read (a share that doesn't answer
+// statfs) is no refusal: the copy goes ahead.
+func TestPlaceUnreadableFreeSpace(t *testing.T) {
+	root := t.TempDir()
+	l := NewLocal()
+	l.free = func(string) (int64, error) { return 0, syscall.ENOSYS }
+	res, err := l.Place(context.Background(), PlaceRequest{Root: root, RelPath: "A/B/x.m4b", SrcPath: source(t, "payload")})
+	if err != nil || read(t, filepath.Join(root, "A", "B", "x.m4b")) != "payload" {
+		t.Fatalf("res %+v, err %v", res, err)
+	}
+}
+
+// OnDisk spells what exists of a path as the library lists it: on a case- or
+// normalization-insensitive filesystem a folder found under another spelling
+// takes the listed one; what doesn't exist keeps the path's.
+func TestOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "mara quill", "Orchard Cycle"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	_, statErr := os.Stat(filepath.Join(dir, "MARA QUILL"))
+	insensitive := statErr == nil
+	for rel, want := range map[string]string{
+		"Mara Quill/Orchard Cycle/OC02/x.m4b": "mara quill/Orchard Cycle/OC02/x.m4b",
+		"mara quill/orchard cycle/x.m4b":      "mara quill/Orchard Cycle/x.m4b",
+		"New Author/Book/x.m4b":               "New Author/Book/x.m4b",
+		"x.m4b":                               "x.m4b",
+	} {
+		if !insensitive {
+			want = rel // a case-sensitive disk: another spelling is another folder
+		}
+		got, err := OnDisk(root, rel)
+		if err != nil || got != want {
+			t.Errorf("OnDisk(%q) = %q, %v; want %q (case-insensitive disk: %v)", rel, got, err, want, insensitive)
+		}
+	}
+	// A file where a folder should be is an error, not a spelling.
+	writeFile(t, filepath.Join(dir, "Loose"), "x")
+	if _, err := OnDisk(root, "Loose/Book/x.m4b"); err == nil {
+		t.Error("a file where a folder goes was accepted")
 	}
 }

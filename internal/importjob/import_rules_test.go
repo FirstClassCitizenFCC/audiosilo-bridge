@@ -11,7 +11,7 @@ import (
 // audibleRec is an Audible record as the library listing makes it: the title,
 // the first author, the series and its position as Audible spells it.
 func audibleRec(asin, title, author, series, pos string) source.Record {
-	r := source.Record{ASIN: asin, Key: asin, Title: title, TitleShort: title, Author: author, Authors: []string{author},
+	r := source.Record{ASIN: asin, Title: title, TitleShort: title, Author: author, Authors: []string{author},
 		Series: series, SeriesPosition: pos}
 	if v, err := strconv.ParseFloat(pos, 64); err == nil {
 		r.Sequence, r.HasSequence = v, true

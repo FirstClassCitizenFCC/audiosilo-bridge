@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/progress"
 )
@@ -26,6 +28,15 @@ const DefaultMaxDownloadBytes int64 = 4 << 30
 // ErrTooLarge is a download refused for passing its size cap. Nothing of it is
 // kept.
 var ErrTooLarge = errors.New("the download is larger than the cap")
+
+// downloadStall ends a download attempt that hears nothing for this long: no
+// answer to its request, or no byte of the body (a connection a CDN or a proxy
+// keeps open without sending). What arrived stays for the next attempt.
+const downloadStall = 2 * time.Minute
+
+// ErrStalled is a download attempt ended for hearing nothing for a while (the
+// caller's context still live): a dropped connection, for the caller to resume.
+var ErrStalled = errors.New("the download stalled: nothing arrived for a while")
 
 // DownloadOptions shape one Download.
 type DownloadOptions struct {
@@ -142,8 +153,27 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 			return c.signGet(r)
 		},
 	}
+	// Each attempt runs under its own context, which a watchdog ends when
+	// nothing arrives for the stall time (reset by every byte of the body).
+	var (
+		attemptCtx    context.Context
+		attemptCancel context.CancelCauseFunc = func(error) {}
+		watchdog      *time.Timer
+	)
+	endAttempt := func() {
+		if watchdog != nil {
+			watchdog.Stop()
+		}
+		attemptCancel(nil)
+	}
+	defer endAttempt()
 	resp, err := sendWithBackoff(ctx, client, c.set.sleep, func() (*http.Request, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+		endAttempt()
+		var cancel context.CancelCauseFunc
+		attemptCtx, cancel = context.WithCancelCause(ctx)
+		attemptCancel = cancel
+		watchdog = time.AfterFunc(c.set.stall, func() { cancel(ErrStalled) })
+		req, err := http.NewRequestWithContext(attemptCtx, http.MethodGet, downloadURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -156,13 +186,19 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		return req, c.signGet(req)
 	})
 	if err != nil {
-		return err
+		return stalled(ctx, attemptCtx, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// restart drops dest and downloads it again from the start, without a Range.
+	// restart drops dest and downloads it again from the start, without a
+	// Range. A partial it can't remove ends the download instead (another
+	// request would ask for the same Range again).
 	restart := func() error {
+		endAttempt()
 		_ = resp.Body.Close()
-		RemovePartial(dest)
+		if err := os.Remove(dest); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		_ = os.Remove(StatePath(dest))
 		return c.Download(ctx, downloadURL, dest, opts)
 	}
 
@@ -184,6 +220,11 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		return restart()
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		total = resp.ContentLength
+		if total < 0 && opts.ExpectedSize > 0 {
+			// No length sent: the license's size is the file's, so a body cut
+			// short still fails (io.ErrUnexpectedEOF) instead of passing whole.
+			total = opts.ExpectedSize
+		}
 	default:
 		return &httpError{StatusCode: resp.StatusCode, Method: http.MethodGet, Path: "download"}
 	}
@@ -212,7 +253,7 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		return err
 	}
 	// Read at most one byte past the cap, to tell a file at the cap from one over it.
-	src := io.LimitReader(resp.Body, maxBytes-held+1)
+	src := io.LimitReader(&stallReader{r: resp.Body, t: watchdog, d: c.set.stall}, maxBytes-held+1)
 	if opts.OnProgress != nil {
 		cb := opts.OnProgress
 		src = &progress.Reader{R: src, Total: total, CB: func(copied, t int64) { cb(held+copied, t) }}
@@ -226,12 +267,36 @@ func (c *Client) Download(ctx context.Context, downloadURL, dest string, opts Do
 		return ErrTooLarge
 	}
 	if err != nil {
-		return err
+		return stalled(ctx, attemptCtx, err)
 	}
 	if total >= 0 && held+n != total {
 		return fmt.Errorf("download ended at %d of %d bytes: %w", held+n, total, io.ErrUnexpectedEOF)
 	}
 	return nil
+}
+
+// stalled is err, or ErrStalled when the stall watchdog ended the attempt (and
+// not the caller's context).
+func stalled(ctx, attempt context.Context, err error) error {
+	if ctx.Err() == nil && attempt != nil && errors.Is(context.Cause(attempt), ErrStalled) {
+		return ErrStalled
+	}
+	return err
+}
+
+// stallReader resets the stall watchdog each time bytes arrive.
+type stallReader struct {
+	r io.Reader
+	t *time.Timer
+	d time.Duration
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.t.Reset(s.d)
+	}
+	return n, err
 }
 
 // parseContentRange reads "bytes start-end/size" (size "*" is unknown, -1).

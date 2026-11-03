@@ -389,11 +389,13 @@ var stopwords = map[string]bool{
 
 // sanitize makes a path segment safe to create on disk without mangling the
 // punctuation that real library folders use (apostrophes, commas, periods).
+// A leading dot goes too ("...And Ladies of the Club", ".hack"): a hidden
+// name is never indexed by the server's scan.
 func sanitize(s string) string {
 	s = strings.TrimSpace(s)
 	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", " -", "\x00", "")
 	s = replacer.Replace(s)
-	return strings.TrimRight(s, " .")
+	return strings.Trim(s, " .")
 }
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }

@@ -18,6 +18,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -49,8 +51,9 @@ type stubImportAccounts struct {
 	licenses int
 	body     []byte
 	// failNext: each Download pops one; a non-nil error writes half of what is
-	// left first (a dropped connection).
-	failNext []error
+	// left first (a dropped connection), or nothing when dropEmpty.
+	failNext  []error
+	dropEmpty bool
 	// download replaces the stub's Download when set.
 	download  func(ctx context.Context, url, dest string, opts audible.DownloadOptions) error
 	downloads int
@@ -108,6 +111,9 @@ func (s *stubImportAccounts) Download(ctx context.Context, _ string, url, dest s
 	}
 	if fail != nil {
 		rest = rest[:len(rest)/2]
+		if s.dropEmpty {
+			rest = nil
+		}
 	}
 	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
@@ -130,6 +136,8 @@ type stubImportServer struct {
 	enrichErr error
 	// enrichErrs answer the enrichment PUTs in turn before enrichErr does.
 	enrichErrs []error
+	// bookOf is the book the rescan answers for a file (nil: its folder).
+	bookOf func(p string) string
 }
 
 func (s *stubImportServer) LibraryBooks(_ context.Context, _ int64, _ string, _ int) (*link.LibraryBooks, error) {
@@ -146,6 +154,9 @@ func (s *stubImportServer) Rescan(_ context.Context, _ int64, p string) (string,
 		if err != nil {
 			return "", err
 		}
+	}
+	if s.bookOf != nil {
+		return s.bookOf(p), nil
 	}
 	return path.Dir(p), nil
 }
@@ -245,6 +256,64 @@ func (e *importEnv) run(ctx context.Context, params json.RawMessage) (any, error
 	return NewImport(e.opts).Run(ctx, jobs.Job{ID: 7, Kind: ImportKind, Params: params, Attempt: 1}, jobs.LocalReporter())
 }
 
+// resumed runs the job as the runner resumes one after a restart, reporting
+// to rep.
+func (e *importEnv) resumed(ctx context.Context, params json.RawMessage, rep *jobs.Reporter) (any, error) {
+	return NewImport(e.opts).Run(ctx, jobs.Job{ID: 7, Kind: ImportKind, Params: params, Attempt: 1, Resumed: true}, rep)
+}
+
+// parks are the park codes the job's progress named, with their steps.
+func (e *importEnv) parks() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []string
+	for _, p := range e.progress {
+		if park, ok := p.Extra["park"].(map[string]any); ok {
+			out = append(out, p.Step+":"+fmt.Sprint(park["code"]))
+		}
+	}
+	return out
+}
+
+// said reports whether a progress of the job said msg.
+func (e *importEnv) said(msg string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, p := range e.progress {
+		if strings.Contains(p.Message, msg) {
+			return true
+		}
+	}
+	return false
+}
+
+// keepPartial leaves a partial download of the title in the temp folder (and
+// its state), as a stopped run of it does, and returns its path.
+func (e *importEnv) keepPartial(t *testing.T) string {
+	t.Helper()
+	part := filepath.Join(e.tmp, "acct0001-B0FAKE0002.aaxc.part")
+	if err := os.MkdirAll(e.tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(part, e.accts.body[:100], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(audible.StatePath(part), []byte(`{"size":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return part
+}
+
+// kept fails unless the partial at part and its state are still there.
+func kept(t *testing.T, part string) {
+	t.Helper()
+	for _, p := range []string{part, audible.StatePath(part)} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s: %v", filepath.Base(p), err)
+		}
+	}
+}
+
 // noSecrets fails when a license's key, iv or URL signature shows anywhere
 // the job leaves words: its logs, progress, result, error, or a file in the
 // temp folder or the library.
@@ -284,6 +353,17 @@ func (e *importEnv) tmpEmpty(t *testing.T) {
 	entries, _ := os.ReadDir(e.tmp)
 	if len(entries) != 0 {
 		t.Fatalf("temp files left: %v", entries)
+	}
+}
+
+// writeLibrary puts a file at rel in the library (an administrator's).
+func (e *importEnv) writeLibrary(rel, body string) {
+	full := filepath.Join(e.root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(full, []byte(body), 0o644); err != nil { //nolint:gosec // a test's library file
+		panic(err)
 	}
 }
 
@@ -416,6 +496,13 @@ func TestImportCodes(t *testing.T) {
 				return int64(len(e.accts.body)), nil // under 1.1x
 			}
 		}, code: CodeDiskFull},
+		{name: "decrypt: out of quota", setup: func(e *importEnv) {
+			e.opts.Decrypt = func(context.Context, string, string, string, audible.License) error {
+				return errors.New("exit status 1: [out#0/ipod] Error writing trailer: Disk quota exceeded")
+			}
+		}, code: CodeDiskFull},
+		{name: "dest names another audio file", params: func(p *ImportParams) { p.DestPath = "Imports/Copper.mp3" }, code: CodeNotWritable},
+		{name: "dest in a hidden folder", params: func(p *ImportParams) { p.DestPath = "Imports/.audible" }, code: CodeNotWritable},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -427,6 +514,12 @@ func TestImportCodes(t *testing.T) {
 			var f *Failure
 			if !errors.As(err, &f) || f.Code != c.code || res != any(f) {
 				t.Fatalf("res %#v, err %v; want code %s", res, err, c.code)
+			}
+			// The failure's wire shape: the server reads its "code".
+			var wire map[string]any
+			_ = json.Unmarshal([]byte(mustJSON(t, res)), &wire)
+			if msg, _ := wire["message"].(string); wire["code"] != c.code || msg != err.Error() || len(wire) != 2 {
+				t.Fatalf("failure on the wire = %v", wire)
 			}
 			files := e.libraryFiles()
 			if c.code == CodeExists {
@@ -486,17 +579,42 @@ func TestImportResumesAfterADroppedConnection(t *testing.T) {
 	e.noSecrets(t, res, err)
 }
 
-// A connection that keeps dropping fails the job, and its partial goes.
+// A connection that keeps dropping with nothing new fails the job, and its
+// partial goes.
 func TestImportGivesUpAfterThreeDrops(t *testing.T) {
 	e := newImportEnv(t)
+	e.accts.dropEmpty = true
 	e.accts.failNext = []error{io.ErrUnexpectedEOF, io.ErrUnexpectedEOF, io.ErrUnexpectedEOF}
 	if _, err := e.run(context.Background(), e.params(nil)); err == nil {
 		t.Fatal("three drops in a row must fail")
+	}
+	if e.accts.downloads != 3 {
+		t.Fatalf("downloads = %d, want 3", e.accts.downloads)
 	}
 	e.tmpEmpty(t)
 	if len(e.libraryFiles()) != 0 {
 		t.Fatal("a failed import wrote to the library")
 	}
+}
+
+// Drops that each add to the partial don't use the attempts up: a long
+// download over a link that drops now and then finishes.
+func TestImportKeepsResumingWhileItProgresses(t *testing.T) {
+	e := newImportEnv(t)
+	for range 6 {
+		e.accts.failNext = append(e.accts.failNext, io.ErrUnexpectedEOF)
+	}
+	res, err := e.run(context.Background(), e.params(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.accts.downloads != 7 || e.accts.licenses != 1 {
+		t.Fatalf("downloads %d, licenses %d", e.accts.downloads, e.accts.licenses)
+	}
+	if b, _ := os.ReadFile(filepath.Join(e.root, filepath.FromSlash(copperGrove))); !bytes.Equal(b, e.accts.body) {
+		t.Fatal("the resumed book isn't whole")
+	}
+	e.noSecrets(t, res, err)
 }
 
 // signedDownloads routes the stub's Download through a real audible client
@@ -673,6 +791,15 @@ func TestImportOnePerAccount(t *testing.T) {
 		mu.Unlock()
 		return os.WriteFile(dest, e.accts.body, 0o600)
 	}
+	waiting := make(chan struct{})
+	var once sync.Once
+	progress := e.opts.onProgress
+	e.opts.onProgress = func(p jobs.Progress) {
+		progress(p)
+		if strings.Contains(p.Message, "other backup") {
+			once.Do(func() { close(waiting) })
+		}
+	}
 	h := NewImport(e.opts)
 	errs := make(chan error, 2)
 	for _, asin := range []string{"B0FAKE0002", "B0FAKE0003"} {
@@ -683,7 +810,11 @@ func TestImportOnePerAccount(t *testing.T) {
 		}()
 	}
 	<-started
-	time.Sleep(50 * time.Millisecond) // the second would have started by now
+	select {
+	case <-waiting: // the second waits while the first downloads
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second import never waited for the first")
+	}
 	close(release)
 	for range 2 {
 		if err := <-errs; err != nil {
@@ -780,5 +911,342 @@ func TestImportMarkerNeedsTheSameFile(t *testing.T) {
 				t.Fatalf("rescanned %v, downloads %d", e.srv.rescanned, e.accts.downloads)
 			}
 		})
+	}
+}
+
+// A resumed job whose library isn't writable parks not_writable and waits,
+// keeping its partial (CLAUDE.md: a resumed write job parks and waits); once
+// the mapping is back it runs on, unparked. A new job is refused at once
+// (TestImportCodes).
+func TestImportResumedParksUntilTheMappingIsBack(t *testing.T) {
+	e := newImportEnv(t)
+	part := e.keepPartial(t)
+	e.libs.status.Writable = false
+	looks := 0
+	e.opts.Wait = func(ctx context.Context, d time.Duration) error {
+		if d == mappingPoll {
+			looks++
+			kept(t, part) // waiting keeps what it holds
+			if looks == 3 {
+				e.libs.status.Writable = true
+			}
+		}
+		return ctx.Err()
+	}
+	rep := jobs.LocalReporter()
+	res, err := e.resumed(context.Background(), e.params(nil), rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parks := e.parks()
+	if looks != 3 || len(parks) != 3 || slices.ContainsFunc(parks, func(p string) bool { return p != StepLicense+":"+CodeNotWritable }) {
+		t.Fatalf("looks %d, parks %v", looks, parks)
+	}
+	if park := rep.Last().Extra["park"]; park != nil {
+		t.Fatalf("the job is still parked: %v", park)
+	}
+	if b, _ := os.ReadFile(filepath.Join(e.root, filepath.FromSlash(copperGrove))); !bytes.Equal(b, e.accts.body) || e.accts.downloads != 1 {
+		t.Fatalf("the resumed book isn't whole (downloads %d)", e.accts.downloads)
+	}
+	e.tmpEmpty(t)
+	e.noSecrets(t, res, err)
+}
+
+// The mapping is checked again before the copy: gone during the download, the
+// job parks with its decrypted copy and waits, then places the book once it
+// is back, without downloading it again.
+func TestImportParksAtThePlaceStep(t *testing.T) {
+	e := newImportEnv(t)
+	decrypt := e.opts.Decrypt
+	e.opts.Decrypt = func(ctx context.Context, ffmpeg, in, out string, lic audible.License) error {
+		e.libs.status.Writable = false // the share went read-only meanwhile
+		return decrypt(ctx, ffmpeg, in, out, lic)
+	}
+	e.opts.Wait = func(ctx context.Context, d time.Duration) error {
+		if d == mappingPoll {
+			e.libs.status.Writable = true
+		}
+		return ctx.Err()
+	}
+	rep := jobs.LocalReporter()
+	res, err := NewImport(e.opts).Run(context.Background(), jobs.Job{ID: 7, Kind: ImportKind, Params: e.params(nil), Attempt: 1}, rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parks := e.parks(); !slices.Equal(parks, []string{StepPlace + ":" + CodeNotWritable}) || e.accts.downloads != 1 {
+		t.Fatalf("parks %v, downloads %d", parks, e.accts.downloads)
+	}
+	if park := rep.Last().Extra["park"]; park != nil {
+		t.Fatalf("the job is still parked: %v", park)
+	}
+	if b, _ := os.ReadFile(filepath.Join(e.root, filepath.FromSlash(copperGrove))); !bytes.Equal(b, e.accts.body) {
+		t.Fatal("the library's file isn't the book")
+	}
+	e.tmpEmpty(t)
+	e.noSecrets(t, res, err)
+}
+
+// A job claimed before the library's mapping check has a result for its mount
+// (the first claims after a start, or a mount changed since) waits for the
+// check without parking, then runs.
+func TestImportWaitsForTheMappingCheck(t *testing.T) {
+	for name, unchecked := range map[string]string{"not checked yet": "", "checked at another mount": "/old/mount"} {
+		t.Run(name, func(t *testing.T) {
+			e := newImportEnv(t)
+			e.libs.status.MountPath = unchecked
+			e.opts.Wait = func(ctx context.Context, d time.Duration) error {
+				if d == mappingPoll {
+					e.libs.status.MountPath = e.root
+				}
+				return ctx.Err()
+			}
+			if _, err := e.run(context.Background(), e.params(nil)); err != nil {
+				t.Fatal(err)
+			}
+			if !e.said("Waiting for the library's mapping check") || len(e.parks()) != 0 {
+				t.Fatalf("parks %v", e.parks())
+			}
+		})
+	}
+}
+
+// A job that ends before its download leaves no partial an earlier run kept:
+// refused (the account gone, another library) or cancelled while it waits
+// for its mapping. Stopped there, or its claim lost, the partial stays for
+// the next run.
+func TestImportEndingEarlyCleansUp(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		setup  func(e *importEnv)
+		params func(*ImportParams)
+		end    string // how the job's context ends in the mapping wait
+		keep   bool
+	}{
+		{name: "the account gone", setup: func(e *importEnv) { e.accts.acctErr = audibleacct.ErrNotFound }},
+		{name: "another library", params: func(p *ImportParams) { p.LibraryID = 2 }},
+		{name: "cancelled waiting for the mapping", end: "cancel"},
+		{name: "stopped waiting for the mapping", end: "stop", keep: true},
+		{name: "lost waiting for the mapping", end: "lose", keep: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newImportEnv(t)
+			part := e.keepPartial(t)
+			if tc.setup != nil {
+				tc.setup(e)
+			}
+			ctx, end := context.Background(), func() {}
+			switch tc.end {
+			case "cancel":
+				ctx, end = jobs.CancelContext(ctx)
+			case "stop":
+				var stop context.CancelFunc
+				ctx, stop = context.WithCancel(ctx)
+				end = stop
+			case "lose":
+				ctx, end = jobs.LoseContext(ctx)
+			}
+			if tc.end != "" {
+				e.libs.status.MountPath = "" // it waits for the check
+				e.opts.Wait = func(ctx context.Context, _ time.Duration) error { end(); return ctx.Err() }
+			}
+			if _, err := e.resumed(ctx, e.params(tc.params), jobs.LocalReporter()); err == nil {
+				t.Fatal("the job succeeded")
+			}
+			if tc.keep {
+				kept(t, part)
+			} else {
+				e.tmpEmpty(t)
+			}
+			if e.accts.licenses != 0 {
+				t.Fatal("the job asked Audible for a license")
+			}
+		})
+	}
+}
+
+// A lost claim (the lease lapsed while the Bridge was down or cut off) keeps
+// the partial: the server hands the job out again, and that claim resumes it.
+// Abandon hears it the same way: a lost claim keeps it, a cancel removes it.
+func TestImportLostClaimKeepsThePartial(t *testing.T) {
+	e := newImportEnv(t)
+	started := make(chan struct{})
+	e.accts.download = blockingDownload(e, started)
+	ctx, lose := jobs.LoseContext(context.Background())
+	go func() { <-started; lose() }()
+	if _, err := e.run(ctx, e.params(nil)); err == nil {
+		t.Fatal("a lost import succeeded")
+	}
+	part := filepath.Join(e.tmp, "acct0001-B0FAKE0002.aaxc.part")
+	kept(t, part)
+	h := NewImport(e.opts)
+	job := jobs.Job{Kind: ImportKind, Params: e.params(nil)}
+	h.Abandon(jobs.AbandonContext(context.Background(), true), job)
+	kept(t, part)
+	h.Abandon(jobs.AbandonContext(context.Background(), false), job)
+	e.tmpEmpty(t)
+}
+
+// failRescans makes the env's next run install the book and then fail its
+// rescans, leaving the placement marker.
+func failRescans(t *testing.T, e *importEnv) {
+	t.Helper()
+	e.srv.rescanErr = []error{errors.New("busy"), errors.New("busy"), errors.New("busy")}
+	if _, err := e.run(context.Background(), e.params(nil)); err == nil {
+		t.Fatal("the rescan failing must fail the job")
+	}
+}
+
+// The placement marker is the request's: a job asking for another
+// destination places the title there (the earlier copy stays where it was),
+// and one whose destination is the earlier file finishes it.
+func TestImportMarkerFollowsTheRequest(t *testing.T) {
+	t.Run("another destination", func(t *testing.T) {
+		e := newImportEnv(t)
+		failRescans(t, e)
+		res, err := e.run(context.Background(), e.params(func(p *ImportParams) { p.DestPath = "Imports/Copper" }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := res.(*ImportResult); got.Path != "Imports/Copper" || e.accts.downloads != 2 {
+			t.Fatalf("result %s, downloads %d", mustJSON(t, got), e.accts.downloads)
+		}
+		if files := e.libraryFiles(); !slices.Equal(files, []string{"Imports/Copper/The Copper Grove.m4b", copperGrove}) {
+			t.Fatalf("library = %v", files)
+		}
+		e.tmpEmpty(t)
+	})
+	t.Run("the same file by another request", func(t *testing.T) {
+		e := newImportEnv(t)
+		failRescans(t, e)
+		res, err := e.run(context.Background(), e.params(func(p *ImportParams) { p.DestPath = path.Dir(copperGrove) }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := res.(*ImportResult); got.Path != path.Dir(copperGrove) || e.accts.downloads != 1 {
+			t.Fatalf("result %s, downloads %d", mustJSON(t, got), e.accts.downloads)
+		}
+		e.tmpEmpty(t)
+	})
+}
+
+// A marker's file read back with its time moved within markerSlack (a share
+// keeping whole seconds) is still the file, and one the Bridge can't read for
+// a moment keeps the marker for the retry after.
+func TestImportMarkerSurvivesTheShare(t *testing.T) {
+	t.Run("time rounded", func(t *testing.T) {
+		e := newImportEnv(t)
+		failRescans(t, e)
+		p := filepath.Join(e.root, filepath.FromSlash(copperGrove))
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		later := st.ModTime().Add(time.Second)
+		if err := os.Chtimes(p, later, later); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.downloads != 1 {
+			t.Fatalf("err %v, downloads %d", err, e.accts.downloads)
+		}
+	})
+	t.Run("unreadable for a moment", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("needs unix permissions, not root")
+		}
+		e := newImportEnv(t)
+		failRescans(t, e)
+		author := filepath.Join(e.root, "Mara Quill")
+		if err := os.Chmod(author, 0); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chmod(author, 0o755) }()
+		_, err := e.run(context.Background(), e.params(nil))
+		var f *Failure
+		if err == nil || errors.As(err, &f) {
+			t.Fatalf("err = %v, want a plain error (tried again)", err)
+		}
+		if _, err := os.Stat(filepath.Join(e.tmp, "acct0001-B0FAKE0002"+placedSuffix)); err != nil {
+			t.Fatalf("the marker went: %v", err)
+		}
+		if err := os.Chmod(author, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.downloads != 1 {
+			t.Fatalf("err %v, downloads %d", err, e.accts.downloads)
+		}
+		e.tmpEmpty(t)
+	})
+}
+
+// A destination the Bridge can't follow in the library (a file where a folder
+// goes, a link out of the mapping) is not_writable before Audible is asked
+// for anything.
+func TestImportRefusesAnUnreachableDestination(t *testing.T) {
+	for name, setup := range map[string]func(t *testing.T, root string){
+		"a file where a folder goes": func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, "Loose"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a link out of the mapping": func(t *testing.T, root string) {
+			if err := os.Symlink(t.TempDir(), filepath.Join(root, "Loose")); err != nil {
+				t.Skip(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newImportEnv(t)
+			setup(t, e.root)
+			_, err := e.run(context.Background(), e.params(func(p *ImportParams) { p.DestPath = "Loose/Book" }))
+			var f *Failure
+			if !errors.As(err, &f) || f.Code != CodeNotWritable {
+				t.Fatalf("err = %v, want not_writable", err)
+			}
+			if e.accts.licenses != 0 || e.accts.downloads != 0 {
+				t.Fatalf("licenses %d, downloads %d", e.accts.licenses, e.accts.downloads)
+			}
+			e.tmpEmpty(t)
+		})
+	}
+}
+
+// A title Audible offers only as a DRM-free MP3 fails plainly (no code: not a
+// refusal the admin can fix), saying why, and leaves nothing.
+func TestImportDRMFreeTitle(t *testing.T) {
+	e := newImportEnv(t)
+	e.accts.licErr = []error{fmt.Errorf("%w: B0FAKE0002", audible.ErrDRMFree)}
+	res, err := e.run(context.Background(), e.params(nil))
+	var f *Failure
+	if err == nil || errors.As(err, &f) || res != nil || !strings.Contains(err.Error(), "DRM-free MP3") {
+		t.Fatalf("res %#v, err %v", res, err)
+	}
+	if e.accts.downloads != 0 || len(e.libraryFiles()) != 0 {
+		t.Fatalf("downloads %d, library %v", e.accts.downloads, e.libraryFiles())
+	}
+	e.tmpEmpty(t)
+}
+
+// The destination follows the library's own spelling of the folders that
+// exist (the path the server indexes): on a case-insensitive disk an existing
+// "mara quill" takes the book; on a case-sensitive one "Mara Quill" is new.
+func TestImportFollowsTheLibrarysSpelling(t *testing.T) {
+	e := newImportEnv(t)
+	if err := os.MkdirAll(filepath.Join(e.root, "mara quill"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, statErr := os.Stat(filepath.Join(e.root, "MARA QUILL"))
+	want := copperGrove
+	if statErr == nil { // case-insensitive
+		want = "mara quill" + strings.TrimPrefix(copperGrove, "Mara Quill")
+	}
+	res, err := e.run(context.Background(), e.params(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.(*ImportResult); got.Files[0].Path != want || !slices.Equal(e.srv.rescanned, []string{want}) {
+		t.Fatalf("result %s, rescanned %v; want %s", mustJSON(t, got), e.srv.rescanned, want)
+	}
+	if _, err := os.Stat(filepath.Join(e.root, filepath.FromSlash(want))); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -42,9 +42,9 @@ func TestPlanMultiAuthorSiblingsBareTitle(t *testing.T) {
 		{Path: "Shirtaloon/He Who Fights WIth Monsters/FWM12 - He Who Fights With Monsters - Book 12", Title: "He Who Fights with Monsters 12: A LitRPG Adventure", Authors: []string{"Shirtaloon, Travis Deverell"}, Series: []link.SeriesRef{{Name: "He Who Fights WIth Monsters"}}},
 	}
 	recs := []source.Record{{
-		Key: "B0XXX", FileName: "He Who Fights with Monsters 13 - A LitRPG Adventure.m4b",
-		Title:  "He Who Fights with Monsters 13: A LitRPG Adventure",
-		Author: "Shirtaloon", Series: "He Who Fights with Monsters", Sequence: 13, HasSequence: true,
+		FileName: "He Who Fights with Monsters 13 - A LitRPG Adventure.m4b",
+		Title:    "He Who Fights with Monsters 13: A LitRPG Adventure",
+		Author:   "Shirtaloon", Series: "He Who Fights with Monsters", Sequence: 13, HasSequence: true,
 	}}
 	items, err := Plan(recs, PlanOptions{Mode: placement.ModeAuto, Books: books})
 	if err != nil {
@@ -83,5 +83,26 @@ func TestPlanTemplateMode(t *testing.T) {
 	}
 	if items[0].RelPath != "Brandon Sanderson/Warbreaker/Warbreaker.m4b" {
 		t.Fatalf("template placement = %q", items[0].RelPath)
+	}
+}
+
+// A title that opens with an article before its series name is cleaned of
+// both: never "The : Books 1-3" or "The 3" (a bare number keeps its series
+// words, as CleanTitle gives any title that is only its series and number).
+func TestPlanArticleBeforeSeries(t *testing.T) {
+	for _, c := range []struct{ title, series, want string }{
+		{"The Orchard Cycle: Books 1-3", "Orchard Cycle", "Mara Quill/Orchard Cycle/Books 1-3/x.m4b"},
+		{"The Mayor of Noobtown 3", "Mayor of Noobtown", "Mara Quill/Mayor of Noobtown/Mayor of Noobtown 3/x.m4b"},
+		{"Orchard Cycle: Books 1-3", "Orchard Cycle", "Mara Quill/Orchard Cycle/Books 1-3/x.m4b"},
+		{"The Orchard Cycles Reborn", "Orchard Cycle", "Mara Quill/Orchard Cycle/The Orchard Cycles Reborn/x.m4b"},
+	} {
+		items, err := Plan([]source.Record{{FileName: "x.m4b", Title: c.title, Author: "Mara Quill", Series: c.series}},
+			PlanOptions{Mode: placement.ModeAuto})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if items[0].RelPath != c.want {
+			t.Errorf("%q: got %q, want %q", c.title, items[0].RelPath, c.want)
+		}
 	}
 }

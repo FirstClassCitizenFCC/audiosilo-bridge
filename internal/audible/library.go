@@ -66,7 +66,7 @@ const (
 // "contributed nothing new" stop never fires - one blank-ASIN item was enough to
 // spin the pager to its page cap. The API always sends an ASIN; this is the
 // defensive path, and collapsing two same-titled ASIN-less items loses nothing
-// (Record.Key is the ASIN, so downstream can't tell them apart anyway).
+// (the record's identity is the ASIN, so downstream can't tell them apart anyway).
 func (it libItem) dedupeKey() string {
 	if it.ASIN != "" {
 		return it.ASIN
@@ -137,7 +137,7 @@ func (c *Client) Title(ctx context.Context, asin string) (source.Record, error) 
 func (it libItem) toRecord(now time.Time) source.Record {
 	reason, preorder := it.unavailableReason(now)
 	rec := source.Record{
-		Title: it.Title, TitleShort: it.Title, ASIN: it.ASIN, Key: it.ASIN,
+		Title: it.Title, TitleShort: it.Title, ASIN: it.ASIN,
 		FileName:          safeFileName(it.Title) + ".m4b",
 		RuntimeSec:        float64(it.RuntimeLengthMin) * 60,
 		UnavailableReason: reason,
@@ -328,7 +328,7 @@ func firstNonEmptyStr(vals ...string) string {
 func safeFileName(s string) string {
 	s = strings.TrimSpace(s)
 	r := strings.NewReplacer("/", "-", "\\", "-", ":", " -", "\x00", "")
-	out := strings.TrimRight(r.Replace(s), " .")
+	out := strings.Trim(r.Replace(s), " .") // no hidden (dot) name, which the server never indexes
 	if out == "" {
 		out = "audiobook"
 	}

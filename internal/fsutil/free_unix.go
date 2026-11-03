@@ -1,9 +1,8 @@
-//go:build unix
+//go:build linux || darwin || freebsd || dragonfly || aix
 
 package fsutil
 
 import (
-	"errors"
 	"math"
 
 	"golang.org/x/sys/unix"
@@ -16,15 +15,14 @@ func FreeBytes(path string) (int64, error) {
 	if err := unix.Statfs(path, &st); err != nil {
 		return 0, err
 	}
-	avail, size := uint64(st.Bavail), uint64(st.Bsize) //nolint:gosec,unconvert // G115: the field types differ by OS; both are non-negative
-	if size != 0 && avail > math.MaxInt64/size {
+	// Signed on the BSDs, where a filesystem inside its root reserve answers a
+	// negative count: no room for an unprivileged writer.
+	avail, size := int64(st.Bavail), int64(st.Bsize) //nolint:gosec,unconvert // G115: the field types differ by OS
+	switch {
+	case avail <= 0 || size <= 0:
+		return 0, nil
+	case avail > math.MaxInt64/size:
 		return math.MaxInt64, nil
 	}
-	return int64(avail * size), nil //nolint:gosec // G115: bounded by the check above
-}
-
-// IsNoSpace reports whether err is a filesystem that ran out of space (ENOSPC)
-// or quota (EDQUOT).
-func IsNoSpace(err error) bool {
-	return errors.Is(err, unix.ENOSPC) || errors.Is(err, unix.EDQUOT)
+	return avail * size, nil
 }

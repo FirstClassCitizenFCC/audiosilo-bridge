@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/placement"
@@ -13,13 +15,10 @@ import (
 	"github.com/kodestar/audiosilo-server/pkg/match"
 )
 
-// PlannedItem is one import candidate with its computed destination. Whether
-// the library already holds it is the caller's question (BookMatcher).
+// PlannedItem is one import candidate's computed destination. Whether the
+// library already holds it is the caller's question (BookMatcher).
 type PlannedItem struct {
-	Record  source.Record
 	RelPath string // suggested destination (folder + filename), library-relative
-	Kind    string // placement kind (series existing/new / standalone)
-	Note    string // human explanation of the placement
 }
 
 // PlanOptions configures Plan.
@@ -50,7 +49,7 @@ func Plan(recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
 		// Name by the clean book title - strip the series prefix and "(Book N)" /
 		// "(Unabridged)" fluff so a series book lands as "SHORTCODE## - The Ugly
 		// Truth", not "... - Diary of a Wimpy Kid: The Ugly Truth (Book 5)".
-		clean := match.CleanTitle(rec.Title, rec.Series)
+		clean := match.CleanTitle(rec.Title, seriesAsTitled(rec.Title, rec.Series))
 		sug, err := placement.SuggestWith(opts.Mode, opts.Template, placement.Input{
 			Author:       rec.Author,
 			Title:        clean,
@@ -68,14 +67,32 @@ func Plan(recs []source.Record, opts PlanOptions) ([]PlannedItem, error) {
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, PlannedItem{
-			Record:  rec,
-			RelPath: path.Join(sug.RelPath, sug.Filename),
-			Kind:    sug.Kind.String(),
-			Note:    sug.Note,
-		})
+		items = append(items, PlannedItem{RelPath: path.Join(sug.RelPath, sug.Filename)})
 	}
 	return items, nil
+}
+
+// seriesAsTitled is the series name as the title opens with it, with the
+// article before it ("The Orchard Cycle: Books 1-3" in series "Orchard Cycle"
+// is "The Orchard Cycle"), so CleanTitle removes the article and the series
+// together; given the bare name it leaves the article and the separator
+// behind ("The : Books 1-3"). Any other title gets series as it is.
+func seriesAsTitled(title, series string) string {
+	t, s := strings.TrimSpace(title), strings.TrimSpace(series)
+	if s == "" {
+		return series
+	}
+	for _, art := range []string{"the ", "a ", "an "} {
+		n := len(art) + len(s)
+		if len(t) < n || !strings.EqualFold(t[:len(art)], art) || !strings.EqualFold(t[len(art):n], s) {
+			continue
+		}
+		if r, _ := utf8.DecodeRuneInString(t[n:]); n < len(t) && (unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			continue // the series name is the start of a longer word
+		}
+		return t[:n]
+	}
+	return series
 }
 
 // BookMatcher matches records against a fixed server-book list via the shared

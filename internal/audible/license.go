@@ -15,6 +15,7 @@ type licenseResp struct {
 	ContentLicense struct {
 		LicenseResponse string `json:"license_response"` // base64 encrypted voucher
 		StatusCode      string `json:"status_code"`      // "Granted" / "Denied"
+		DrmType         string `json:"drm_type"`         // "Adrm" (AAXC), "Mpeg" (a DRM-free MP3)
 		// DenialReasons explain a Denied license (mixed-case keys are Audible's).
 		DenialReasons []struct {
 			Message         string `json:"message"`
@@ -71,6 +72,9 @@ var (
 	ErrNoRights = errors.New("the account has no download rights for the title")
 	// ErrDenied: Audible denied it for another reason.
 	ErrDenied = errors.New("audible refused a download license")
+	// ErrDRMFree: Audible granted the title only as a DRM-free MP3 (drm_type
+	// Mpeg, no voucher), which the import doesn't back up yet. Not a denial.
+	ErrDRMFree = errors.New("audible offers the title only as a DRM-free MP3")
 )
 
 // denialKind sorts a denied license into ErrNotReleased, ErrNoRights or
@@ -122,11 +126,11 @@ func (c *Client) License(ctx context.Context, asin string) (License, error) {
 	if err := c.doSigned(ctx, http.MethodPost, "/1.0/content/"+url.PathEscape(asin)+"/licenserequest", body, &lr); err != nil {
 		return License{}, err
 	}
+	if strings.EqualFold(lr.ContentLicense.DrmType, "Mpeg") && !strings.EqualFold(lr.ContentLicense.StatusCode, "Denied") {
+		return License{}, fmt.Errorf("%w: %s", ErrDRMFree, asin)
+	}
 	if lr.ContentLicense.LicenseResponse == "" {
-		kind := ErrDenied
-		if lr.ContentLicense.StatusCode != "" || len(lr.ContentLicense.DenialReasons) > 0 {
-			kind = denialKind(lr)
-		}
+		kind := denialKind(lr)
 		if detail := denialDetail(lr); detail != "" {
 			return License{}, fmt.Errorf("%w: %s (%s)", kind, asin, detail)
 		}

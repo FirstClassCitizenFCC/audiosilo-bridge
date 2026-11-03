@@ -404,3 +404,17 @@ func TestRegisterParse(t *testing.T) {
 		t.Fatalf("registered key not parseable: %v", err)
 	}
 }
+
+// A license granted as a DRM-free MP3 (drm_type Mpeg, no voucher) is no
+// denial: ErrDRMFree, not ErrDenied.
+func TestClientLicenseDRMFree(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"content_license":{"status_code":"Granted","drm_type":"Mpeg",
+			"content_metadata":{"content_url":{"offline_url":"https://cdn.example/x.mp3?sig=1"}}}}`))
+	}))
+	defer ts.Close()
+	_, err := testClient(t, ts.URL).License(context.Background(), "B00")
+	if !errors.Is(err, ErrDRMFree) || errors.Is(err, ErrDenied) || strings.Contains(err.Error(), "sig=1") {
+		t.Fatalf("err = %v, want ErrDRMFree", err)
+	}
+}

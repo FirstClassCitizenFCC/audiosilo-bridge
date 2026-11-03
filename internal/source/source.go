@@ -27,7 +27,6 @@ type Record struct {
 	// that know it (Audible) populate it; it lets the stats sync tell an at-the-end
 	// position from a mid-book one.
 	RuntimeSec float64
-	Key        string // dedup/resume key: ASIN if present, else the basename
 	// UnavailableReason, when non-empty, says why this record can't be acquired
 	// (e.g. an Audible periodical or a title without download rights). File-based
 	// sources leave it empty; audible.import fails such a title with the reason

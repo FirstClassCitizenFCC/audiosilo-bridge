@@ -93,7 +93,6 @@ func (s *stubService) Library(_ context.Context, creds audible.Credentials) ([]s
 	return []source.Record{{ASIN: "B0FAKE0001", Title: "One"}}, nil
 }
 
-// stubServer is the server's account routes.
 func (s *stubService) Title(_ context.Context, creds audible.Credentials, asin string) (source.Record, error) {
 	if s.libraryErr != nil {
 		return source.Record{}, s.libraryErr
@@ -112,6 +111,7 @@ func (s *stubService) Download(context.Context, audible.Credentials, string, str
 	return nil
 }
 
+// stubServer is the server's account routes.
 type stubServer struct {
 	mu      sync.Mutex
 	put     map[string]link.AudibleAccountInput

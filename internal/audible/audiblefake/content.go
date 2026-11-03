@@ -118,6 +118,12 @@ func (f *Fake) license(w http.ResponseWriter, r *http.Request, _ []byte) {
 	f.mu.Lock()
 	d := f.devices[r.Header.Get("x-adp-token")]
 	f.mu.Unlock()
+	if d == nil {
+		// Deregistered since signed() checked it (a sign-in again racing this
+		// call): answered as signed() answers an unknown token.
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"message": "unknown device token"})
+		return
+	}
 	t, ok := f.title(asin)
 	deny := func(validation, rejection, message string) {
 		f.record(LicenseCall{ASIN: asin, Status: "Denied"})

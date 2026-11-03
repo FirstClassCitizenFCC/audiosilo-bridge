@@ -21,29 +21,26 @@ func pack() source.Record {
 	return r
 }
 
-// The book a placed file lands in takes the title's ASIN only when it is the
-// title: a new book (a pack placed as a pack included), or a book the library
-// had that the poll's matcher would give the title. A file that joins another
-// book (a dest_path into its folder) leaves that book's ASIN alone.
-func TestImportEnrichesOnlyTheTitlesBook(t *testing.T) {
+// A backup is a book of its own: a destination inside a book the library
+// already has (a folder the server lists as a book, its own or another, or a
+// folder already holding audio) fails exists before the license, and nothing
+// is written.
+func TestImportRefusesJoiningABook(t *testing.T) {
 	copper := link.LibraryBook{Path: "Mara Quill/Orchard Cycle/OC02 - The Copper Grove", Title: "The Copper Grove",
 		Authors: []string{"Mara Quill"}, Series: []link.SeriesRef{{Name: "Orchard Cycle", Position: "2"}}}
+	grove := rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2)
 	for _, tc := range []struct {
-		name   string
-		title  source.Record
-		books  []link.LibraryBook
-		dest   string
-		enrich bool
+		name  string
+		title source.Record
+		books []link.LibraryBook
+		dest  string
+		audio string // a file already in the library (a book not indexed yet)
 	}{
-		{name: "a new book", title: rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2), enrich: true},
-		{name: "a pack placed as a pack", title: pack(), enrich: true},
 		{name: "a pack joins a single volume", title: pack(), dest: "Mara Quill/Orchard Cycle/OC01 - The Glass Orchard"},
-		{name: "a title joins another book", title: rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2),
-			dest: "Mara Quill/Orchard Cycle/OC03 - The Iron Thicket"},
-		{name: "a title joins a disc folder of another book", title: rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2),
-			dest: "Mara Quill/Orchard Cycle/OC03 - The Iron Thicket/Disc 2"},
-		{name: "a title joins its own book", title: rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2),
-			books: append(goldenBooks(), copper), dest: copper.Path, enrich: true},
+		{name: "a title joins another book", title: grove, dest: "Mara Quill/Orchard Cycle/OC03 - The Iron Thicket"},
+		{name: "a title joins its own book", title: grove, books: append(goldenBooks(), copper), dest: copper.Path},
+		{name: "Auto lands in a book's folder", title: grove, books: append(goldenBooks(), copper)},
+		{name: "a folder holding audio", title: grove, dest: "Loose/Grove", audio: "Loose/Grove/part1.mp3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newImportEnv(t)
@@ -51,6 +48,54 @@ func TestImportEnrichesOnlyTheTitlesBook(t *testing.T) {
 			if tc.books != nil {
 				e.srv.books = tc.books
 			}
+			if tc.audio != "" {
+				e.writeLibrary(tc.audio, "an owned book")
+			}
+			before := e.libraryFiles()
+			_, err := e.run(context.Background(), e.params(func(p *ImportParams) { p.ASIN = tc.title.ASIN; p.DestPath = tc.dest }))
+			var f *Failure
+			if !errors.As(err, &f) || f.Code != CodeExists {
+				t.Fatalf("err = %v, want exists", err)
+			}
+			if e.accts.licenses != 0 || e.accts.downloads != 0 || !slices.Equal(e.libraryFiles(), before) || len(e.srv.enriched) != 0 {
+				t.Fatalf("licenses %d, downloads %d, files %v, enriched %v: nothing may happen",
+					e.accts.licenses, e.accts.downloads, e.libraryFiles(), e.srv.enriched)
+			}
+		})
+	}
+}
+
+// The book a placed file lands in takes the title's ASIN only when it is the
+// title: a new book (a pack placed as a pack included). A file a dest_path puts
+// in a disc folder of another book (the one join vacant can't see: the folder
+// is new) leaves that book's ASIN alone. The book the rescan answers decides: a
+// book in a folder above the new one (a loose file in the series folder) is
+// another book, and the new one is the title's.
+func TestImportEnrichesOnlyTheTitlesBook(t *testing.T) {
+	extras := link.LibraryBook{Path: "Mara Quill/Orchard Cycle", Title: "Orchard Cycle Extras", Authors: []string{"Mara Quill"}}
+	const thicket = "Mara Quill/Orchard Cycle/OC03 - The Iron Thicket"
+	for _, tc := range []struct {
+		name   string
+		title  source.Record
+		books  []link.LibraryBook
+		dest   string
+		bookOf func(p string) string // the rescan's answer (nil: the file's folder)
+		enrich bool
+	}{
+		{name: "a new book", title: rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2), enrich: true},
+		{name: "a pack placed as a pack", title: pack(), enrich: true},
+		{name: "a title joins a disc folder of another book", title: rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2),
+			dest: thicket + "/Disc 2", bookOf: func(string) string { return thicket }},
+		{name: "a new book below a loose file's folder", title: rec("B0FAKE0002", "The Copper Grove", "Mara Quill", "Orchard Cycle", 2),
+			books: append(goldenBooks(), extras), enrich: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newImportEnv(t)
+			e.accts.title = tc.title
+			if tc.books != nil {
+				e.srv.books = tc.books
+			}
+			e.srv.bookOf = tc.bookOf
 			res, err := e.run(context.Background(), e.params(func(p *ImportParams) { p.ASIN = tc.title.ASIN; p.DestPath = tc.dest }))
 			if err != nil {
 				t.Fatal(err)
@@ -81,9 +126,11 @@ func TestImportRetryKeepsNoEnrich(t *testing.T) {
 	e := newImportEnv(t)
 	e.accts.title = pack()
 	e.srv.rescanErr = []error{errors.New("busy"), errors.New("busy"), errors.New("busy")}
+	const thicket = "Mara Quill/Orchard Cycle/OC03 - The Iron Thicket"
+	e.srv.bookOf = func(string) string { return thicket }
 	params := e.params(func(p *ImportParams) {
 		p.ASIN = "B0FAKE0030"
-		p.DestPath = "Mara Quill/Orchard Cycle/OC01 - The Glass Orchard"
+		p.DestPath = thicket + "/Disc 2"
 	})
 	if _, err := e.run(context.Background(), params); err == nil {
 		t.Fatal("the rescan failing must fail the job")

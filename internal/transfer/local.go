@@ -83,33 +83,69 @@ type Local struct {
 // NewLocal returns a Local transfer.
 func NewLocal() *Local { return &Local{} }
 
-// EnsureRoot verifies the root exists and is a directory, failing fast before
-// any copy: this catches an unmounted network share instead of creating a
-// local stub tree.
-func (*Local) EnsureRoot(_ context.Context, root string) error {
-	info, err := os.Stat(root)
-	if err != nil {
-		return fmt.Errorf("library root unavailable: %w", err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("library root %q is not a directory", root)
-	}
-	return nil
-}
-
 // CleanRel checks a library-relative destination file path and returns it
 // clean: through mapping.SafeJoin's rules (no absolute path, no "..", no NUL),
-// not the library root itself, and no hidden (dot) file name, which the
-// server's scan would skip.
+// not the library root itself, and no hidden (dot) segment, folder or file:
+// the server's scan never indexes a path with one.
 func CleanRel(rel string) (string, error) {
 	if _, err := mapping.SafeJoin("/", rel); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrInvalidPath, err)
 	}
 	clean := strings.TrimPrefix(path.Clean("/"+rel), "/")
-	if clean == "" || strings.HasPrefix(path.Base(clean), ".") {
+	if clean == "" {
 		return "", ErrInvalidPath
 	}
+	for _, seg := range strings.Split(clean, "/") {
+		if strings.HasPrefix(seg, ".") {
+			return "", fmt.Errorf("%w: %q is a hidden name", ErrInvalidPath, seg)
+		}
+	}
 	return clean, nil
+}
+
+// OnDisk is rel (clean) spelled as the library spells what exists of it: a
+// folder (or the file) already there under another spelling, which a case- or
+// normalization-insensitive filesystem (APFS, SMB, NTFS) finds under rel's,
+// takes the name its folder lists, since the server indexes a path only as it
+// is spelled on disk. What doesn't exist yet keeps rel's spelling.
+func OnDisk(root *os.Root, rel string) (string, error) {
+	segs := strings.Split(rel, "/")
+	dir := "."
+	for i, seg := range segs {
+		st, err := root.Lstat(path.Join(dir, seg))
+		if errors.Is(err, fs.ErrNotExist) {
+			return path.Join(append([]string{dir}, segs[i:]...)...), nil
+		}
+		if err != nil {
+			return "", err
+		}
+		name, err := listedName(root, dir, seg, st)
+		if err != nil {
+			return "", err
+		}
+		dir = path.Join(dir, name)
+	}
+	return dir, nil
+}
+
+// listedName is the name dir lists for the entry found as seg (st): seg when
+// it is listed as is, else the listed entry that is the same file.
+func listedName(root *os.Root, dir, seg string, st fs.FileInfo) (string, error) {
+	entries, err := fs.ReadDir(root.FS(), dir)
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		if e.Name() == seg {
+			return seg, nil
+		}
+	}
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil && os.SameFile(info, st) {
+			return e.Name(), nil
+		}
+	}
+	return seg, nil
 }
 
 // Place copies SrcPath to RelPath under Root and never replaces anything:
@@ -129,9 +165,13 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 	if err != nil {
 		return PlaceResult{}, err
 	}
-	if err := l.EnsureRoot(ctx, req.Root); err != nil {
-		return PlaceResult{}, err
+	// A root that is missing or not a folder (an unmounted share) fails here,
+	// before any copy, rather than getting a stub tree.
+	root, err := os.OpenRoot(req.Root)
+	if err != nil {
+		return PlaceResult{}, fmt.Errorf("library root unavailable: %w", err)
 	}
+	defer func() { _ = root.Close() }()
 	src, err := os.Open(req.SrcPath)
 	if err != nil {
 		return PlaceResult{}, err
@@ -146,12 +186,6 @@ func (l *Local) Place(ctx context.Context, req PlaceRequest) (PlaceResult, error
 	}
 	size := info.Size()
 	res := PlaceResult{RelPath: rel, Size: size}
-
-	root, err := os.OpenRoot(req.Root)
-	if err != nil {
-		return PlaceResult{}, fmt.Errorf("library root unavailable: %w", err)
-	}
-	defer func() { _ = root.Close() }()
 
 	if same, err := l.sameAt(ctx, root, rel, src, size); err != nil {
 		return PlaceResult{}, err
@@ -263,7 +297,10 @@ func (l *Local) checkFree(rootDir, rel string, size int64) error {
 	}
 	n, err := free(NearestDir(rootDir, rel))
 	if err != nil {
-		return fmt.Errorf("reading the library's free space: %w", err)
+		// The free space can't be read there (a share that doesn't answer
+		// statfs): the copy goes ahead, and running out during it is still
+		// ErrDiskFull.
+		return nil
 	}
 	if need := int64(float64(size) * DefaultHeadroom); n < need {
 		return fmt.Errorf("%w: %d bytes free, %d needed", ErrDiskFull, n, need)

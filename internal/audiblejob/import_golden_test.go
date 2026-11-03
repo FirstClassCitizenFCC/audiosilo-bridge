@@ -42,7 +42,7 @@ func goldenBooks() []link.LibraryBook {
 }
 
 func rec(asin, title, author, series string, seq float64) source.Record {
-	r := source.Record{ASIN: asin, Key: asin, Title: title, TitleShort: title, Author: author, Authors: []string{author},
+	r := source.Record{ASIN: asin, Title: title, TitleShort: title, Author: author, Authors: []string{author},
 		FileName: title + ".m4b", Year: "2024"}
 	if series != "" {
 		r.Series, r.Sequence, r.HasSequence = series, seq, seq > 0
@@ -75,5 +75,35 @@ func goldenCases() []goldenCase {
 		{name: "dest absolute", p: with(func(q *ImportParams) { q.DestPath = "/etc/x.m4b" }), rec: rec("B0FAKE0019", "Salt and Ember", "Callum Dree", "", 0), code: CodeNotWritable},
 		{name: "dest hidden", p: with(func(q *ImportParams) { q.DestPath = "A/.x.m4b" }), rec: rec("B0FAKE0019", "Salt and Ember", "Callum Dree", "", 0), code: CodeNotWritable},
 		{name: "template bad", p: with(func(q *ImportParams) { q.Template = "{Author/{" }), rec: rec("B0FAKE0019", "Salt and Ember", "Callum Dree", "", 0), code: CodeNotWritable},
+		// The console's dest_path wins: the account's template isn't consulted.
+		{name: "dest over a template that can't place", p: with(func(q *ImportParams) { q.Template = "{Author/{"; q.DestPath = "Imports/Salt" }), rec: rec("B0FAKE0019", "Salt and Ember", "Callum Dree", "", 0), want: "Imports/Salt/Salt and Ember.m4b"},
+		// A pack with no sequence, its title opening "The <series>": named by
+		// what is left, never "The  - Books 1-3".
+		{name: "pack, article before the series", p: p, rec: pack(), want: "Mara Quill/Orchard Cycle/Books 1-3/The Orchard Cycle: Books 1-3.m4b"},
+		// No author: Auto leaves out the empty folder (never a leading "/").
+		{name: "no author", p: p, rec: noAuthor(""), want: "Lone Title/Lone Title.m4b"},
+		{name: "no author, series", p: p, rec: noAuthor("Saga"), want: "Saga/S01 - Lone Title/Lone Title.m4b"},
+		// A hidden name is never indexed by the server: generated names lose
+		// their leading dots, and a dest_path naming one is refused.
+		{name: "author with a leading dot", p: p, rec: rec("B0FAKE0019", "Salt and Ember", ".hack Team", "", 0), want: "hack Team/Salt and Ember/Salt and Ember.m4b"},
+		{name: "template hidden folder", p: with(func(q *ImportParams) { q.Template = ".audible/{Author}/{Title}" }), rec: rec("B0FAKE0019", "Salt and Ember", "Callum Dree", "", 0), want: "audible/Callum Dree/Salt and Ember/Salt and Ember.m4b"},
+		{name: "dest hidden folder", p: with(func(q *ImportParams) { q.DestPath = "Imports/.audible/Salt" }), rec: rec("B0FAKE0019", "Salt and Ember", "Callum Dree", "", 0), code: CodeNotWritable},
+		// The backup is an MP4: a name may end .m4b, .m4a or .mp4, never
+		// another audio type; any other dot is the folder's.
+		{name: "dest m4a", p: with(func(q *ImportParams) { q.DestPath = "Imports/Salt.m4a" }), rec: rec("B0FAKE0019", "Salt and Ember", "Callum Dree", "", 0), want: "Imports/Salt.m4a"},
+		{name: "dest mp3", p: with(func(q *ImportParams) { q.DestPath = "Imports/Salt.mp3" }), rec: rec("B0FAKE0019", "Salt and Ember", "Callum Dree", "", 0), code: CodeNotWritable},
+		{name: "dest AAC", p: with(func(q *ImportParams) { q.DestPath = "Imports/Salt.AAC" }), rec: rec("B0FAKE0019", "Salt and Ember", "Callum Dree", "", 0), code: CodeNotWritable},
+		{name: "template mp3", p: with(func(q *ImportParams) { q.Template = "Audible/{Author}/{Title}.mp3" }), rec: rec("B0FAKE0019", "Salt and Ember", "Callum Dree", "", 0), code: CodeNotWritable},
+		{name: "dest folder with a dot", p: with(func(q *ImportParams) { q.DestPath = "Imports/Vol. 2" }), rec: rec("B0FAKE0019", "Salt and Ember", "Callum Dree", "", 0), want: "Imports/Vol. 2/Salt and Ember.m4b"},
 	}
+}
+
+// noAuthor is a title Audible lists with no author, in series (no series
+// when "").
+func noAuthor(series string) source.Record {
+	r := source.Record{ASIN: "B0FAKE0021", Title: "Lone Title", TitleShort: "Lone Title", FileName: "Lone Title.m4b", Year: "2024"}
+	if series != "" {
+		r.Series, r.Sequence, r.HasSequence = series, 1, true
+	}
+	return r
 }
