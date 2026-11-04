@@ -58,8 +58,8 @@ scripts/build-web.sh            # builds web/, syncs it into internal/web/dist, 
 docker build --target slim .    # slim | cuda | agent | full (the default target)
 
 # The Audible fake exists only behind its tag (never in a release build or image):
-go vet -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob ./internal/app ./cmd/audiblefake
-go test -race -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob
+go vet -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob ./internal/audiblesync ./internal/app ./cmd/audiblefake
+go test -race -tags audiblefake ./internal/audible/... ./internal/audibleacct ./internal/audiblejob ./internal/audiblesync
 go test -race -tags audiblefake -run Audible ./internal/app
 ```
 
@@ -115,7 +115,7 @@ internal/
               0003 generate_books, contrib_mode, server_id, deleted_stage_spend,
               0004 workers, 0005 books.goal, 0006 accounts, 0007 podcast_shows,
               0008 podcast_artwork_state, 0009 audible_accounts,
-              0010 audible_accounts.device_profile)
+              0010 audible_accounts.device_profile, 0011 audible_push + sync health + refusal_kind)
   auth/       the page's single password + hashed sessions + login limiter
   -- Phase 1a --
   generate/   sidecars.generate: server job -> engine book -> .audiosilo/ + rescan;
@@ -153,6 +153,7 @@ internal/
               audible.import (Phase 4b, download lane, one per account): license ->
               resumable download -> ffmpeg decrypt -> placement -> no-replace install
               -> rescan -> ASIN enrich
+  audiblesync/ Phase 4c: audible.sync (lastpositions -> furthest-only events) + the push loop (feed -> SetLastPosition)
   importjob/  BookMatcher (link.LibraryBook) + Plan: match and place against a library
   transfer/   Local.Place: SafeJoin + os.Root, free-space check, no-replace install
   placement/ source/ progress/  (the manager's; source trimmed to Record in 4b)
@@ -163,7 +164,7 @@ Dockerfile    slim | cuda | agent | full; compose.example.yaml: server, bridge, 
 
 **Dependency direction:** `app -> {api, jobs, link, mapping, verify, generate,
 agentbox, workers, accounts, setup, correct, store, secrets, config, auth, logring,
-web, netguard, podcast, podcastjob, audibleacct, audiblejob}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
+web, netguard, podcast, podcastjob, audibleacct, audiblejob, audiblesync}` plus the engine it wires; `accounts -> {agentproto, ghauth, secrets, store}`; `correct ->
 {contrib, jobs, metaops}`; `setup -> link`;
 `api` calls the injected Backend and the injected `auth.Manager` (login, sessions,
 the password), with types from jobs/link/mapping/store/logring; `verify -> {jobs,
@@ -174,7 +175,7 @@ through its own Engine/Server interfaces; `podcastjob -> {jobs, link, mapping, n
 imports `audible`); `importjob -> {link, placement, source,
 audiosilo-server/pkg/match}`; `audibleacct -> {audible, link, secrets, source, store}`;
 `audiblejob -> {audible, audibleacct, fsutil, importjob, jobs, link, mapping, placement,
-source, store, transfer}` (app wires both); `transfer -> {fsutil, mapping, progress}`;
+source, store, transfer}` (app wires both); `audiblesync -> {audible, audibleacct, jobs, link, store}`; `transfer -> {fsutil, mapping, progress}`;
 `jobs -> {link, store}`; `mapping -> {fsutil, link}`;
 `link`, `agentproto` and `workerproto` are leaves; `workers -> {asr, fsutil,
 scheduler, state, store, transcript, workerproto}`; `worker -> {asr, fsutil, workerproto}`
@@ -430,6 +431,11 @@ deletes it; a resumed job, or one at the place step, whose library isn't
 writable parks `not_writable` and waits for it. The fake
 serves a plain .m4b as the AAXC (ffmpeg passes an unencrypted MP4 through with the
 key set) with Range, a cut and an expiry. No migration.
+
+**Phase 4c (Audible position sync):** `audible.sync` and the push loop
+(`audiblesync`, migration 0011): Audible's places to the server furthest only, the
+server's still places back to Audible; a refused account neither syncs nor pushes,
+a sync error never refuses one; the page's sync switch went (the console owns it).
 
 See BRIDGE-PLAN.md's Status table for what is next.
 

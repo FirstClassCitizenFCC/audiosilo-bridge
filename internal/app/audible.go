@@ -13,6 +13,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/audible"
 	"github.com/kodestar/audiosilo-bridge/internal/audibleacct"
 	"github.com/kodestar/audiosilo-bridge/internal/audiblejob"
+	"github.com/kodestar/audiosilo-bridge/internal/audiblesync"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
 	"github.com/kodestar/audiosilo-bridge/internal/setup"
@@ -50,6 +51,24 @@ func (b *Bridge) newAudible(vault secrets.Store, db *store.DB, log *slog.Logger,
 			return nil
 		}})
 	return m, h, imp
+}
+
+// newAudibleSync builds the position sync (Phase 4c): the audible.sync job
+// and the push loop, over the accounts (b.audible, built first) and the
+// store. The push loop waits for the link like the runner (b.server: paired
+// and a heartbeat through).
+func (b *Bridge) newAudibleSync(db *store.DB, log *slog.Logger, serverID func() string) (*audiblesync.Handler, *audiblesync.Pusher) {
+	o := audiblesync.Options{Accounts: b.audible, DB: db, ServerID: serverID, Log: log, OnChange: b.Kick,
+		Server: func() audiblesync.Server {
+			if b.server() == nil {
+				return nil
+			}
+			if cl := b.conn.Client(); cl != nil {
+				return cl
+			}
+			return nil
+		}}
+	return audiblesync.New(o), audiblesync.NewPusher(o)
 }
 
 // ffmpeg is the ffmpeg the engine resolved at its start (toolfetch), else the
@@ -224,8 +243,14 @@ func (b *Bridge) audibleSetup(ctx context.Context) setup.Audible {
 		switch {
 		case a.RefusedAt != "":
 			out.Refused++
+			continue // it neither syncs nor pushes: the refusal says why
 		case audibleacct.OldProfile(a):
 			out.OldProfile++
+		}
+		if a.SyncError != "" {
+			if out.SyncFailing++; out.SyncError == "" {
+				out.SyncError = a.SyncError
+			}
 		}
 	}
 	return out

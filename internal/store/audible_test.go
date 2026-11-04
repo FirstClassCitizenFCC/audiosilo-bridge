@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -22,16 +23,16 @@ func TestAudibleAccounts(t *testing.T) {
 	if err := db.SignInAudibleAccount(ctx, a, at); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AudiblePolled(ctx, "abcd1234", 30, 12, at.Add(time.Hour), "kept"); err != nil {
+	if err := db.AudiblePolled(ctx, "abcd1234", 30, 12, at.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.RefuseAudibleAccount(ctx, "abcd1234", "Audible refused", at.Add(2*time.Hour)); err != nil {
+	if err := db.RefuseAudibleAccount(ctx, "abcd1234", RefusalSignIn, "Audible refused", at.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := db.GetAudibleAccount(ctx, "abcd1234")
 	if err != nil || got.RefusedAt != Timestamp(at.Add(2*time.Hour)) || got.LastError != "Audible refused" ||
 		got.LastTitles != 30 || got.LastMatched != 12 || got.LastPollAt != Timestamp(at.Add(time.Hour)) || !got.Sync ||
-		got.DeviceProfile != "" {
+		got.DeviceProfile != "" || got.RefusalKind != RefusalSignIn {
 		t.Fatalf("account = %+v, %v", got, err)
 	}
 	if by, err := db.AudibleAccountByCustomer(ctx, "h1", "us"); err != nil || by.ID != "abcd1234" {
@@ -48,7 +49,7 @@ func TestAudibleAccounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ = db.GetAudibleAccount(ctx, "abcd1234")
-	if got.RefusedAt != "" || got.LastError != "" || got.CreatedAt != Timestamp(at) || got.LastTitles != 30 ||
+	if got.RefusedAt != "" || got.LastError != "" || got.RefusalKind != "" || got.CreatedAt != Timestamp(at) || got.LastTitles != 30 ||
 		got.Label != "Chris" || got.LastOKAt != Timestamp(at.Add(3*time.Hour)) || got.DeviceProfile != "4.60/26.2/46000856" {
 		t.Fatalf("after a sign-in again = %+v", got)
 	}
@@ -106,9 +107,10 @@ func TestAudibleAccountsUniquePerCustomer(t *testing.T) {
 	}
 }
 
-// A poll ends a refusal unless its reason is keep (a device refusal a working
-// library list doesn't end), and a poll's error never replaces a refusal's
-// reason; a sign-in ends either.
+// A poll ends a sign-in refusal but never a device one (a device Audible
+// denies licenses still lists its library), and a poll's error never replaces
+// a refusal's reason; a sign-in ends either. The kind is a column (bridge#46),
+// never read from last_error's text.
 func TestAudiblePolledKeepsADeviceRefusal(t *testing.T) {
 	ctx := context.Background()
 	db := open(t)
@@ -126,14 +128,14 @@ func TestAudiblePolledKeepsADeviceRefusal(t *testing.T) {
 		return got
 	}
 
-	// A refusal for another reason ends with a poll.
-	if err := db.RefuseAudibleAccount(ctx, a.ID, "sign-in refused", at); err != nil {
+	// A sign-in refusal ends with a poll.
+	if err := db.RefuseAudibleAccount(ctx, a.ID, RefusalSignIn, "sign-in refused", at); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AudiblePolled(ctx, a.ID, 3, 1, at, "throttled"); err != nil {
+	if err := db.AudiblePolled(ctx, a.ID, 3, 1, at); err != nil {
 		t.Fatal(err)
 	}
-	if got := get(); got.RefusedAt != "" || got.LastError != "" {
+	if got := get(); got.RefusedAt != "" || got.LastError != "" || got.RefusalKind != "" {
 		t.Fatalf("a sign-in refusal outlived a poll: %+v", got)
 	}
 	// An error with no refusal is recorded.
@@ -144,42 +146,88 @@ func TestAudiblePolledKeepsADeviceRefusal(t *testing.T) {
 		t.Fatalf("error = %+v", got)
 	}
 
-	// The kept reason stays through an error and a poll.
-	if err := db.RefuseAudibleAccount(ctx, a.ID, "throttled", at.Add(time.Hour)); err != nil {
+	// A device refusal stays through an error and a poll, whatever its text.
+	if err := db.RefuseAudibleAccount(ctx, a.ID, RefusalDevice, "any words", at.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.AudibleAccountError(ctx, a.ID, "server down"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AudiblePolled(ctx, a.ID, 4, 2, at.Add(2*time.Hour), "throttled"); err != nil {
+	if err := db.AudiblePolled(ctx, a.ID, 4, 2, at.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if got := get(); got.RefusedAt != Timestamp(at.Add(time.Hour)) || got.LastError != "throttled" || got.LastTitles != 4 {
+	if got := get(); got.RefusedAt != Timestamp(at.Add(time.Hour)) || got.LastError != "any words" ||
+		got.RefusalKind != RefusalDevice || got.LastTitles != 4 {
 		t.Fatalf("the device refusal didn't stay: %+v", got)
 	}
-	// Another reason's acceptance leaves it; its own ends it.
-	if ended, err := db.AudibleAccepted(ctx, a.ID, "sign-in refused"); err != nil || ended {
-		t.Fatalf("accepted another reason = %v, %v", ended, err)
+	// Another kind's acceptance leaves it; its own ends it.
+	if ended, err := db.AudibleAccepted(ctx, a.ID, RefusalSignIn); err != nil || ended {
+		t.Fatalf("accepted another kind = %v, %v", ended, err)
 	}
-	if got := get(); got.LastError != "throttled" {
+	if got := get(); got.RefusalKind != RefusalDevice {
 		t.Fatalf("the device refusal ended: %+v", got)
 	}
-	if err := db.RefuseAudibleAccount(ctx, a.ID, "sign-in refused", at); err != nil {
+	if err := db.RefuseAudibleAccount(ctx, a.ID, RefusalSignIn, "sign-in refused", at); err != nil {
 		t.Fatal(err)
 	}
-	if ended, err := db.AudibleAccepted(ctx, a.ID, "sign-in refused"); err != nil || !ended {
+	if ended, err := db.AudibleAccepted(ctx, a.ID, RefusalSignIn); err != nil || !ended {
 		t.Fatalf("accepted = %v, %v", ended, err)
 	}
-	if got := get(); got.RefusedAt != "" || got.LastError != "" {
+	if got := get(); got.RefusedAt != "" || got.LastError != "" || got.RefusalKind != "" {
 		t.Fatalf("accepted kept the refusal: %+v", got)
 	}
-	if err := db.RefuseAudibleAccount(ctx, a.ID, "throttled", at); err != nil {
+	if err := db.RefuseAudibleAccount(ctx, a.ID, RefusalDevice, "throttled", at); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SignInAudibleAccount(ctx, a, at.Add(3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if got := get(); got.RefusedAt != "" || got.LastError != "" {
+	if got := get(); got.RefusedAt != "" || got.LastError != "" || got.RefusalKind != "" {
 		t.Fatalf("a sign-in kept the refusal: %+v", got)
+	}
+}
+
+// Migration 0011 gives the refusals 4b stored their kind: a refused row whose
+// last_error is the throttled text is a device refusal, any other refused row
+// a sign-in one, and a row not refused none.
+func TestMigrationRefusalKind(t *testing.T) {
+	ctx := context.Background()
+	sqldb, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqldb.SetMaxOpenConns(1)
+	db := &DB{sql: sqldb}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.migrateTo(ctx, "0010_audible_profile.sql"); err != nil {
+		t.Fatal(err)
+	}
+	const throttled = "Audible refused this device its downloads (customer throttled): sign in again"
+	for _, r := range []struct{ id, refused, why string }{
+		{"throttled1", "2026-11-03T10:00:00.000000000Z", throttled},
+		{"signedin01", "2026-11-03T10:00:00.000000000Z", "Audible refused the sign-in: sign in again"},
+		{"working001", "", "the server could not be reached"},
+		{"oldtext001", "", throttled}, // the text alone, never refused: no kind
+	} {
+		if _, err := sqldb.ExecContext(ctx, `INSERT INTO audible_accounts (id, label, marketplace, created_at, refused_at, last_error)
+			VALUES (?, 'x', 'us', '2026-11-01T00:00:00.000000000Z', ?, ?)`, r.id, r.refused, r.why); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{"throttled1": RefusalDevice, "signedin01": RefusalSignIn, "working001": "", "oldtext001": ""} {
+		got, err := db.GetAudibleAccount(ctx, id)
+		if err != nil || got.RefusalKind != want {
+			t.Errorf("%s: kind %q, want %q (%v)", id, got.RefusalKind, want, err)
+		}
+	}
+	// The device refusal now outlives a poll by its kind.
+	if err := db.AudiblePolled(ctx, "throttled1", 1, 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.GetAudibleAccount(ctx, "throttled1"); got.RefusedAt == "" || got.LastError != throttled {
+		t.Fatalf("a migrated device refusal ended with a poll: %+v", got)
 	}
 }

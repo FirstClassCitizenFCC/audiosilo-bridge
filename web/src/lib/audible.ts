@@ -55,14 +55,15 @@ export function mappingProblem(m: Pick<AudibleMapping, 'user_id' | 'library_id'>
 }
 
 // defaultMapping is a new account's mapping: the only person and the only
-// library when there is one of each, the manual policy, places synced.
+// library when there is one of each, the manual policy. sync is sent as false
+// and the server ignores it: the console turns an account's sync on (Phase 4c).
 export function defaultMapping(data: Pick<AudibleAccounts, 'users' | 'libraries'>): AudibleMapping {
   return {
     label: '',
     user_id: data.users.length === 1 ? data.users[0].id : 0,
     library_id: data.libraries.length === 1 ? data.libraries[0].id : 0,
     policy: 'manual',
-    sync: true,
+    sync: false,
   };
 }
 

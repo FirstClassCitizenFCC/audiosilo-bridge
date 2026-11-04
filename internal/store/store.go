@@ -92,7 +92,11 @@ func (db *DB) Close() error { return db.sql.Close() }
 
 // migrate applies embedded migrations in filename order, recording each in
 // schema_migrations so they run exactly once.
-func (db *DB) migrate(ctx context.Context) error {
+func (db *DB) migrate(ctx context.Context) error { return db.migrateTo(ctx, "") }
+
+// migrateTo is migrate stopping after the migration named last ("" for all):
+// a test builds an older schema with it, adds rows, then migrates the rest.
+func (db *DB) migrateTo(ctx context.Context, last string) error {
 	if _, err := db.sql.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
 		return fmt.Errorf("create migrations table: %w", err)
@@ -139,6 +143,9 @@ func (db *DB) migrate(ctx context.Context) error {
 		}
 		if cerr := tx.Commit(); cerr != nil {
 			return fmt.Errorf("commit migration %s: %w", name, cerr)
+		}
+		if name == last {
+			break
 		}
 	}
 	return nil

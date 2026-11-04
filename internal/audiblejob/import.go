@@ -143,7 +143,7 @@ func ParseImportParams(raw json.RawMessage) (ImportParams, error) {
 	switch {
 	case !audibleacct.IDPattern.MatchString(p.Account):
 		return ImportParams{}, errors.New("bad params: account must be an Audible account id")
-	case !asinPattern.MatchString(p.ASIN):
+	case !audibleacct.ASINPattern.MatchString(p.ASIN):
 		return ImportParams{}, errors.New("bad params: asin must be an ASIN")
 	case p.LibraryID <= 0:
 		return ImportParams{}, errors.New("bad params: library_id is required")

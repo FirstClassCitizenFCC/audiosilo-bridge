@@ -73,10 +73,10 @@ func (c *Client) LastPositions(ctx context.Context, asins []string, onProgress f
 // lastPositionsChunk fetches one batch of ASINs and merges the "Exists" positions
 // into out. Audible caps the ASIN-list length per request but doesn't document the
 // limit and 400s the whole batch when exceeded (a list-length constraint, not a
-// per-ASIN one), so on a 400 with more than one ASIN it splits the batch and
-// retries each half - converging on whatever the real cap is without a magic
-// number. A single ASIN can't overflow a list-length cap, so the recursion always
-// terminates.
+// per-ASIN one), so on a 400 (or a 414, the URL itself too long) with more
+// than one ASIN it splits the batch and retries each half - converging on
+// whatever the real cap is without a magic number. A single ASIN can't overflow
+// a list-length cap, so the recursion always terminates.
 func (c *Client) lastPositionsChunk(ctx context.Context, asins []string, out map[string]Position) error {
 	if len(asins) == 0 {
 		return nil
@@ -93,8 +93,11 @@ func (c *Client) lastPositionsChunk(ctx context.Context, asins []string, out map
 		} `json:"asin_last_position_heard_annots"`
 	}
 	if err := c.doSigned(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		// A 414 (the URL is too long for Amazon's front end) is the same
+		// overflow as the 400, met before the list-length check: split too.
 		var he *httpError
-		if len(asins) > 1 && errors.As(err, &he) && he.StatusCode == http.StatusBadRequest {
+		if len(asins) > 1 && errors.As(err, &he) &&
+			(he.StatusCode == http.StatusBadRequest || he.StatusCode == http.StatusRequestURITooLong) {
 			mid := len(asins) / 2
 			if err := c.lastPositionsChunk(ctx, asins[:mid], out); err != nil {
 				return err

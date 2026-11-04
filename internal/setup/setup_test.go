@@ -214,7 +214,7 @@ func TestAudibleItem(t *testing.T) {
 	}
 	in.Audible = Audible{Accounts: 3, Refused: 2}
 	s := Checklist(in)
-	if a := item(t, s, ItemAudible); a.Done || a.Detail != "2 accounts need signing in again" {
+	if a := item(t, s, ItemAudible); a.Done || a.Detail != "2 accounts need signing in again; places don't sync until then" {
 		t.Fatalf("refused = %+v", a)
 	}
 	// Optional: a refused Audible account never makes the setup incomplete.
@@ -222,7 +222,7 @@ func TestAudibleItem(t *testing.T) {
 		t.Fatal("a refused Audible account made the setup incomplete")
 	}
 	in.Audible = Audible{Accounts: 1, Refused: 1}
-	if a := item(t, Checklist(in), ItemAudible); a.Detail != "1 account needs signing in again" {
+	if a := item(t, Checklist(in), ItemAudible); a.Detail != "1 account needs signing in again; places don't sync until then" {
 		t.Fatalf("one refused = %+v", a)
 	}
 	// A device on an older profile lists its library but gets no licenses:
@@ -236,7 +236,18 @@ func TestAudibleItem(t *testing.T) {
 		t.Fatal("an old-profile Audible account made the setup incomplete")
 	}
 	in.Audible = Audible{Accounts: 3, Refused: 1, OldProfile: 1}
-	if a := item(t, Checklist(in), ItemAudible); a.Detail != "2 accounts need signing in again to keep backups working" {
+	if a := item(t, Checklist(in), ItemAudible); a.Detail != "2 accounts need signing in again to keep backups working; places don't sync until then" {
 		t.Fatalf("refused and old profile = %+v", a)
+	}
+	// Phase 4c: a failing position sync shows in the detail, and never makes
+	// the item not done.
+	in.Audible = Audible{Accounts: 2, SyncFailing: 1, SyncError: "writing the place to Audible: Audible asked the Bridge to wait"}
+	if a := item(t, Checklist(in), ItemAudible); !a.Done ||
+		a.Detail != "2 accounts signed in; places not syncing for 1 account: writing the place to Audible: Audible asked the Bridge to wait" {
+		t.Fatalf("sync failing = %+v", a)
+	}
+	in.Audible = Audible{Accounts: 2, SyncFailing: 2, SyncError: strings.Repeat("x", 400)}
+	if a := item(t, Checklist(in), ItemAudible); len(a.Detail) > maxDetail {
+		t.Fatalf("a long error isn't cut: %d", len(a.Detail))
 	}
 }

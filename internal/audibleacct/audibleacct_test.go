@@ -122,6 +122,28 @@ func (s *stubService) Download(context.Context, audible.Credentials, string, str
 	return nil
 }
 
+func (s *stubService) LastPositions(_ context.Context, creds audible.Credentials, asins []string) (map[string]audible.Position, error) {
+	if s.libraryErr != nil {
+		return nil, s.libraryErr
+	}
+	out := map[string]audible.Position{}
+	for _, a := range asins {
+		out[a] = audible.Position{PositionMs: 1000}
+	}
+	return out, nil
+}
+
+func (s *stubService) ContentACR(_ context.Context, _ audible.Credentials, asin string) (string, error) {
+	if s.libraryErr != nil {
+		return "", s.libraryErr
+	}
+	return "ACR-" + asin, nil
+}
+
+func (s *stubService) SetLastPosition(context.Context, audible.Credentials, string, string, int64) error {
+	return s.libraryErr
+}
+
 // stubServer is the server's account routes.
 type stubServer struct {
 	mu      sync.Mutex
@@ -366,7 +388,7 @@ func TestSignInAgainReplacesTheDevice(t *testing.T) {
 	e := newEnv(t)
 	a := e.signIn(t)
 	first, _ := e.m.credentials(a.ID)
-	if err := e.db.RefuseAudibleAccount(context.Background(), a.ID, RefusedText, time.Now()); err != nil {
+	if err := e.db.RefuseAudibleAccount(context.Background(), a.ID, store.RefusalSignIn, RefusedText, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	b := e.signIn(t)
@@ -608,6 +630,45 @@ func TestRemoveRunsToItsEnd(t *testing.T) {
 	}
 }
 
+// The position sync's calls go through the sign-in, but a 401/403 on one
+// never refuses the account (decision 6: sync errors back off, the poll and
+// the imports own the refusal).
+func TestSyncCallsNeverRefuse(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a := e.signIn(t)
+	ctx := context.Background()
+	got, err := e.m.Positions(ctx, a.ID, []string{"B0FAKE0001"})
+	if err != nil || got["B0FAKE0001"].PositionMs != 1000 {
+		t.Fatalf("positions = %v, %v", got, err)
+	}
+	if acr, err := e.m.ContentACR(ctx, a.ID, "B0FAKE0001"); err != nil || acr != "ACR-B0FAKE0001" {
+		t.Fatalf("acr = %q, %v", acr, err)
+	}
+	if err := e.m.SetPosition(ctx, a.ID, "B0FAKE0001", "ACR", 5000); err != nil {
+		t.Fatal(err)
+	}
+	changed := 0
+	e.m.o.OnChange = func() { changed++ }
+	e.svc.libraryErr = fmt.Errorf("%w (HTTP 403)", ErrRefused)
+	if _, err := e.m.Positions(ctx, a.ID, []string{"B0FAKE0001"}); err == nil {
+		t.Fatal("a refused read answered")
+	}
+	if _, err := e.m.ContentACR(ctx, a.ID, "B0FAKE0001"); err == nil {
+		t.Fatal("a refused acr answered")
+	}
+	if err := e.m.SetPosition(ctx, a.ID, "B0FAKE0001", "ACR", 5000); err == nil {
+		t.Fatal("a refused write answered")
+	}
+	if acct, _ := e.m.Account(ctx, a.ID); acct.RefusedAt != "" || acct.RefusalKind != "" || changed != 0 {
+		t.Fatalf("a sync call refused the account: %+v (changed %d)", acct, changed)
+	}
+	if _, err := e.m.Positions(ctx, "nope0000", nil); err == nil {
+		t.Fatal("an unknown account read places")
+	}
+	e.noSecrets(t)
+}
+
 func TestLibraryMarksARefusal(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -623,7 +684,7 @@ func TestLibraryMarksARefusal(t *testing.T) {
 		t.Fatalf("refused = %v", err)
 	}
 	got, _ := e.m.Account(context.Background(), a.ID)
-	if got.RefusedAt == "" || got.LastError != RefusedText || changed != 1 {
+	if got.RefusedAt == "" || got.LastError != RefusedText || got.RefusalKind != store.RefusalSignIn || changed != 1 {
 		t.Fatalf("after a refusal = %+v (changed %d)", got, changed)
 	}
 	// Another failure is no refusal.

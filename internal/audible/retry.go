@@ -35,8 +35,10 @@ func retryable(status int) bool {
 var errBackoffTooLong = errors.New("audible asked to wait longer than the Bridge will")
 
 // sendWithBackoff sends the request newReq builds (a fresh one per attempt, so a
-// signature carries its own date) and returns the first answer that isn't a
-// 429/503, or the last one. A 429/503 body is drained and closed before the wait.
+// signature carries its own date) under the profile's user agent (Go's default
+// one names no app the device registered as), and returns the first answer
+// that isn't a 429/503, or the last one. A 429/503 body is drained and closed
+// before the wait.
 func sendWithBackoff(ctx context.Context, hc *http.Client, sleep func(context.Context, time.Duration) error,
 	newReq func() (*http.Request, error)) (*http.Response, error) {
 	for attempt := 1; ; attempt++ {
@@ -44,6 +46,7 @@ func sendWithBackoff(ctx context.Context, hc *http.Client, sleep func(context.Co
 		if err != nil {
 			return nil, withoutQuery(err) // a URL that doesn't parse is named in the error
 		}
+		req.Header.Set("User-Agent", userAgent)
 		resp, err := hc.Do(req)
 		if err != nil {
 			return nil, withoutQuery(err)
@@ -58,7 +61,8 @@ func sendWithBackoff(ctx context.Context, hc *http.Client, sleep func(context.Co
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
 		if wait > maxBackoff {
-			return nil, &httpError{StatusCode: resp.StatusCode, Method: req.Method, Path: req.URL.Path, Body: errBackoffTooLong.Error()}
+			return nil, &httpError{StatusCode: resp.StatusCode, Method: req.Method, Path: req.URL.Path, Body: errBackoffTooLong.Error(),
+				RetryAfter: wait}
 		}
 		if err := sleep(ctx, wait); err != nil {
 			return nil, err
@@ -92,7 +96,11 @@ func withoutQuery(err error) error {
 var errURLInCause = errors.New("the request failed (its error quoted a URL, left out)")
 
 // retryAfter reads a Retry-After value: delay seconds or an HTTP date. A date in
-// the past is no wait; anything unreadable is no answer.
+// the past is no wait; anything unreadable is no answer. A wait past
+// maxRetryAfter reads as maxRetryAfter (a call fails past maxBackoff anyway,
+// and a caller that backs off for longer, the position sync, waits a day at
+// most); clamping first keeps a huge value from overflowing into a short (or
+// negative) wait.
 func retryAfter(v string, now time.Time) (time.Duration, bool) {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -102,15 +110,16 @@ func retryAfter(v string, now time.Time) (time.Duration, bool) {
 		if n < 0 {
 			return 0, false
 		}
-		// Past maxBackoff the call fails anyway; clamping first keeps a huge
-		// value from overflowing into a short (or negative) wait.
-		return time.Duration(min(n, int(maxBackoff/time.Second)+1)) * time.Second, true
+		return time.Duration(min(n, int(maxRetryAfter/time.Second))) * time.Second, true
 	}
 	if t, err := http.ParseTime(v); err == nil {
-		return max(t.Sub(now), 0), true
+		return min(max(t.Sub(now), 0), maxRetryAfter), true
 	}
 	return 0, false
 }
+
+// maxRetryAfter is the longest Retry-After read.
+const maxRetryAfter = 24 * time.Hour
 
 // HTTPStatus is the Audible or Amazon status code behind err, or 0 when err
 // isn't an HTTP answer (a network failure, a cancelled context).
@@ -120,6 +129,17 @@ func HTTPStatus(err error) int {
 		return he.StatusCode
 	}
 	return 0
+}
+
+// RetryWait reports whether err is Audible asking the caller to slow down (a
+// 429 or 503 the backoff gave up on) and how long it asked to wait: its
+// Retry-After, 0 when it sent none.
+func RetryWait(err error) (time.Duration, bool) {
+	var he *httpError
+	if !errors.As(err, &he) || !retryable(he.StatusCode) {
+		return 0, false
+	}
+	return he.RetryAfter, true
 }
 
 // IsRefused reports whether err is Audible refusing the device's credentials

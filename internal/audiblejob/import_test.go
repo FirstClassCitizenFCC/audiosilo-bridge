@@ -598,14 +598,14 @@ func TestImportCodes(t *testing.T) {
 // Allowed: an account with only a poll's error still imports.
 func TestImportOfARefusedAccountFailsFast(t *testing.T) {
 	for _, c := range []struct {
-		name, why, msg string
+		name, kind, why, msg string
 	}{
-		{"throttled", audibleacct.ThrottledText, ThrottledText},
-		{"sign-in refused", audibleacct.RefusedText, refusedSignIn().Message},
+		{"throttled", store.RefusalDevice, audibleacct.ThrottledText, ThrottledText},
+		{"sign-in refused", store.RefusalSignIn, audibleacct.RefusedText, refusedSignIn().Message},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			e := newImportEnv(t)
-			e.accts.acct.RefusedAt, e.accts.acct.LastError = "2026-11-03T10:00:00Z", c.why
+			e.accts.acct.RefusedAt, e.accts.acct.LastError, e.accts.acct.RefusalKind = "2026-11-03T10:00:00Z", c.why, c.kind
 			_, err := e.run(context.Background(), e.params(nil))
 			var f *Failure
 			if !errors.As(err, &f) || f.Code != CodeRefused || f.Message != c.msg {
@@ -621,7 +621,7 @@ func TestImportOfARefusedAccountFailsFast(t *testing.T) {
 	// (while it waited for the library's mapping) imports.
 	e := newImportEnv(t)
 	signedIn := e.accts.acct
-	e.accts.acct.RefusedAt, e.accts.acct.LastError = "2026-11-03T10:00:00Z", audibleacct.ThrottledText
+	e.accts.acct.RefusedAt, e.accts.acct.LastError, e.accts.acct.RefusalKind = "2026-11-03T10:00:00Z", audibleacct.ThrottledText, store.RefusalDevice
 	e.accts.acctThen = []store.AudibleAccount{signedIn}
 	if _, err := e.run(context.Background(), e.params(nil)); err != nil || e.accts.licenses != 1 {
 		t.Fatalf("an account signed in again meanwhile: %v (licenses %d)", err, e.accts.licenses)

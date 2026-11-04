@@ -50,6 +50,9 @@ var Policies = []string{"all", "series", "manual"}
 // IDPattern is an account's id: the Bridge's own, opaque to the server.
 var IDPattern = regexp.MustCompile(`^[a-z0-9]{8,32}$`)
 
+// ASINPattern is an ASIN as the server takes one.
+var ASINPattern = regexp.MustCompile(`^[A-Z0-9]{10}$`)
+
 // Errors.
 var (
 	// ErrInvalid: a request the page can correct (an unknown marketplace or
@@ -77,15 +80,17 @@ const RefusedText = "Audible refused the sign-in (the device was removed from th
 
 // ThrottledText is an account's last_error after Audible denied its device a
 // license (audible.ErrThrottled): the account is refused like a sign-in
-// Audible refused (refused_at), and only a new sign-in ends it, since its
-// library still lists (a poll keeps it, store.AudiblePolled). It is stored
-// state as well as copy: Throttled and the poll match it exactly, so a reworded
-// one would turn rows refused with the old text into sign-in refusals.
+// Audible refused, as a device refusal (store.RefusalDevice), and only a new
+// sign-in ends it, since its library still lists (a poll keeps it,
+// store.AudiblePolled). The kind is its own column (bridge#46): this is copy
+// only (migration 0011 read 4b's rows by it).
 const ThrottledText = "Audible refused this device its downloads (customer throttled): sign in again"
 
 // Throttled reports whether a is refused for its device's licenses
-// (ThrottledText) rather than its sign-in.
-func Throttled(a store.AudibleAccount) bool { return a.RefusedAt != "" && a.LastError == ThrottledText }
+// (store.RefusalDevice) rather than its sign-in.
+func Throttled(a store.AudibleAccount) bool {
+	return a.RefusedAt != "" && a.RefusalKind == store.RefusalDevice
+}
 
 // OldProfile reports whether a's device registered with a profile other than
 // the one this build registers with (audible.ProfileVersion), or before the
@@ -110,6 +115,14 @@ type Service interface {
 	Title(ctx context.Context, creds audible.Credentials, asin string) (source.Record, error)
 	License(ctx context.Context, creds audible.Credentials, asin string) (audible.License, error)
 	Download(ctx context.Context, creds audible.Credentials, url, dest string, opts audible.DownloadOptions) error
+	// LastPositions, ContentACR and SetLastPosition are the position sync's
+	// (Phase 4c): the places Audible heard, a title's content reference (a
+	// license request asking only for it) and a place written back. Their
+	// 401/403 is answered as it came, never as ErrRefused: a sync error never
+	// refuses the account.
+	LastPositions(ctx context.Context, creds audible.Credentials, asins []string) (map[string]audible.Position, error)
+	ContentACR(ctx context.Context, creds audible.Credentials, asin string) (string, error)
+	SetLastPosition(ctx context.Context, creds audible.Credentials, asin, acr string, positionMs int64) error
 }
 
 // Audible is the real Service, its calls made with opts (endpoints, an HTTP
@@ -169,6 +182,32 @@ func (c client) Download(ctx context.Context, creds audible.Credentials, url, de
 	return creds.Redact(cl.Download(ctx, url, dest, opts))
 }
 
+func (c client) LastPositions(ctx context.Context, creds audible.Credentials, asins []string) (map[string]audible.Position, error) {
+	cl, err := audible.NewClient(creds, c.opts...)
+	if err != nil {
+		return nil, err
+	}
+	out, err := cl.LastPositions(ctx, asins, nil)
+	return out, creds.Redact(err)
+}
+
+func (c client) ContentACR(ctx context.Context, creds audible.Credentials, asin string) (string, error) {
+	cl, err := audible.NewClient(creds, c.opts...)
+	if err != nil {
+		return "", err
+	}
+	acr, err := cl.ContentACR(ctx, asin)
+	return acr, creds.Redact(err)
+}
+
+func (c client) SetLastPosition(ctx context.Context, creds audible.Credentials, asin, acr string, positionMs int64) error {
+	cl, err := audible.NewClient(creds, c.opts...)
+	if err != nil {
+		return err
+	}
+	return creds.Redact(cl.SetLastPosition(ctx, asin, acr, positionMs))
+}
+
 // refused wraps a 401/403 on a signed API call as ErrRefused.
 func refused(err error) error {
 	if audible.IsRefused(err) {
@@ -184,9 +223,9 @@ type Store interface {
 	AudibleAccountByCustomer(ctx context.Context, hash, marketplace string) (store.AudibleAccount, error)
 	SignInAudibleAccount(ctx context.Context, a store.AudibleAccount, at time.Time) error
 	MapAudibleAccount(ctx context.Context, a store.AudibleAccount) error
-	AudiblePolled(ctx context.Context, id string, titles, matched int, at time.Time, keep string) error
-	RefuseAudibleAccount(ctx context.Context, id, why string, at time.Time) error
-	AudibleAccepted(ctx context.Context, id, why string) (bool, error)
+	AudiblePolled(ctx context.Context, id string, titles, matched int, at time.Time) error
+	RefuseAudibleAccount(ctx context.Context, id, kind, why string, at time.Time) error
+	AudibleAccepted(ctx context.Context, id, kind string) (bool, error)
 	AudibleAccountError(ctx context.Context, id, why string) error
 	DeleteAudibleAccount(ctx context.Context, id string) error
 }
@@ -655,6 +694,39 @@ func (m *Manager) Download(ctx context.Context, id, url, dest string, opts audib
 	return m.o.Service.Download(ctx, creds, url, dest, opts)
 }
 
+// Positions reads the places Audible heard for asins with account id's
+// sign-in (Phase 4c). A refusal is answered as it came and never recorded: the
+// position sync's errors don't refuse the account (its caller skips a refused
+// one).
+func (m *Manager) Positions(ctx context.Context, id string, asins []string) (map[string]audible.Position, error) {
+	creds, err := m.open(id)
+	if err != nil {
+		return nil, err
+	}
+	return m.o.Service.LastPositions(ctx, creds, asins)
+}
+
+// ContentACR asks Audible for a title's content reference (what a place
+// written back needs) with account id's sign-in. Never a refusal, as
+// Positions.
+func (m *Manager) ContentACR(ctx context.Context, id, asin string) (string, error) {
+	creds, err := m.open(id)
+	if err != nil {
+		return "", err
+	}
+	return m.o.Service.ContentACR(ctx, creds, asin)
+}
+
+// SetPosition writes a place (milliseconds) back to Audible with account id's
+// sign-in. Never a refusal, as Positions.
+func (m *Manager) SetPosition(ctx context.Context, id, asin, acr string, positionMs int64) error {
+	creds, err := m.open(id)
+	if err != nil {
+		return err
+	}
+	return m.o.Service.SetLastPosition(ctx, creds, asin, acr, positionMs)
+}
+
 // open opens account id's sealed sign-in, saying what is wrong in words.
 func (m *Manager) open(id string) (audible.Credentials, error) {
 	creds, err := m.credentials(id)
@@ -670,10 +742,11 @@ func (m *Manager) open(id string) (audible.Credentials, error) {
 // signed runs one signed call with account id's sign-in. A refusal (ErrRefused
 // from the Service, or a license denied to the device: audible.ErrThrottled)
 // is tried once more with a newer sign-in when one replaced the device
-// meanwhile, else it marks the account refused (RefusedText or ThrottledText),
-// runs OnChange and answers ErrRefused, or the throttled denial as it came.
-// A call Audible answers ends a sign-in refusal recorded before (a transient
-// 401/403), never a device's (ThrottledText: only a sign-in again ends it).
+// meanwhile, else it marks the account refused (a sign-in refusal with
+// RefusedText, or a device one with ThrottledText), runs OnChange and answers
+// ErrRefused, or the throttled denial as it came. A call Audible answers ends
+// a sign-in refusal recorded before (a transient 401/403), never a device's
+// (only a sign-in again ends it).
 func (m *Manager) signed(ctx context.Context, id string, call func(audible.Credentials) error) error {
 	creds, err := m.open(id)
 	if err != nil {
@@ -695,9 +768,9 @@ func (m *Manager) signed(ctx context.Context, id string, call func(audible.Crede
 		return err
 	}
 	throttled := errors.Is(err, audible.ErrThrottled)
-	why, msg := RefusedText, "audible: Audible refused the account's sign-in"
+	kind, why, msg := store.RefusalSignIn, RefusedText, "audible: Audible refused the account's sign-in"
 	if throttled {
-		why, msg = ThrottledText, "audible: Audible refused the account's device a license: it must sign in again"
+		kind, why, msg = store.RefusalDevice, ThrottledText, "audible: Audible refused the account's device a license: it must sign in again"
 	}
 	// Under finishMu (held by a sign-in from its lookup until its row is
 	// stored), and only while the refused device is still the account's: a
@@ -707,7 +780,7 @@ func (m *Manager) signed(ctx context.Context, id string, call func(audible.Crede
 	cur, cerr := m.credentials(id)
 	stale := cerr == nil && cur.DeviceSerial != creds.DeviceSerial
 	if !stale {
-		if rerr := m.o.DB.RefuseAudibleAccount(context.WithoutCancel(ctx), id, why, m.o.Now()); rerr != nil {
+		if rerr := m.o.DB.RefuseAudibleAccount(context.WithoutCancel(ctx), id, kind, why, m.o.Now()); rerr != nil {
 			m.o.Log.Warn("audible: recording a refusal failed", "account", id, "err", rerr)
 		}
 	}
@@ -722,10 +795,10 @@ func (m *Manager) signed(ctx context.Context, id string, call func(audible.Crede
 	return ErrRefused
 }
 
-// accepted ends account id's sign-in refusal (RefusedText) after Audible
+// accepted ends account id's sign-in refusal (store.RefusalSignIn) after Audible
 // answered a signed call, running OnChange when it ended one.
 func (m *Manager) accepted(ctx context.Context, id string) {
-	ended, err := m.o.DB.AudibleAccepted(context.WithoutCancel(ctx), id, RefusedText)
+	ended, err := m.o.DB.AudibleAccepted(context.WithoutCancel(ctx), id, store.RefusalSignIn)
 	if err != nil {
 		m.o.Log.Warn("audible: recording an accepted sign-in failed", "account", id, "err", err)
 		return
@@ -744,7 +817,7 @@ func refusal(err error) bool {
 
 // Polled records a complete poll of account id.
 func (m *Manager) Polled(ctx context.Context, id string, titles, matched int) error {
-	return m.o.DB.AudiblePolled(ctx, id, titles, matched, m.o.Now(), ThrottledText)
+	return m.o.DB.AudiblePolled(ctx, id, titles, matched, m.o.Now())
 }
 
 // Failed records why account id's poll failed (a refusal is recorded by

@@ -98,11 +98,14 @@ func currentProfile(serial string, data map[string]string) bool {
 	return data["app_version"] == ProfileApp && data["os_version"] == ProfileOS && data["software_version"] == ProfileSoftware
 }
 
-// PutPosition is one place written back with PUT /1.0/lastpositions/{asin}.
+// PutPosition is one place written back with PUT /1.0/lastpositions/{asin},
+// and when (the fake's clock, RFC 3339): a live check counts them and their
+// spacing.
 type PutPosition struct {
 	ASIN       string `json:"asin"`
 	ACR        string `json:"acr"`
 	PositionMs int64  `json:"position_ms"`
+	At         string `json:"at"`
 }
 
 // Calls is what the fake recorded.
@@ -237,9 +240,27 @@ func (f *Fake) OldProfile() {
 	f.mu.Unlock()
 }
 
+// SetPosition sets the place Audible heard for asin: ms into the book, heard
+// ago before the fake's clock (a listen on another device). It is not a write
+// back (not recorded in PutPositions).
+func (f *Fake) SetPosition(asin string, ms int64, ago time.Duration) {
+	f.mu.Lock()
+	f.positions[asin] = position{ms: ms, updated: f.opts.Now().Add(-ago).UTC().Truncate(time.Millisecond)}
+	f.mu.Unlock()
+}
+
+// Position is the place Audible holds for asin (ms into the book, when heard),
+// false when it holds none.
+func (f *Fake) Position(asin string) (ms int64, heard time.Time, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p, ok := f.positions[asin]
+	return p.ms, p.updated, ok
+}
+
 // Handler serves the fake. The /_fake/ routes are its own controls, for a live
 // check: GET /_fake/calls, POST /_fake/refuse, POST /_fake/old-profile, GET
-// /_fake/titles.
+// /_fake/titles, GET /_fake/positions, POST /_fake/position?asin=&ms=&ago=.
 func (f *Fake) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ap/signin", f.signin)
@@ -281,6 +302,37 @@ func (f *Fake) Handler() http.Handler {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /_fake/position", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		asin := q.Get("asin")
+		ms, err := strconv.ParseInt(q.Get("ms"), 10, 64)
+		if asin == "" || err != nil || ms < 0 {
+			http.Error(w, "want asin and ms >= 0 (and ago, seconds before now)", http.StatusBadRequest)
+			return
+		}
+		ago := 0
+		if v := q.Get("ago"); v != "" {
+			if ago, err = strconv.Atoi(v); err != nil || ago < 0 {
+				http.Error(w, "ago is seconds before now", http.StatusBadRequest)
+				return
+			}
+		}
+		f.SetPosition(asin, ms, time.Duration(ago)*time.Second)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /_fake/positions", func(w http.ResponseWriter, _ *http.Request) {
+		type row struct {
+			PositionMs  int64  `json:"position_ms"`
+			LastUpdated string `json:"last_updated"`
+		}
+		f.mu.Lock()
+		out := make(map[string]row, len(f.positions))
+		for asin, p := range f.positions {
+			out[asin] = row{p.ms, p.updated.Format(time.RFC3339Nano)}
+		}
+		f.mu.Unlock()
+		writeJSON(w, http.StatusOK, out)
 	})
 	mux.HandleFunc("GET /_fake/titles", func(w http.ResponseWriter, _ *http.Request) {
 		type row struct {
@@ -612,8 +664,10 @@ func (f *Fake) putPosition(w http.ResponseWriter, r *http.Request, body []byte) 
 		return
 	}
 	f.mu.Lock()
-	f.positions[in.ASIN] = position{ms: *in.PositionMs, updated: f.opts.Now().UTC().Truncate(time.Millisecond)}
-	f.calls.PutPositions = append(f.calls.PutPositions, PutPosition{ASIN: in.ASIN, ACR: in.ACR, PositionMs: *in.PositionMs})
+	now := f.opts.Now().UTC().Truncate(time.Millisecond)
+	f.positions[in.ASIN] = position{ms: *in.PositionMs, updated: now}
+	f.calls.PutPositions = append(f.calls.PutPositions, PutPosition{ASIN: in.ASIN, ACR: in.ACR, PositionMs: *in.PositionMs,
+		At: now.Format(time.RFC3339Nano)})
 	f.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
 }

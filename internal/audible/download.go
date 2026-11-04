@@ -326,7 +326,8 @@ func parseContentRange(v string) (start, size int64, ok bool) {
 	return start, size, true
 }
 
-// signGet sets the Audible user agent and an RSA signature for a GET request's URL.
+// signGet sets the Audible user agent and an RSA signature for a GET request's
+// URL (a redirect's hop doesn't pass through sendWithBackoff).
 func (c *Client) signGet(req *http.Request) error {
 	req.Header.Set("User-Agent", userAgent)
 	return signRequest(req, nil, c.key, c.creds.ADPToken, c.now())

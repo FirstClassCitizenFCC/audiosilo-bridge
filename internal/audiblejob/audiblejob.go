@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -50,9 +49,6 @@ const maxRuntime = 1_000_000
 // titles call over one title with more, so an anthology's long list of credits
 // is cut to its first ones.
 const maxAuthors = 20
-
-// asinPattern is an ASIN as the server takes one.
-var asinPattern = regexp.MustCompile(`^[A-Z0-9]{10}$`)
 
 // Accounts is the part of the account manager a poll uses (*audibleacct.Manager).
 type Accounts interface {
@@ -217,7 +213,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (an
 	matchedBook := map[string]link.LibraryBook{}
 	for _, rec := range recs {
 		rec.ASIN = strings.ToUpper(strings.TrimSpace(rec.ASIN))
-		if !asinPattern.MatchString(rec.ASIN) {
+		if !audibleacct.ASINPattern.MatchString(rec.ASIN) {
 			res.Skipped++
 			continue
 		}
