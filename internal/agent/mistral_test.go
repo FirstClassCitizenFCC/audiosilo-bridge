@@ -64,3 +64,11 @@ func TestMistralEnvNoKey(t *testing.T) {
 		}
 	}
 }
+
+func TestMistralArgsScalesTurns(t *testing.T) {
+	args := MistralArgs(Request{Dir: "/w", MaxTurns: 32}, "/o")
+	i := slices.Index(args, "--max-turns")
+	if i < 0 || args[i+1] != "128" {
+		t.Errorf("max-turns = %v", args)
+	}
+}

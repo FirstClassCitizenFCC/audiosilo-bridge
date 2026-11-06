@@ -14,6 +14,9 @@ import (
 
 // mistralBinName is the default binary name resolved on PATH when no explicit path
 // is configured: Mistral's Vibe CLI.
+// vibeTurnFactor scales a stage's turn limit for vibe's finer-grained steps.
+const vibeTurnFactor = 4
+
 const mistralBinName = "vibe"
 
 // MistralExportFile is the name of the file `vibe --output-dir` writes its run
@@ -98,9 +101,11 @@ func MistralArgs(req Request, exportDir string) []string {
 	if req.NoTools {
 		tools = vibeReadTools
 	}
-	turns := req.MaxTurns
-	if turns < 1 {
-		turns = maxTurns
+	turns := maxTurns
+	if req.MaxTurns > 0 {
+		// The stages' limits are tuned to claude and codex; vibe counts every
+		// file read, write and edit as a step and has no glob tool.
+		turns = min(req.MaxTurns*vibeTurnFactor, 1000)
 	}
 	args := []string{
 		"--output", "text",
