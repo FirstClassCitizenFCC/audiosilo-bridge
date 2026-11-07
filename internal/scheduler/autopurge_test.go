@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/ebook"
 	"github.com/kodestar/audiosilo-bridge/internal/events"
@@ -99,17 +98,22 @@ func TestStartupGCPurgesDoneBooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Knob on: Reconcile starts the GC in a background goroutine (off the dispatch
-	// path), so poll for the reclaim rather than assume it finished synchronously.
+	// Reconcile starts GC off the dispatch path. No run loop or stage workers
+	// are started here, so joining its tracked work waits for deletion AND accounting.
 	s := New(db, events.NewHub(64), NewStubExecutor(0, 0), 2, h.workRoot, true)
+	t.Cleanup(s.wg.Wait) // join before the harness closes the DB, even on failure
 	if err := s.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	waitUntil(t, func() bool {
-		_, err := os.Stat(chapters)
-		return os.IsNotExist(err)
-	}, "startup GC did not remove chapters/ of a done book")
-	if got, _ := db.GetBook(ctx, b.ID); got.ScratchBytes >= 999999 {
+	s.wg.Wait()
+	if _, err := os.Stat(chapters); !os.IsNotExist(err) {
+		t.Errorf("startup GC did not remove chapters/: %v", err)
+	}
+	got, err := db.GetBook(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ScratchBytes >= 999999 {
 		t.Errorf("scratch_bytes = %d, want re-accounted", got.ScratchBytes)
 	}
 }
@@ -147,21 +151,6 @@ func TestStartupGCSkipsReservedBook(t *testing.T) {
 	if _, err := os.Stat(chapters); err != nil {
 		t.Errorf("startup GC purged a reserved book (did not skip it): %v", err)
 	}
-}
-
-// waitUntil polls cond up to a short timeout, failing with msg if it never holds. It
-// lets a test observe an effect produced by a background goroutine (the async startup
-// GC) deterministically without a fixed sleep.
-func waitUntil(t *testing.T, cond func() bool, msg string) {
-	t.Helper()
-	deadline := time.Now().Add(waitLimit)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Error(msg)
 }
 
 // TestPurgeAccountingSurvivesCancelledCtx proves the scratch re-accounting runs even
@@ -213,10 +202,12 @@ func TestStartupGCKnobOff(t *testing.T) {
 	}
 
 	s := New(db, events.NewHub(64), NewStubExecutor(0, 0), 2, h.workRoot, false)
+	t.Cleanup(s.wg.Wait) // join before the harness closes the DB, even on failure
 	// autoPurge off.
 	if err := s.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
+	s.wg.Wait() // the GC has run, so an intact chapters/ proves it skipped the book
 	if _, err := os.Stat(chapters); err != nil {
 		t.Error("knob off: startup GC must leave chapters/ intact")
 	}

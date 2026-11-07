@@ -152,77 +152,53 @@ func seriesAsTitled(title, series string) string {
 }
 
 // BookMatcher matches records against a fixed server-book list via the shared
-// pkg/match matcher, under its import rules (match.ImportOptions: the rules
-// for mapping a store's catalog onto a library's books, which the server's own
-// callers don't use). It converts the candidate slice and normalises each
-// candidate's people once, and each match scores only the candidates whose
-// people pass pkg/match's person gate (match.BestWith skips the rest after its
-// ASIN step anyway), so a poll matching a whole Audible library doesn't
-// normalise every author of the library for every title. A book in several
-// series is a candidate under each of them (any one may be the series Audible
-// names). A book whose position is a range ("5-6": a pack or an omnibus, the
-// listing's reading of a folder code like LAM05-06) is matched by a range title
-// only (see MatchScored). Not safe for concurrent use.
+// pkg/match matcher under match.ImportOptions. It prepares stable candidate
+// partitions once and reuses them for every title in a poll. A book in several
+// series is a candidate under each. A book whose position is a range is matched
+// by a range title only (see MatchScored). Not safe for concurrent use.
 type BookMatcher struct {
 	books  []link.LibraryBook
 	cands  []match.Book
-	people []people     // cands[i]'s normalised author and narrators
-	owner  []int        // cands[i] is a candidate for books[owner[i]]
-	span   []bool       // cands[i]'s book spans books: a range position in any series
-	subset []match.Book // reused per Match: the candidates past the person gate
-	subIdx []int        // subset[j] is cands[subIdx[j]]
-	opts   match.Options
+	owner  []int // cands[i] is a candidate for books[owner[i]]
+	single matchPartition
+	ranges map[float64]matchPartition // spanning candidates by their start position
 }
 
-// people is a candidate's (or a query's) author and narrators, normalised as
-// pkg/match's person gate compares them.
-type people struct {
-	author    string
-	narrators []string
+// matchPartition keeps the original candidate indexes beside a reusable index.
+type matchPartition struct {
+	index *match.Index
+	ord   []int
 }
 
-func normalisedPeople(author string, narrators []string) people {
-	p := people{author: match.Normalize(author)}
-	for _, n := range narrators {
-		p.narrators = append(p.narrators, match.Normalize(n))
-	}
-	return p
-}
-
-// passes is pkg/match's personMatch(b, q) over normalised people: b's author or
-// a narrator of b is q's author, or b's author is one of q's narrators.
-func (b people) passes(q people) bool {
-	if match.NamesMatch(b.author, q.author) {
-		return true
-	}
-	for _, n := range b.narrators {
-		if match.NamesMatch(n, q.author) {
-			return true
+func (p matchPartition) best(q match.Query) (int, float64, bool) {
+	if p.index != nil {
+		if i, score, ok := p.index.BestScore(q); ok {
+			return p.ord[i], score, true
 		}
 	}
-	for _, n := range q.narrators {
-		if match.NamesMatch(b.author, n) {
-			return true
-		}
-	}
-	return false
+	return -1, 0, false
 }
 
 // NewBookMatcher builds a matcher over an already-fetched library book list.
 func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
-	m := &BookMatcher{books: books, opts: match.ImportOptions()}
+	m := &BookMatcher{books: books, ranges: map[float64]matchPartition{}}
+	var single []int
+	ranges := map[float64][]int{}
 	for i, b := range books {
 		base := match.Book{Title: b.Title, Author: Credit(b.Authors), ASIN: b.ASIN, Narrators: b.Narrators}
-		who := normalisedPeople(base.Author, base.Narrators)
 		spans := slices.ContainsFunc(b.Series, func(s link.SeriesRef) bool {
 			_, ok := rangeStart(s.Position)
 			return ok
 		})
 		add := func(c match.Book) {
+			j := len(m.cands)
 			m.cands = append(m.cands, c)
-			m.people = append(m.people, who)
 			m.owner = append(m.owner, i)
-			m.span = append(m.span, spans)
+			if spans {
+				ranges[c.SeriesIndex] = append(ranges[c.SeriesIndex], j)
+			} else {
+				single = append(single, j)
+			}
 		}
 		if len(b.Series) == 0 {
 			add(base)
@@ -238,6 +214,17 @@ func NewBookMatcher(books []link.LibraryBook) *BookMatcher {
 			}
 			add(c)
 		}
+	}
+	prepare := func(ord []int) matchPartition {
+		cands := make([]match.Book, len(ord))
+		for i, j := range ord {
+			cands[i] = m.cands[j]
+		}
+		return matchPartition{index: match.NewIndexWith(cands, match.ImportOptions()), ord: ord}
+	}
+	m.single = prepare(single)
+	for start, ord := range ranges {
+		m.ranges[start] = prepare(ord)
 	}
 	return m
 }
@@ -289,15 +276,10 @@ func rangeStart(pos string) (float64, bool) {
 	return v, err == nil
 }
 
-// best is match.BestWith(m.cands, q, m.opts): its ASIN step over every
-// candidate, then match.BestWith over the candidates past the person gate only
-// (in their order, so ties break the same way), its index mapped back. A book
-// that spans books (m.span) is never a single volume's: a title that is no range
-// skips it, or a pack's folder would look like its first volume and take that
-// volume's ASIN by enrichment. A range title (q at the range's start) tries the
-// spanning books starting where it does first, then the single volumes (a
-// folder holding the pack under its first volume's position); a spanning book
-// starting elsewhere is another pack.
+// best tries ASINs over every candidate before scoring the stable partitions.
+// The index applies the person gate and preserves candidate order for ties.
+// A range title first tries spanning books starting at its position, then
+// single volumes. A single volume never tries a spanning book.
 func (m *BookMatcher) best(q match.Query, isRange bool) (int, float64, bool) {
 	if q.ASIN != "" {
 		for i := range m.cands {
@@ -305,28 +287,14 @@ func (m *BookMatcher) best(q match.Query, isRange bool) (int, float64, bool) {
 				return i, match.ScoreASIN, true
 			}
 		}
-	}
-	qp := normalisedPeople(q.Author, q.Narrators)
-	pass := func(keep func(i int) bool) (int, float64, bool) {
-		m.subset, m.subIdx = m.subset[:0], m.subIdx[:0]
-		for i := range m.cands {
-			if keep(i) && m.people[i].passes(qp) {
-				m.subset = append(m.subset, m.cands[i])
-				m.subIdx = append(m.subIdx, i)
-			}
-		}
-		j, score, ok := match.BestWith(m.subset, q, m.opts)
-		if !ok {
-			return -1, 0, false
-		}
-		return m.subIdx[j], score, true
+		q.ASIN = "" // no candidate has it: spare each partition's index the same scan
 	}
 	if isRange {
-		if i, score, ok := pass(func(i int) bool { return m.span[i] && m.cands[i].SeriesIndex == q.Sequence }); ok {
+		if i, score, ok := m.ranges[q.Sequence].best(q); ok {
 			return i, score, true
 		}
 	}
-	return pass(func(i int) bool { return !m.span[i] })
+	return m.single.best(q)
 }
 
 // Claim is one record's match: the book's path, the match's score, the

@@ -391,9 +391,12 @@ func TestSignInAgainReplacesTheDevice(t *testing.T) {
 	if err := e.db.RefuseAudibleAccount(context.Background(), a.ID, store.RefusalSignIn, RefusedText, time.Now()); err != nil {
 		t.Fatal(err)
 	}
+	if err := e.db.AudibleSyncFailed(context.Background(), a.ID, "old sync failure", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	b := e.signIn(t)
 	second, _ := e.m.credentials(b.ID)
-	if b.ID != a.ID || b.RefusedAt != "" || second.DeviceSerial == first.DeviceSerial {
+	if b.ID != a.ID || b.RefusedAt != "" || b.SyncError != "" || b.SyncRetryAt != "" || second.DeviceSerial == first.DeviceSerial {
 		t.Fatalf("again = %+v (first %+v)", b, a)
 	}
 	if len(e.svc.deregistered) != 1 || e.svc.deregistered[0] != first.DeviceSerial {
@@ -495,6 +498,10 @@ func TestSignInAgainThatFailsKeepsTheEarlierSignIn(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	a := e.signIn(t)
+	retry := time.Now().Add(time.Hour)
+	if err := e.db.AudibleSyncFailed(context.Background(), a.ID, "previous sync failure", retry); err != nil {
+		t.Fatal(err)
+	}
 	first, _ := e.m.credentials(a.ID)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -516,7 +523,8 @@ func TestSignInAgainThatFailsKeepsTheEarlierSignIn(t *testing.T) {
 	if in := e.srv.put[a.ID]; in.UserID != 3 || in.LibraryID != 1 || in.Label != "Chris (US)" {
 		t.Fatalf("the server keeps %+v", in)
 	}
-	if kept, _ := e.m.Account(context.Background(), a.ID); kept.UserID != 3 || kept.LibraryID != 1 {
+	if kept, _ := e.m.Account(context.Background(), a.ID); kept.UserID != 3 || kept.LibraryID != 1 ||
+		kept.SyncError != "previous sync failure" || kept.SyncRetryAt != store.Timestamp(retry) {
 		t.Fatalf("the account = %+v", kept)
 	}
 

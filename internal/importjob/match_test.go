@@ -171,3 +171,39 @@ func TestBookMatcherSameAsBest(t *testing.T) {
 		}
 	}
 }
+
+// Repeated queries cross partitions and people without changing scores, tie
+// order, or the mapping from a series candidate back to its library book.
+func TestBookMatcherReusesPartitions(t *testing.T) {
+	books := []link.LibraryBook{
+		{Path: "wrong-person", Title: "Iron Vale", Authors: []string{"Other Writer"}, Series: series("Iron Vale", "5")},
+		{Path: "single", Title: "Iron Vale 5", Authors: []string{"Ona Fell"}, Series: series("Iron Vale", "5")},
+		{Path: "pack", Title: "Iron Vale", Authors: []string{"Ona Fell"}, Series: []link.SeriesRef{{Name: "Fell Worlds", Position: "5"}, {Name: "Iron Vale", Position: "5-6"}}, ASIN: "B0PACK0001"},
+		{Path: "tied-pack", Title: "Iron Vale", Authors: []string{"Ona Fell"}, Series: series("Iron Vale", "5-6")},
+		{Path: "other-pack", Title: "Iron Vale", Authors: []string{"Ona Fell"}, Series: series("Iron Vale", "3-4")},
+		{Path: "narrated", Title: "Quiet Harbour", Authors: []string{"Anon"}, Narrators: []string{"Ona Fell"}},
+	}
+	m := NewBookMatcher(books)
+	cases := []struct {
+		rec  source.Record
+		want string
+	}{
+		{audibleRec("", "Iron Vale 5", "Ona Fell", "Iron Vale", "5"), "single"},
+		{audibleRec("", "Iron Vale: Books 5-6", "Ona Fell", "Iron Vale", "5-6"), "pack"},
+		{audibleRec("", "Iron Vale: Books 3-4", "Ona Fell", "Iron Vale", "3-4"), "other-pack"},
+		{source.Record{ASIN: "b0pack0001", Title: "Unrelated", Author: "Nobody"}, "pack"},
+		{source.Record{Title: "Quiet Harbour", Author: "Ona Fell"}, "narrated"},
+		{source.Record{Title: "Quiet Harbour", Author: "Nobody"}, ""},
+		{audibleRec("", "Iron Vale 5", "Other Writer", "Iron Vale", "5"), "wrong-person"},
+	}
+	for pass := range 3 {
+		for _, tc := range cases {
+			got, score, ok := m.MatchScored(tc.rec)
+			fresh, freshScore, freshOK := NewBookMatcher(books).MatchScored(tc.rec)
+			if got.Path != tc.want || ok != (tc.want != "") || fresh.Path != got.Path || freshOK != ok || freshScore != score {
+				t.Errorf("pass %d, %q: got %q %.2f %v, want %q, fresh %q %.2f %v", pass, tc.rec.Title,
+					got.Path, score, ok, tc.want, fresh.Path, freshScore, freshOK)
+			}
+		}
+	}
+}

@@ -238,6 +238,21 @@ func (db *DB) AudibleSyncOK(ctx context.Context, id string, at time.Time) error 
 	return err
 }
 
+// ClearAudibleSyncError forgets id's stale sync error after sync is turned
+// off, reporting whether there was one (what the checklist shows). A wait
+// Audible asked for stays: the device is the same, so the wait still holds
+// (and a passed one is inert). This is not a successful sync, so sync_at stays
+// as it was.
+func (db *DB) ClearAudibleSyncError(ctx context.Context, id string) (bool, error) {
+	res, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_error = ''
+		WHERE id = ? AND sync_error != ''`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // AudibleSyncFailed records why id's sync failed, and until when Audible asked
 // the Bridge to wait (zero: no new wait). A wait is never shortened: the later
 // of the one stored and retryAt stays. It never refuses the account.

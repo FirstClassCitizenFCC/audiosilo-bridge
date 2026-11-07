@@ -98,11 +98,12 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 }
 
 // limitWait is the wait before an enrichment PUT goes again after its
-// limited-th 429 in a row: the server's Retry-After (retry), else
-// enrichBackoff doubling. false leaves the PUT: enrichMaxLimited 429s in a
-// row, or a wait over enrichMaxWait.
-func limitWait(retry time.Duration, limited int) (time.Duration, bool) {
-	if retry == 0 {
+// limited-th 429 (e) in a row: the server's Retry-After when it sent one (an
+// explicit zero is an immediate retry), else enrichBackoff doubling. false
+// leaves the PUT: enrichMaxLimited 429s in a row, or a wait over enrichMaxWait.
+func limitWait(e *link.APIError, limited int) (time.Duration, bool) {
+	retry := e.RetryAfter
+	if !e.RetryAfterSet {
 		retry = enrichBackoff << (limited - 1)
 	}
 	if limited >= enrichMaxLimited || retry > enrichMaxWait {
@@ -111,18 +112,21 @@ func limitWait(retry time.Duration, limited int) (time.Duration, bool) {
 	return retry, true
 }
 
-// rateLimited reports whether err is the server's 429 and the wait it asked
-// for (0 when it sent no Retry-After).
-func rateLimited(err error) (time.Duration, bool) {
+// rateLimited reports whether err is the server's 429 (for limitWait).
+func rateLimited(err error) (*link.APIError, bool) {
 	var e *link.APIError
 	if errors.As(err, &e) && e.Status == http.StatusTooManyRequests {
-		return e.RetryAfter, true
+		return e, true
 	}
-	return 0, false
+	return nil, false
 }
 
-// sleepCtx waits d, or until ctx ends.
+// sleepCtx waits d, or until ctx ends. An ended ctx always wins, so a zero
+// wait (an explicit Retry-After: 0) never lets a cancelled job go on.
 func sleepCtx(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil || d <= 0 {
+		return err
+	}
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {

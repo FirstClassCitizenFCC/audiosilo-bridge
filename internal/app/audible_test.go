@@ -9,11 +9,14 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kodestar/audiosilo-bridge/internal/api"
 	"github.com/kodestar/audiosilo-bridge/internal/audible"
 	"github.com/kodestar/audiosilo-bridge/internal/audibleacct"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
+	"github.com/kodestar/audiosilo-bridge/internal/setup"
+	"github.com/kodestar/audiosilo-bridge/internal/store"
 )
 
 // registerErr is a real Register failure against an identity API answering
@@ -36,6 +39,45 @@ func registerErr(t *testing.T, status int) error {
 		t.Fatalf("a %d registered", status)
 	}
 	return fmt.Errorf("%w: %w", audibleacct.ErrRegister, err)
+}
+
+func TestAudibleSetupSyncHealth(t *testing.T) {
+	b := newTestBridge(t)
+	ctx := context.Background()
+	if got := b.audibleSetup(ctx); got != (setup.Audible{}) {
+		t.Fatalf("empty accounts: %+v", got)
+	}
+	at := time.Now()
+	for _, id := range []string{"healthy001", "refused001", "syncfail01", "syncfail02"} {
+		a := store.AudibleAccount{ID: id, Marketplace: "us", DeviceProfile: audible.ProfileVersion}
+		if err := b.db.SignInAudibleAccount(ctx, a, at); err != nil {
+			t.Fatal(err)
+		}
+		if id != "healthy001" {
+			if err := b.db.AudibleSyncFailed(ctx, id, "sync failed", at.Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := b.db.RefuseAudibleAccount(ctx, "refused001", store.RefusalDevice, "sign in again", at); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.audibleSetup(ctx); got.Accounts != 4 || got.Refused != 1 || got.OldProfile != 0 ||
+		got.SyncFailing != 2 || got.SyncError != "sync failed" {
+		t.Fatalf("setup with sync failures: %+v", got)
+	}
+	for _, id := range []string{"refused001", "syncfail01", "syncfail02"} {
+		a, err := b.db.GetAudibleAccount(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.db.SignInAudibleAccount(ctx, a, at.Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := b.audibleSetup(ctx); got.Accounts != 4 || got.Refused != 0 || got.SyncFailing != 0 || got.SyncError != "" {
+		t.Fatalf("setup after signing in again: %+v", got)
+	}
 }
 
 // A refusal (Amazon's or the server's 4xx) is a 422 with its answer; Amazon or

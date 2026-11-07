@@ -138,6 +138,7 @@ func (p *Pusher) account(ctx context.Context, srv Server, a store.AudibleAccount
 		switch {
 		case errors.Is(err, link.ErrSyncOff):
 			p.pause(a.ID, now.Add(offWait))
+			p.o.syncOff(ctx, a)
 			return
 		case errors.Is(err, link.ErrUserUnavailable), errors.Is(err, link.ErrUnknownAccount):
 			p.pause(a.ID, now.Add(refusedWait))

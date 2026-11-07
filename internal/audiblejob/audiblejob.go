@@ -375,9 +375,9 @@ func (h *Handler) fail(ctx context.Context, account, why string) error {
 
 // matchable reports whether p is a book path the server takes in a match and
 // an enrichment: "." (a library that is one book, at its root) or a clean path
-// below the root, which is fs.ValidPath's rule.
+// below the root, within the server's 4096-byte limit.
 func matchable(p string) bool {
-	return fs.ValidPath(p)
+	return len(p) <= 4096 && fs.ValidPath(p)
 }
 
 // bookLister reads a library's books page by page (Server and ImportServer).
