@@ -3,6 +3,7 @@ package audiblejob
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
@@ -94,6 +95,43 @@ func TestEnrichHonoursRetryAfter(t *testing.T) {
 	want := []time.Duration{enrichGap, 3 * time.Second, 2 * enrichBackoff, 4 * enrichGap, 4 * enrichGap}
 	if fmt.Sprint(c.waits) != fmt.Sprint(want) {
 		t.Fatalf("waits = %v, want %v", c.waits, want)
+	}
+}
+
+func TestEnrichZeroRetryAfter(t *testing.T) {
+	t.Parallel()
+	for _, header := range []string{"0", time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)} {
+		t.Run(header, func(t *testing.T) {
+			t.Parallel()
+			fs, accts := backfill(1)
+			fs.limit = func(int) (string, bool) { return header, true }
+			h := setup(t, fs, accts)
+			var c clock
+			c.install(h)
+			res, err := run(t, h, "acct0001")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fs.enrichN != enrichMaxLimited || res.EnrichDeferred != 1 || len(c.waits) != enrichMaxLimited-1 {
+				t.Fatalf("result = %+v after %d attempts, waits %v", res, fs.enrichN, c.waits)
+			}
+			for _, wait := range c.waits {
+				if wait != 0 {
+					t.Fatalf("Retry-After %q waited %v", header, wait)
+				}
+			}
+		})
+	}
+}
+
+func TestEnrichCancelledDuringZeroRetry(t *testing.T) {
+	t.Parallel()
+	fs, accts := backfill(1)
+	fs.limit = func(int) (string, bool) { return "0", true }
+	h := setup(t, fs, accts)
+	h.sleep = func(context.Context, time.Duration) error { return context.Canceled }
+	if _, err := run(t, h, "acct0001"); err == nil || fs.enrichN != 1 {
+		t.Fatalf("cancelled retry: err %v, attempts %d", err, fs.enrichN)
 	}
 }
 

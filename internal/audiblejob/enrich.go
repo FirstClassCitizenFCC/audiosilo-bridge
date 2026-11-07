@@ -63,7 +63,7 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 		err := srv.Enrich(ctx, acct.LibraryID, hits[i].path, hits[i].asin)
 		if retry, ok := rateLimited(err); ok {
 			limited++
-			wait, ok := limitWait(retry, limited)
+			wait, ok := limitWait(retry.RetryAfter, retry.RetryAfterSet, limited)
 			if !ok {
 				res.EnrichDeferred = len(hits) - i
 				break
@@ -101,8 +101,8 @@ func (h *Handler) enrich(ctx context.Context, srv Server, acct store.AudibleAcco
 // limited-th 429 in a row: the server's Retry-After (retry), else
 // enrichBackoff doubling. false leaves the PUT: enrichMaxLimited 429s in a
 // row, or a wait over enrichMaxWait.
-func limitWait(retry time.Duration, limited int) (time.Duration, bool) {
-	if retry == 0 {
+func limitWait(retry time.Duration, provided bool, limited int) (time.Duration, bool) {
+	if !provided {
 		retry = enrichBackoff << (limited - 1)
 	}
 	if limited >= enrichMaxLimited || retry > enrichMaxWait {
@@ -111,14 +111,14 @@ func limitWait(retry time.Duration, limited int) (time.Duration, bool) {
 	return retry, true
 }
 
-// rateLimited reports whether err is the server's 429 and the wait it asked
-// for (0 when it sent no Retry-After).
-func rateLimited(err error) (time.Duration, bool) {
+// rateLimited reports whether err is the server's 429, keeping whether its
+// Retry-After was provided (an explicit zero is an immediate retry).
+func rateLimited(err error) (*link.APIError, bool) {
 	var e *link.APIError
 	if errors.As(err, &e) && e.Status == http.StatusTooManyRequests {
-		return e.RetryAfter, true
+		return e, true
 	}
-	return 0, false
+	return nil, false
 }
 
 // sleepCtx waits d, or until ctx ends.

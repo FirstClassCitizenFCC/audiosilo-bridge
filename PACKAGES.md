@@ -1326,7 +1326,8 @@ internal/
             refused_at, last_error; NO credential (the vault's audible_<id>).
             Unique on (customer_hash, marketplace) where the hash isn't empty.
             SignInAudibleAccount upserts (a sign-in again keeps created_at and the
-            counts, clears a refusal, records device_profile); AudiblePolled clears
+            counts, clears a refusal and stale sync error/retry fields, records
+            device_profile); AudiblePolled clears
             refusal and error, except a refusal whose last_error is its keep
             argument (audibleacct.ThrottledText: a throttled device still lists);
             AudibleAccountError leaves a refused account's reason alone; AudibleAccepted
@@ -1772,7 +1773,9 @@ internal/
             was revoked), ErrNotHeld (409 not_held/finished), ErrNoHeartbeat,
             ErrNoBook, ErrNotIndexable (a rescan's 404 not_indexable), else *APIError
             (an HTML proxy page never becomes a message; RetryAfter carries a 429's
-            Retry-After, seconds or an HTTP date, 0 when absent, clamped at a day). Phase 1a: Paired carries
+            Retry-After, seconds or an HTTP date, clamped at a day; RetryAfterSet
+            distinguishes a valid zero wait from a missing or invalid header).
+            Phase 1a: Paired carries
             the server's server_id (the job runner's server identity); the book
             lookup's answer carries a `book` block (BookInfo: title, authors and
             narrators as credits, series, series_index, asin, isbn, duration, and the
@@ -2439,9 +2442,11 @@ internal/
             answer keeps it and leaves the account 2 min (this loop only); another 4xx or a denied
             license (audible.IsDenial) drops it, a throttled device also leaving the account 15 min;
             never a refusal. Health (sync_at, sync_error; sync_retry_at, which no later call shortens)
-            feeds the setup item's detail only. Deps: audible, audibleacct, jobs, link, store.
+            feeds the setup item's detail only. A sync_off reply clears stale errors and
+            retry waits without recording a successful sync; a new sign-in or
+            changed mapping clears them too. Deps: audible, audibleacct, jobs, link, store.
   importjob/ matching and placement against a library (the manager's, ported):
-            BookMatcher over []link.LibraryBook (pkg/match.BestWith under
+            BookMatcher over []link.LibraryBook (reused pkg/match.NewIndexWith under
             match.ImportOptions(), the import rules the server's own callers don't
             use: ASIN exact first, then author + series + title tokens; a book in
             several series is a candidate under each; narrators join the person

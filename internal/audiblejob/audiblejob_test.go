@@ -423,3 +423,62 @@ func TestPollFailureRedactsAccountIDs(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchablePathBytes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, path string
+		want       bool
+	}{
+		{"root book", ".", true},
+		{"at cap", strings.Repeat("a", 4096), true},
+		{"over cap", strings.Repeat("a", 4097), false},
+		{"UTF-8 at cap", strings.Repeat("é", 2048), true},
+		{"UTF-8 over cap", strings.Repeat("é", 2048) + "a", false},
+		{"traversal", "A/../B", false},
+		{"absolute", "/A/B", false},
+		{"empty", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := matchable(tc.path); got != tc.want {
+				t.Errorf("matchable (%d bytes) = %v, want %v", len(tc.path), got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPollSkipsOverlongMatchesWithinTitleBatch(t *testing.T) {
+	t.Parallel()
+	fs := &fakeServer{pageSize: 500}
+	accts := &stubAccounts{acct: account()}
+	paths := []string{".", strings.Repeat("a", 4096), strings.Repeat("b", 4097),
+		strings.Repeat("é", 2048), strings.Repeat("é", 2048) + "a"}
+	for i := range 501 {
+		path := fmt.Sprintf("Books/%d", i)
+		if i < len(paths) {
+			path = paths[i]
+		}
+		asin := fmt.Sprintf("B0PATH%04d", i)
+		fs.books = append(fs.books, link.LibraryBook{Path: path, Title: "A Book", ASIN: asin})
+		accts.recs = append(accts.recs, source.Record{ASIN: asin, Title: "A Book", Author: "A Writer"})
+	}
+	res, err := run(t, setup(t, fs, accts), "acct0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Titles != 501 || res.MatchedASIN != 499 || res.Enriched != 0 || len(fs.calls) != 2 ||
+		len(fs.calls[0].Titles) != 500 || len(fs.calls[1].Titles) != 1 || !fs.calls[1].Final {
+		t.Fatalf("result = %+v, batches = %d", res, len(fs.calls))
+	}
+	for i, title := range fs.calls[0].Titles {
+		if i == 2 || i == 4 {
+			if title.Match != nil || title.ContestedPath != "" {
+				t.Errorf("over-cap path was sent for %s", title.ASIN)
+			}
+			continue
+		}
+		if title.Match == nil || title.Match.Path != fs.books[i].Path {
+			t.Errorf("valid neighbor %s lost its match", title.ASIN)
+		}
+	}
+}

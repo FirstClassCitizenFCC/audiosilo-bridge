@@ -8,9 +8,10 @@
 
 The Bridge is the optional, always-on companion to an
 [AudioSilo](https://audiosilo.app) server. It **writes** to the library folders and
-runs the heavy jobs (transcription, generated character sheets and recaps, and later
-podcast fetching, read-along alignment, Audible backups and file moves), so the
-server itself can stay read-only and safe to expose to the internet.
+runs the heavy jobs: transcription, generated character sheets and recaps,
+podcast fetching, read-along alignment, Audible backups and listening place sync.
+File moves are planned. The server itself can stay read-only and safe to expose
+to the internet.
 
 - **The Bridge calls the server; the server never calls the Bridge.** It pairs once
   with a code from the server's admin console, then sends a heartbeat every 30
@@ -31,9 +32,11 @@ What it does today: on top of the pairing, heartbeat, job queue with leases,
 mapping checks and the proof job `bridge.verify`, the Bridge **generates characters,
 recaps and descriptions** (`sidecars.generate`, `sidecars.describe`), **finds a
 chapterless book's chapters** in its narration (`chapters.detect`), **shares** kept
-results with the community metadata (`sidecars.contribute`, `meta.correct`), and
-**subscribes to and fetches podcasts** (`podcast.*`). An admin starts a job from the
-server's console or the player; the Bridge transcribes the book (or reads its
+results with the community metadata (`sidecars.contribute`, `meta.correct`),
+**subscribes to and fetches podcasts** (`podcast.*`), **makes read-along maps**
+(`readalong.align`), and **backs up Audible books and syncs listening places**
+(`audible.poll`, `audible.import`, `audible.sync` and the push loop). An admin starts
+a job from the server's console or the player; the Bridge transcribes the book (or reads its
 .epub), runs the AI agents in a separate container, and saves the results with the
 book in its `.audiosilo/` folder, where the server picks them up. Transcription can
 run on another computer with an **ASR worker** (below). The plan lives in the

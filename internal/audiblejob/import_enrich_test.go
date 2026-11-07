@@ -145,13 +145,22 @@ func TestImportRetryKeepsNoEnrich(t *testing.T) {
 }
 
 func tooMany(after time.Duration) error {
-	return &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: after}
+	return &link.APIError{Status: http.StatusTooManyRequests, RetryAfter: after, RetryAfterSet: after > 0}
 }
 
 // The import's one enrichment PUT waits out the server's 429s as the poll's
 // does: Retry-After when sent, else the doubling backoff; after
 // enrichMaxLimited in a row the book is placed without the ASIN, no failure.
 func TestImportEnrichPacedOn429(t *testing.T) {
+	t.Run("explicit zero", func(t *testing.T) {
+		e := newImportEnv(t)
+		e.srv.enrichErr = &link.APIError{Status: http.StatusTooManyRequests, RetryAfterSet: true}
+		res, err := e.run(context.Background(), e.params(nil))
+		if err != nil || res.(*ImportResult).Enriched || len(e.srv.enriched) != enrichMaxLimited ||
+			!slices.Equal(e.waits, make([]time.Duration, enrichMaxLimited-1)) {
+			t.Fatalf("res %v, err %v, PUTs %v, waits %v", res, err, e.srv.enriched, e.waits)
+		}
+	})
 	t.Run("Retry-After then accepted", func(t *testing.T) {
 		e := newImportEnv(t)
 		e.srv.enrichErrs = []error{tooMany(3 * time.Second), tooMany(0)}

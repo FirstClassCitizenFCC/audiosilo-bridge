@@ -145,6 +145,7 @@ type Store interface {
 	SetAudiblePushCursor(ctx context.Context, id, cursor string, from time.Time) error
 	AudibleSyncOK(ctx context.Context, id string, at time.Time) error
 	AudibleSyncFailed(ctx context.Context, id, why string, retryAt time.Time) error
+	ClearAudibleSyncError(ctx context.Context, id string) error
 }
 
 // Server is the part of the server link the sync calls (*link.Client).
@@ -214,6 +215,21 @@ func (o *Options) health(ctx context.Context, a store.AudibleAccount, err error,
 		o.Log.Warn("audible: recording a sync failure failed", "account", a.ID, "err", rerr)
 	}
 	if before == "" {
+		o.OnChange()
+	}
+}
+
+// syncOff clears health that no longer applies, without recording a sync success.
+func (o *Options) syncOff(ctx context.Context, a store.AudibleAccount) {
+	ctx = context.WithoutCancel(ctx)
+	if cur, err := o.Accounts.Account(ctx, a.ID); err == nil {
+		a = cur
+	}
+	if err := o.DB.ClearAudibleSyncError(ctx, a.ID); err != nil {
+		o.Log.Warn("audible: clearing sync health failed", "account", a.ID, "err", err)
+		return
+	}
+	if a.SyncError != "" {
 		o.OnChange()
 	}
 }
@@ -473,6 +489,7 @@ func (h *Handler) run(ctx context.Context, job jobs.Job, rep *jobs.Reporter) (*R
 		switch {
 		case errors.Is(err, link.ErrSyncOff):
 			res.SyncOff = true
+			h.o.syncOff(ctx, acct)
 			return res, nil
 		case errors.Is(err, link.ErrUserUnavailable):
 			h.o.health(ctx, acct, err, time.Time{})

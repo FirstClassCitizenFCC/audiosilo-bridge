@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/kodestar/audiosilo-bridge/internal/audible"
 	"github.com/kodestar/audiosilo-bridge/internal/audible/audiblefake"
 	"github.com/kodestar/audiosilo-bridge/internal/audiblejob"
+	"github.com/kodestar/audiosilo-bridge/internal/audiblesync"
 	"github.com/kodestar/audiosilo-bridge/internal/jobs"
 	"github.com/kodestar/audiosilo-bridge/internal/link"
 	"github.com/kodestar/audiosilo-bridge/internal/secrets"
@@ -84,7 +86,16 @@ func (s *audibleServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // params and result.
 func TestAudibleAccountThroughTheBridge(t *testing.T) {
 	fake := audiblefake.New(audiblefake.Options{KeyBits: 1024})
-	fts := httptest.NewServer(fake.Handler())
+	var syncFailure atomic.Value // string once the error canaries are installed
+	fakeHandler := fake.Handler()
+	fts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if msg, _ := syncFailure.Load().(string); msg != "" && r.URL.Path == "/1.0/annotations/lastpositions" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, msg)
+			return
+		}
+		fakeHandler.ServeHTTP(w, r)
+	}))
 	defer fts.Close()
 	t.Setenv(audible.FakeURLEnv, fts.URL)
 
@@ -95,7 +106,7 @@ func TestAudibleAccountThroughTheBridge(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "A", "B", "1.mp3"), []byte("abc"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fs := &audibleServer{fakeServer: &fakeServer{t: t, root: root}}
+	fs := &audibleServer{fakeServer: &fakeServer{t: t, root: root, acceptsSetup: true}}
 	srv := httptest.NewServer(fs)
 	defer srv.Close()
 
@@ -218,6 +229,28 @@ func TestAudibleAccountThroughTheBridge(t *testing.T) {
 	if err != nil || creds.ADPToken == "" {
 		t.Fatalf("sealed = %v", err)
 	}
+	// An Audible sync error carries real fake-issued credential canaries. It
+	// must be redacted before it reaches stored health, the result or setup.
+	syncFailure.Store(strings.Join([]string{"sync failed", creds.AccessToken, creds.RefreshToken, creds.ADPToken,
+		creds.CustomerID, creds.DeviceSerial}, " "))
+	syncHandler := audiblesync.New(audiblesync.Options{Accounts: b.audible, DB: b.db,
+		Server: func() audiblesync.Server { return b.conn.Client() }, ServerID: func() string { return "srv-1" }, Log: log, OnChange: b.Kick})
+	syncParams, _ := json.Marshal(link.AudibleSyncParams{Account: acct.ID, Titles: []link.AudibleSyncTitle{
+		{ASIN: "B0FAKE0001", LibraryID: 1, Path: "Quill/The Glass Orchard", RuntimeS: 60000},
+	}})
+	syncOut, syncErr := syncHandler.Run(ctx, jobs.Job{ID: 2, Kind: audiblesync.Kind, Params: syncParams, Attempt: 1}, jobs.LocalReporter())
+	if syncErr == nil {
+		t.Fatal("the failing sync succeeded")
+	}
+	syncResult, _ := json.Marshal(syncOut)
+	row, err = b.db.GetAudibleAccount(ctx, acct.ID)
+	if err != nil || row.SyncError == "" {
+		t.Fatalf("sync health = %+v, %v", row, err)
+	}
+	waitFor(t, "sync health in the heartbeat", func() bool {
+		beat, ok := fs.lastBeat()
+		return ok && beat.Setup != nil && strings.Contains(setupItem(*beat.Setup, setup.ItemAudible).Detail, "sync failed")
+	})
 	beat, _ := fs.lastBeat()
 	beatRaw, _ := json.Marshal(beat)
 	setupRaw, _ := json.Marshal(b.setup(ctx))
@@ -232,7 +265,14 @@ func TestAudibleAccountThroughTheBridge(t *testing.T) {
 	logText := logs.String()
 	logMu.Unlock()
 	texts := map[string]string{"log": logText, "heartbeat": string(beatRaw), "setup": string(setupRaw), "page": string(pageRaw),
-		"params": string(params), "result": string(resRaw)}
+		"params": string(params), "result": string(resRaw), "sync_error": row.SyncError,
+		"sync result": string(syncResult), "sync error": syncErr.Error()}
+	if err := b.db.ClearAudibleSyncError(ctx, acct.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.audibleSetup(ctx); got.SyncFailing != 0 || got.SyncError != "" {
+		t.Fatalf("setup kept the cleared sync error: %+v", got)
+	}
 	for _, s := range secretsOf {
 		if s == "" {
 			continue

@@ -577,3 +577,38 @@ func TestSyncDurationMismatch(t *testing.T) {
 		t.Fatalf("a mismatch is no sync error: %+v", a)
 	}
 }
+
+func TestSyncOffClearsStaleHealth(t *testing.T) {
+	for _, caller := range []string{"job", "push"} {
+		t.Run(caller, func(t *testing.T) {
+			e := newEnv(t)
+			ctx := context.Background()
+			if err := e.db.AudibleSyncFailed(ctx, acctID, "previous failure", e.now.Add(-time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			e.srv.postErr, e.srv.feedErr = link.ErrSyncOff, link.ErrSyncOff
+			if caller == "job" {
+				e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
+				// Audible asks for a future wait while this request is in flight.
+				// A sync-off reply still clears it rather than preserving it as OK does.
+				e.accts.onRead = func() {
+					if err := e.db.AudibleSyncFailed(ctx, acctID, "asked to wait", e.now.Add(time.Hour)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				res, err := e.runSync(t, params(t, title("B000000001", "A/One", 3600)))
+				if err != nil || !res.SyncOff {
+					t.Fatalf("sync off: %+v, %v", res, err)
+				}
+			} else {
+				NewPusher(e.o).Tick(ctx)
+			}
+			if a := e.account(t); a.SyncError != "" || a.SyncRetryAt != "" || a.SyncAt != "" || a.RefusedAt != "" {
+				t.Fatalf("sync off kept stale health or recorded a success/refusal: %+v", a)
+			}
+			if e.changed != 1 {
+				t.Errorf("checklist updates = %d, want 1", e.changed)
+			}
+		})
+	}
+}

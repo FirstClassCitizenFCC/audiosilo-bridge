@@ -350,3 +350,54 @@ func TestAudibleSyncHealth(t *testing.T) {
 		t.Fatalf("ok = %+v", got)
 	}
 }
+
+// A new device or mapping discards old sync errors and waits. An ordinary
+// mapping save keeps them; sync-off clears them without recording a success.
+func TestAudibleSyncHealthReset(t *testing.T) {
+	for _, change := range []string{"sign in", "remap", "same mapping", "sync off"} {
+		t.Run(change, func(t *testing.T) {
+			ctx := context.Background()
+			db := open(t)
+			at := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+			a := AudibleAccount{ID: "abcd1234", Marketplace: "us", ServerID: "srv-1", UserID: 3, LibraryID: 1}
+			if err := db.SignInAudibleAccount(ctx, a, at); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.AudibleSyncOK(ctx, a.ID, at); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.AudibleSyncFailed(ctx, a.ID, "old sync error", at.Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch change {
+			case "sign in":
+				err = db.SignInAudibleAccount(ctx, a, at.Add(time.Minute))
+			case "remap":
+				a.UserID++
+				err = db.MapAudibleAccount(ctx, a)
+			case "same mapping":
+				err = db.MapAudibleAccount(ctx, a)
+			case "sync off":
+				err = db.ClearAudibleSyncError(ctx, a.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := db.GetAudibleAccount(ctx, a.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.SyncAt != Timestamp(at) {
+				t.Errorf("reset changed the last successful sync: %+v", got)
+			}
+			if change == "same mapping" {
+				if got.SyncError != "old sync error" || got.SyncRetryAt != Timestamp(at.Add(time.Hour)) {
+					t.Errorf("ordinary save lost sync health: %+v", got)
+				}
+			} else if got.SyncError != "" || got.SyncRetryAt != "" {
+				t.Errorf("reset kept stale sync health: %+v", got)
+			}
+		})
+	}
+}
