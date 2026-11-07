@@ -267,7 +267,7 @@ func TestAudibleAccountThroughTheBridge(t *testing.T) {
 	texts := map[string]string{"log": logText, "heartbeat": string(beatRaw), "setup": string(setupRaw), "page": string(pageRaw),
 		"params": string(params), "result": string(resRaw), "sync_error": row.SyncError,
 		"sync result": string(syncResult), "sync error": syncErr.Error()}
-	if err := b.db.ClearAudibleSyncError(ctx, acct.ID); err != nil {
+	if _, err := b.db.ClearAudibleSyncError(ctx, acct.ID); err != nil {
 		t.Fatal(err)
 	}
 	if got := b.audibleSetup(ctx); got.SyncFailing != 0 || got.SyncError != "" {

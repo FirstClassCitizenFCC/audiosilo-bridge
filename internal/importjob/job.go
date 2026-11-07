@@ -287,6 +287,7 @@ func (m *BookMatcher) best(q match.Query, isRange bool) (int, float64, bool) {
 				return i, match.ScoreASIN, true
 			}
 		}
+		q.ASIN = "" // no candidate has it: spare each partition's index the same scan
 	}
 	if isRange {
 		if i, score, ok := m.ranges[q.Sequence].best(q); ok {

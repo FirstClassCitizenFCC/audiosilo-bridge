@@ -565,7 +565,7 @@ func (h *Importer) enrichPlaced(ctx context.Context, rep *jobs.Reporter, srv Imp
 		err := srv.Enrich(ctx, libraryID, bookPath, asin)
 		if retry, ok := rateLimited(err); ok {
 			limited++
-			wait, ok := limitWait(retry.RetryAfter, retry.RetryAfterSet, limited)
+			wait, ok := limitWait(retry, limited)
 			if !ok {
 				h.o.Log.Info("audible: the server kept refusing an imported book's ASIN (429): the book is placed without it",
 					"account", account, "library", libraryID, "path", bookPath)

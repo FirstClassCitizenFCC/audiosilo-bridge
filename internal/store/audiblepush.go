@@ -238,11 +238,17 @@ func (db *DB) AudibleSyncOK(ctx context.Context, id string, at time.Time) error 
 	return err
 }
 
-// ClearAudibleSyncError forgets stale sync health after sync is turned off.
-// This is not a successful sync, so sync_at stays as it was.
-func (db *DB) ClearAudibleSyncError(ctx context.Context, id string) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_error = '', sync_retry_at = '' WHERE id = ?`, id)
-	return err
+// ClearAudibleSyncError forgets stale sync health after sync is turned off,
+// reporting whether there was any to forget. This is not a successful sync,
+// so sync_at stays as it was.
+func (db *DB) ClearAudibleSyncError(ctx context.Context, id string) (bool, error) {
+	res, err := db.sql.ExecContext(ctx, `UPDATE audible_accounts SET sync_error = '', sync_retry_at = ''
+		WHERE id = ? AND (sync_error != '' OR sync_retry_at != '')`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // AudibleSyncFailed records why id's sync failed, and until when Audible asked

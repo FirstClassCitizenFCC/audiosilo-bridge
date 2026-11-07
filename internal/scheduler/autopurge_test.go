@@ -202,10 +202,12 @@ func TestStartupGCKnobOff(t *testing.T) {
 	}
 
 	s := New(db, events.NewHub(64), NewStubExecutor(0, 0), 2, h.workRoot, false)
+	t.Cleanup(s.wg.Wait) // join before the harness closes the DB, even on failure
 	// autoPurge off.
 	if err := s.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
+	s.wg.Wait() // the GC has run, so an intact chapters/ proves it skipped the book
 	if _, err := os.Stat(chapters); err != nil {
 		t.Error("knob off: startup GC must leave chapters/ intact")
 	}

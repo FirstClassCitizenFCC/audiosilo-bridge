@@ -379,7 +379,13 @@ func TestAudibleSyncHealthReset(t *testing.T) {
 			case "same mapping":
 				err = db.MapAudibleAccount(ctx, a)
 			case "sync off":
-				err = db.ClearAudibleSyncError(ctx, a.ID)
+				var cleared bool
+				if cleared, err = db.ClearAudibleSyncError(ctx, a.ID); err == nil && !cleared {
+					t.Error("clearing stale sync health reported nothing cleared")
+				}
+				if again, aerr := db.ClearAudibleSyncError(ctx, a.ID); aerr != nil || again {
+					t.Errorf("clearing clear sync health = %v, %v; want false, nil", again, aerr)
+				}
 			}
 			if err != nil {
 				t.Fatal(err)
