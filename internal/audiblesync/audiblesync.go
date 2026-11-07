@@ -219,8 +219,9 @@ func (o *Options) health(ctx context.Context, a store.AudibleAccount, err error,
 	}
 }
 
-// syncOff clears health that no longer applies, without recording a sync
-// success, and runs OnChange when there was any to clear.
+// syncOff clears a sync error that no longer applies, without recording a
+// sync success (a wait Audible asked for stays), and runs OnChange when there
+// was one to clear.
 func (o *Options) syncOff(ctx context.Context, a store.AudibleAccount) {
 	cleared, err := o.DB.ClearAudibleSyncError(context.WithoutCancel(ctx), a.ID)
 	if err != nil {

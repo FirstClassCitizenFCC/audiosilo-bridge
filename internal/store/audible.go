@@ -82,8 +82,9 @@ func scanAudibleAccount(row interface{ Scan(...any) error }) (AudibleAccount, er
 // remapAudible starts the push loop's feed again, and forgets the places
 // waiting to be pushed and the listed titles, when a's row (read in tx) is
 // mapped to another server, person or library than a's: the next audible.sync
-// lists its titles again. Stale sync errors and waits clear with the mapping.
-// A new account has nothing to forget.
+// lists its titles again. A stale sync error clears with the mapping; a wait
+// Audible asked for stays (the device is the same). A new account has nothing
+// to forget.
 func remapAudible(ctx context.Context, tx *sql.Tx, a AudibleAccount) error {
 	var server string
 	var user, library int64
@@ -96,7 +97,7 @@ func remapAudible(ctx context.Context, tx *sql.Tx, a AudibleAccount) error {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = '', push_from = '',
-		sync_error = '', sync_retry_at = '' WHERE id = ?`, a.ID); err != nil {
+		sync_error = '' WHERE id = ?`, a.ID); err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, listed = 0, row_ms = -1, row_seen = ''

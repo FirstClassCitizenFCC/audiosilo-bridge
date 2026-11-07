@@ -121,8 +121,12 @@ func rateLimited(err error) (*link.APIError, bool) {
 	return nil, false
 }
 
-// sleepCtx waits d, or until ctx ends.
+// sleepCtx waits d, or until ctx ends. An ended ctx always wins, so a zero
+// wait (an explicit Retry-After: 0) never lets a cancelled job go on.
 func sleepCtx(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil || d <= 0 {
+		return err
+	}
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {

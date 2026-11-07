@@ -583,6 +583,7 @@ func TestSyncOffClearsStaleHealth(t *testing.T) {
 		t.Run(caller, func(t *testing.T) {
 			e := newEnv(t)
 			ctx := context.Background()
+			wantWait := store.Timestamp(e.now.Add(-time.Minute)) // passed: inert, left as it is
 			if err := e.db.AudibleSyncFailed(ctx, acctID, "previous failure", e.now.Add(-time.Minute)); err != nil {
 				t.Fatal(err)
 			}
@@ -590,7 +591,9 @@ func TestSyncOffClearsStaleHealth(t *testing.T) {
 			if caller == "job" {
 				e.accts.places["B000000001"] = audible.Position{PositionMs: 60_000, LastUpdated: e.now}
 				// Audible asks for a future wait while this request is in flight.
-				// A sync-off reply still clears it rather than preserving it as OK does.
+				// A sync-off reply clears the error but keeps that wait, as OK
+				// does: the server's switch never shortens Audible's wait.
+				wantWait = store.Timestamp(e.now.Add(time.Hour))
 				e.accts.onRead = func() {
 					if err := e.db.AudibleSyncFailed(ctx, acctID, "asked to wait", e.now.Add(time.Hour)); err != nil {
 						t.Fatal(err)
@@ -603,8 +606,8 @@ func TestSyncOffClearsStaleHealth(t *testing.T) {
 			} else {
 				NewPusher(e.o).Tick(ctx)
 			}
-			if a := e.account(t); a.SyncError != "" || a.SyncRetryAt != "" || a.SyncAt != "" || a.RefusedAt != "" {
-				t.Fatalf("sync off kept stale health or recorded a success/refusal: %+v", a)
+			if a := e.account(t); a.SyncError != "" || a.SyncRetryAt != wantWait || a.SyncAt != "" || a.RefusedAt != "" {
+				t.Fatalf("sync off kept the error, moved Audible's wait or recorded a success/refusal: %+v", a)
 			}
 			if e.changed != 1 {
 				t.Errorf("checklist updates = %d, want 1", e.changed)

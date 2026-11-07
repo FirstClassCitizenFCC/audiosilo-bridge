@@ -351,8 +351,9 @@ func TestAudibleSyncHealth(t *testing.T) {
 	}
 }
 
-// A new device or mapping discards old sync errors and waits. An ordinary
-// mapping save keeps them; sync-off clears them without recording a success.
+// A new device discards old sync errors and waits. A new mapping or sync-off
+// clears the error without recording a success, but keeps a wait Audible gave
+// (the device is the same); an ordinary mapping save keeps both.
 func TestAudibleSyncHealthReset(t *testing.T) {
 	for _, change := range []string{"sign in", "remap", "same mapping", "sync off"} {
 		t.Run(change, func(t *testing.T) {
@@ -397,12 +398,20 @@ func TestAudibleSyncHealthReset(t *testing.T) {
 			if got.SyncAt != Timestamp(at) {
 				t.Errorf("reset changed the last successful sync: %+v", got)
 			}
-			if change == "same mapping" {
-				if got.SyncError != "old sync error" || got.SyncRetryAt != Timestamp(at.Add(time.Hour)) {
+			wait := Timestamp(at.Add(time.Hour))
+			switch change {
+			case "same mapping":
+				if got.SyncError != "old sync error" || got.SyncRetryAt != wait {
 					t.Errorf("ordinary save lost sync health: %+v", got)
 				}
-			} else if got.SyncError != "" || got.SyncRetryAt != "" {
-				t.Errorf("reset kept stale sync health: %+v", got)
+			case "sign in":
+				if got.SyncError != "" || got.SyncRetryAt != "" {
+					t.Errorf("a new device kept stale sync health: %+v", got)
+				}
+			default:
+				if got.SyncError != "" || got.SyncRetryAt != wait {
+					t.Errorf("%s: want the error cleared and Audible's wait kept: %+v", change, got)
+				}
 			}
 		})
 	}

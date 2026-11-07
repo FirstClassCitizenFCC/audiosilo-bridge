@@ -2442,9 +2442,10 @@ internal/
             answer keeps it and leaves the account 2 min (this loop only); another 4xx or a denied
             license (audible.IsDenial) drops it, a throttled device also leaving the account 15 min;
             never a refusal. Health (sync_at, sync_error; sync_retry_at, which no later call shortens)
-            feeds the setup item's detail only. A sync_off reply clears stale errors and
-            retry waits without recording a successful sync; a new sign-in or
-            changed mapping clears them too. Deps: audible, audibleacct, jobs, link, store.
+            feeds the setup item's detail only. A sync_off reply or a changed mapping
+            clears a stale sync_error without recording a successful sync, keeping
+            Audible's wait (same device); only a new sign-in (a new device) clears
+            both. Deps: audible, audibleacct, jobs, link, store.
   importjob/ matching and placement against a library (the manager's, ported):
             BookMatcher over []link.LibraryBook (reused pkg/match.NewIndexWith under
             match.ImportOptions(), the import rules the server's own callers don't
