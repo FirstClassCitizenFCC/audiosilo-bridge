@@ -334,6 +334,8 @@ type APIError struct {
 	Message string
 	// RetryAfter is the answer's Retry-After (a 429's wait), 0 when it sent none.
 	RetryAfter time.Duration
+	// RetryAfterSet distinguishes a valid zero wait from an absent or invalid header.
+	RetryAfterSet bool
 }
 
 func (e *APIError) Error() string {
@@ -607,7 +609,7 @@ func (c *Client) doFound(ctx context.Context, method, path string, q url.Values,
 	err = answerError(resp.StatusCode, raw)
 	var ae *APIError
 	if errors.As(err, &ae) {
-		ae.RetryAfter = retryAfter(resp.Header.Get("Retry-After"), time.Now())
+		ae.RetryAfter, ae.RetryAfterSet = retryAfter(resp.Header.Get("Retry-After"), time.Now())
 	}
 	return false, err
 }
@@ -616,17 +618,20 @@ func (c *Client) doFound(ctx context.Context, method, path string, q url.Values,
 const maxRetryAfter = 24 * time.Hour
 
 // retryAfter reads a Retry-After value (delay seconds or an HTTP date),
-// clamped at maxRetryAfter; 0 when absent, unreadable or past.
-func retryAfter(v string, now time.Time) time.Duration {
+// clamped at maxRetryAfter. A past date is a valid zero wait.
+func retryAfter(v string, now time.Time) (time.Duration, bool) {
 	v = strings.TrimSpace(v)
 	if n, err := strconv.Atoi(v); err == nil {
+		if n < 0 {
+			return 0, false
+		}
 		// Clamped before the multiply so a huge value can't overflow.
-		return time.Duration(min(max(n, 0), int(maxRetryAfter/time.Second))) * time.Second
+		return time.Duration(min(n, int(maxRetryAfter/time.Second))) * time.Second, true
 	}
 	if t, err := http.ParseTime(v); err == nil {
-		return min(max(t.Sub(now), 0), maxRetryAfter)
+		return min(max(t.Sub(now), 0), maxRetryAfter), true
 	}
-	return 0
+	return 0, false
 }
 
 // answerError maps a failed answer to its sentinel or an APIError.

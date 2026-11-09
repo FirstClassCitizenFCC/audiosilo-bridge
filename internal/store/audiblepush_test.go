@@ -350,3 +350,69 @@ func TestAudibleSyncHealth(t *testing.T) {
 		t.Fatalf("ok = %+v", got)
 	}
 }
+
+// A new device discards old sync errors and waits. A new mapping or sync-off
+// clears the error without recording a success, but keeps a wait Audible gave
+// (the device is the same); an ordinary mapping save keeps both.
+func TestAudibleSyncHealthReset(t *testing.T) {
+	for _, change := range []string{"sign in", "remap", "same mapping", "sync off"} {
+		t.Run(change, func(t *testing.T) {
+			ctx := context.Background()
+			db := open(t)
+			at := time.Date(2026, 11, 3, 10, 0, 0, 0, time.UTC)
+			a := AudibleAccount{ID: "abcd1234", Marketplace: "us", ServerID: "srv-1", UserID: 3, LibraryID: 1}
+			if err := db.SignInAudibleAccount(ctx, a, at); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.AudibleSyncOK(ctx, a.ID, at); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.AudibleSyncFailed(ctx, a.ID, "old sync error", at.Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch change {
+			case "sign in":
+				err = db.SignInAudibleAccount(ctx, a, at.Add(time.Minute))
+			case "remap":
+				a.UserID++
+				err = db.MapAudibleAccount(ctx, a)
+			case "same mapping":
+				err = db.MapAudibleAccount(ctx, a)
+			case "sync off":
+				var cleared bool
+				if cleared, err = db.ClearAudibleSyncError(ctx, a.ID); err == nil && !cleared {
+					t.Error("clearing stale sync health reported nothing cleared")
+				}
+				if again, aerr := db.ClearAudibleSyncError(ctx, a.ID); aerr != nil || again {
+					t.Errorf("clearing clear sync health = %v, %v; want false, nil", again, aerr)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := db.GetAudibleAccount(ctx, a.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.SyncAt != Timestamp(at) {
+				t.Errorf("reset changed the last successful sync: %+v", got)
+			}
+			wait := Timestamp(at.Add(time.Hour))
+			switch change {
+			case "same mapping":
+				if got.SyncError != "old sync error" || got.SyncRetryAt != wait {
+					t.Errorf("ordinary save lost sync health: %+v", got)
+				}
+			case "sign in":
+				if got.SyncError != "" || got.SyncRetryAt != "" {
+					t.Errorf("a new device kept stale sync health: %+v", got)
+				}
+			default:
+				if got.SyncError != "" || got.SyncRetryAt != wait {
+					t.Errorf("%s: want the error cleared and Audible's wait kept: %+v", change, got)
+				}
+			}
+		})
+	}
+}

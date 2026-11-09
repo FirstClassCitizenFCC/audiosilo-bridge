@@ -25,12 +25,13 @@ import (
 // fakeServer is the server side of the Bridge routes, enough for the app: a
 // pairing code, heartbeats (recorded), one library with one book, no jobs.
 type fakeServer struct {
-	t       *testing.T
-	root    string
-	mu      sync.Mutex
-	revoked bool
-	beats   []link.Status
-	clients []string
+	t            *testing.T
+	root         string
+	acceptsSetup bool
+	mu           sync.Mutex
+	revoked      bool
+	beats        []link.Status
+	clients      []string
 }
 
 const goodCode = "GOOD-CODE"
@@ -59,7 +60,11 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var st link.Status
 		_ = json.NewDecoder(r.Body).Decode(&st)
 		f.beats = append(f.beats, st)
-		_ = json.NewEncoder(w).Encode(link.StatusReply{ServerTime: "now", Libraries: []link.Library{{ID: 1, Name: "Books", Root: f.root}}})
+		reply := link.StatusReply{ServerTime: "now", Libraries: []link.Library{{ID: 1, Name: "Books", Root: f.root}}}
+		if f.acceptsSetup {
+			reply.Accepts = []string{"setup"}
+		}
+		_ = json.NewEncoder(w).Encode(reply)
 	case r.URL.Path == "/api/v1/bridge/libraries/1/book":
 		_ = json.NewEncoder(w).Encode(link.Book{LibraryID: 1, Path: "A/B", Files: []link.BookFile{{Path: "A/B/1.mp3", Size: 3}}})
 	case r.URL.Path == "/api/v1/bridge/jobs/next":

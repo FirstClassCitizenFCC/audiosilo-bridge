@@ -188,7 +188,7 @@ func TestAudibleWireMirror(t *testing.T) {
 }
 
 // A 429 carries its Retry-After (seconds or an HTTP date) on the APIError, so
-// a caller can wait what the server asked; none is 0.
+// a caller can distinguish an explicit zero wait from a missing/invalid header.
 func TestRateLimitedRetryAfter(t *testing.T) {
 	t.Parallel()
 	var retryAfter string
@@ -204,15 +204,17 @@ func TestRateLimitedRetryAfter(t *testing.T) {
 	for _, tc := range []struct {
 		header   string
 		min, max time.Duration
+		provided bool
 	}{
-		{"7", 7 * time.Second, 7 * time.Second},
-		{"", 0, 0},
-		{"soon", 0, 0},
-		{"-3", 0, 0},
-		{"99999999999999", 24 * time.Hour, 24 * time.Hour},
-		{time.Now().Add(90 * time.Second).UTC().Format(http.TimeFormat), 80 * time.Second, 90 * time.Second},
-		{time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat), 0, 0},
-		{time.Now().AddDate(1, 0, 0).UTC().Format(http.TimeFormat), 24 * time.Hour, 24 * time.Hour},
+		{"7", 7 * time.Second, 7 * time.Second, true},
+		{"0", 0, 0, true},
+		{"", 0, 0, false},
+		{"soon", 0, 0, false},
+		{"-3", 0, 0, false},
+		{"99999999999999", 24 * time.Hour, 24 * time.Hour, true},
+		{time.Now().Add(90 * time.Second).UTC().Format(http.TimeFormat), 80 * time.Second, 90 * time.Second, true},
+		{time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat), 0, 0, true},
+		{time.Now().AddDate(1, 0, 0).UTC().Format(http.TimeFormat), 24 * time.Hour, 24 * time.Hour, true},
 	} {
 		retryAfter = tc.header
 		err := c.Enrich(context.Background(), 1, "A/One", "B000000001")
@@ -222,6 +224,9 @@ func TestRateLimitedRetryAfter(t *testing.T) {
 		}
 		if apiErr.RetryAfter < tc.min || apiErr.RetryAfter > tc.max {
 			t.Errorf("Retry-After %q: wait %v, want %v..%v", tc.header, apiErr.RetryAfter, tc.min, tc.max)
+		}
+		if apiErr.RetryAfterSet != tc.provided {
+			t.Errorf("Retry-After %q: provided = %v, want %v", tc.header, apiErr.RetryAfterSet, tc.provided)
 		}
 	}
 }

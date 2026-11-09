@@ -12,8 +12,8 @@ github.com/hashicorp/golang-lru/v2 v2.0.7 h1:a+bsQ5rvGLjzHuww6tVxozPZFVghXaHOwFs
 github.com/hashicorp/golang-lru/v2 v2.0.7/go.mod h1:QeFd9opnmA6QUJc5vARoKUSoFhyfM2/ZepoAG6RGpeM=
 github.com/kodestar/audiosilo-meta v0.21.0 h1:AbReVGwm1JGFm5lx8Ym/ySYnySCFUfwGoGptNSis/7I=
 github.com/kodestar/audiosilo-meta v0.21.0/go.mod h1:IA3l2dMi6zCzlXmvA9O2DMb+Oc7IlEdntEKABkekEuE=
-github.com/kodestar/audiosilo-server v1.17.5-0.20261103112619-eec93d3f7a0b h1:5oSZcYgTuRHzXY0q7ZdsQprv6MQVTopQABV95lmRyRU=
-github.com/kodestar/audiosilo-server v1.17.5-0.20261103112619-eec93d3f7a0b/go.mod h1:BATfooPnt9tKNGb0lDhglPdSvmW96lGtdqNg0gU9Q+U=
+github.com/kodestar/audiosilo-server v1.17.5-0.20261104211510-3d2b91f999d9 h1:YeuRoI0VxXHwIdTv1CMIZB6QVUkxpxLORUz/Ja8xLhc=
+github.com/kodestar/audiosilo-server v1.17.5-0.20261104211510-3d2b91f999d9/go.mod h1:SHSHYUG8AsEJlIla3ga0kBfgsLacIjlX/u5N4hrxeUc=
 github.com/mattn/go-isatty v0.0.24 h1:tGZZoVgT/KiqK1c8ocVLeDS8BSWMRd47J3Lbz7vsReI=
 github.com/mattn/go-isatty v0.0.24/go.mod h1:nMCL3Zebbrt45jsMDgnfIwz6ydEQApk5oEI3HqDio6A=
 github.com/mmcdole/gofeed v1.5.0 h1:g5uott2G5jDZmB38VHJzlIuvDIBQMurteRgGLpBd3SY=

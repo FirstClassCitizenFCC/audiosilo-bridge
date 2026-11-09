@@ -82,7 +82,9 @@ func scanAudibleAccount(row interface{ Scan(...any) error }) (AudibleAccount, er
 // remapAudible starts the push loop's feed again, and forgets the places
 // waiting to be pushed and the listed titles, when a's row (read in tx) is
 // mapped to another server, person or library than a's: the next audible.sync
-// lists its titles again. A new account has nothing to forget.
+// lists its titles again. A stale sync error clears with the mapping; a wait
+// Audible asked for stays (the device is the same). A new account has nothing
+// to forget.
 func remapAudible(ctx context.Context, tx *sql.Tx, a AudibleAccount) error {
 	var server string
 	var user, library int64
@@ -94,7 +96,8 @@ func remapAudible(ctx context.Context, tx *sql.Tx, a AudibleAccount) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = '', push_from = '' WHERE id = ?`, a.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE audible_accounts SET push_cursor = '', push_from = '',
+		sync_error = '' WHERE id = ?`, a.ID); err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE audible_push SET want_ms = NULL, listed = 0, row_ms = -1, row_seen = ''
@@ -165,7 +168,7 @@ func (db *DB) SignInAudibleAccount(ctx context.Context, a AudibleAccount, at tim
 			customer_hash = excluded.customer_hash, server_id = excluded.server_id, user_id = excluded.user_id,
 			user_name = excluded.user_name, library_id = excluded.library_id, policy = excluded.policy,
 			sync = excluded.sync, last_ok_at = excluded.last_ok_at, device_profile = excluded.device_profile,
-			refused_at = '', last_error = '', refusal_kind = ''`,
+			refused_at = '', last_error = '', refusal_kind = '', sync_error = '', sync_retry_at = ''`,
 		a.ID, a.Label, a.Marketplace, a.CustomerHash, a.ServerID, a.UserID, a.UserName, a.LibraryID, a.Policy, a.Sync, ts, ts,
 		a.DeviceProfile); err != nil {
 		return err
